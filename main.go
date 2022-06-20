@@ -2,13 +2,12 @@ package main
 
 import (
 	"fmt"
-	"net/http"
-
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/routers"
-	"github.com/rocboss/paopao-ce/pkg/util"
+	"net/http"
+	"paopao-ce/global"
+	"paopao-ce/internal/routers"
+	"paopao-ce/pkg/util"
 )
 
 var (
@@ -28,7 +27,7 @@ func main() {
 	}
 
 	util.PrintHelloBanner(fmt.Sprintf("paopao %s (build:%s %s)", version, commitID, buildDate))
-	fmt.Fprintf(color.Output, "PaoPao service listen on %s\n",
+	fmt.Fprintf(color.Output, "美女充电冲冲冲 service listen on %s\n",
 		color.GreenString(fmt.Sprintf("http://%s:%s", global.ServerSetting.HttpIp, global.ServerSetting.HttpPort)),
 	)
 	s.ListenAndServe()

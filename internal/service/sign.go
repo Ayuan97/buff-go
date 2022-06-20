@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/pkg/util"
+	"paopao-ce/global"
+	"paopao-ce/pkg/util"
 )
 
 func GetParamSign(param map[string]interface{}, secretKey string) string {

@@ -1,8 +1,8 @@
 package dao
 
 import (
-	"github.com/rocboss/paopao-ce/pkg/zinc"
 	"gorm.io/gorm"
+	"paopao-ce/pkg/zinc"
 )
 
 type Dao struct {

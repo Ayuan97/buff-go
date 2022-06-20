@@ -3,8 +3,8 @@ package global
 import (
 	"sync"
 
-	"github.com/rocboss/paopao-ce/pkg/setting"
 	"github.com/sirupsen/logrus"
+	"paopao-ce/pkg/setting"
 )
 
 var (

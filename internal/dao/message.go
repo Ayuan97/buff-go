@@ -1,6 +1,6 @@
 package dao
 
-import "github.com/rocboss/paopao-ce/internal/model"
+import "paopao-ce/internal/model"
 
 func (d *Dao) CreateMessage(msg *model.Message) (*model.Message, error) {
 	return msg.Create(d.engine)

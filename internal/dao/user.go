@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"paopao-ce/internal/model"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
+	"paopao-ce/global"
+
 	"gopkg.in/resty.v1"
 )
 

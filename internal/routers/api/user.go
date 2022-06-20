@@ -2,18 +2,17 @@ package api
 
 import (
 	"fmt"
+	"github.com/gin-gonic/gin"
+	"github.com/smartwalle/alipay/v3"
 	"net/http"
+	"paopao-ce/global"
+	"paopao-ce/internal/model"
+	"paopao-ce/internal/service"
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/convert"
+	"paopao-ce/pkg/errcode"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/internal/service"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/convert"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
-	"github.com/smartwalle/alipay/v3"
 )
 
 // Login 用户登录

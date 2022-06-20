@@ -1,7 +1,7 @@
 package dao
 
 import (
-	"github.com/rocboss/paopao-ce/pkg/zinc"
+	"paopao-ce/pkg/zinc"
 )
 
 type SearchType string

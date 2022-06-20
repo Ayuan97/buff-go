@@ -5,18 +5,19 @@ import (
 	"encoding/base64"
 	"image/color"
 	"image/png"
+	"paopao-ce/internal/model"
+	"paopao-ce/internal/service"
 	"time"
 
 	"github.com/afocus/captcha"
 	"github.com/gin-gonic/gin"
 	"github.com/gofrs/uuid"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/internal/service"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/convert"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
-	"github.com/rocboss/paopao-ce/pkg/util"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/convert"
+	"paopao-ce/pkg/errcode"
+	"paopao-ce/pkg/util"
 )
 
 const MAX_PHONE_CAPTCHA = 10

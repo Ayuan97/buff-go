@@ -6,11 +6,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/pkg/setting"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/resty.v1"
+	"paopao-ce/global"
+	"paopao-ce/pkg/setting"
 )
 
 type ZincLogIndex struct {

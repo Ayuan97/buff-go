@@ -2,12 +2,13 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/internal/service"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/convert"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
+	"paopao-ce/global"
+	"paopao-ce/internal/model"
+	"paopao-ce/internal/service"
+
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/convert"
+	"paopao-ce/pkg/errcode"
 )
 
 func GetPostComments(c *gin.Context) {

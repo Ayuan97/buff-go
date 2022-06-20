@@ -1,6 +1,6 @@
 package dao
 
-import "github.com/rocboss/paopao-ce/internal/model"
+import "paopao-ce/internal/model"
 
 func (d *Dao) CreateTag(tag *model.Tag) (*model.Tag, error) {
 	t, err := tag.Get(d.engine)

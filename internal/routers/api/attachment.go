@@ -3,18 +3,19 @@ package api
 import (
 	"image"
 	"net/url"
+	"paopao-ce/internal/model"
+	"paopao-ce/internal/service"
 	"strings"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/disintegration/imaging"
 	"github.com/gin-gonic/gin"
 	"github.com/gofrs/uuid"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/internal/service"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/convert"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/convert"
+	"paopao-ce/pkg/errcode"
 )
 
 func GeneratePath(s string) string {
@@ -112,7 +113,7 @@ func UploadAttachment(c *gin.Context) {
 		return
 	}
 
-	bucket, err := client.Bucket("paopao-assets")
+	bucket, err := client.Bucket("ayuan-223")
 	if err != nil {
 		global.Logger.Errorf("client.Bucket err: %v", err)
 		response.ToErrorResponse(errcode.FileUploadFailed)
@@ -271,7 +272,7 @@ func DownloadAttachment(c *gin.Context) {
 		return
 	}
 
-	bucket, err := client.Bucket("paopao-assets")
+	bucket, err := client.Bucket("ayuan-223")
 	if err != nil {
 		global.Logger.Errorf("client.Bucket err: %v", err)
 		response.ToErrorResponse(errcode.DownloadReqError)
