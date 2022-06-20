@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	"paopao-ce/pkg/setting"
+	"qingshanyoufeng/pkg/setting"
 )
 
 var (

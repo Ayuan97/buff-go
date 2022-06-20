@@ -2,8 +2,8 @@ package app
 
 import (
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
-	"paopao-ce/pkg/convert"
+	"qingshanyoufeng/global"
+	"qingshanyoufeng/pkg/convert"
 )
 
 func GetPage(c *gin.Context) int {

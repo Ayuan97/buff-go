@@ -2,14 +2,14 @@ package service
 
 import (
 	"fmt"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/convert"
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/convert"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 // MAX_WHISPER_NUM_DAILY 当日单用户私信总数限制（TODO 配置化、积分兑换等）

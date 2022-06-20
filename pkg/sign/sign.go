@@ -7,7 +7,7 @@ import (
 
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
 	"google.golang.org/protobuf/proto"
-	"paopao-ce/pkg/crypto"
+	"qingshanyoufeng/pkg/crypto"
 )
 
 // SignTransaction 签名交易

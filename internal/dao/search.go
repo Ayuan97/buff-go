@@ -1,7 +1,7 @@
 package dao
 
 import (
-	"paopao-ce/pkg/zinc"
+	"qingshanyoufeng/pkg/zinc"
 )
 
 type SearchType string

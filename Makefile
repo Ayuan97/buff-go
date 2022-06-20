@@ -5,8 +5,8 @@ SHA_SHORT := $(shell git rev-parse --short HEAD)
 all: fmt build
 build:
 	@go mod download
-	@echo Build paopao-ce
-	bash build.sh paopao-ce
+	@echo Build qingshanyoufeng
+	bash build.sh qingshanyoufeng
 run:
 	@go run -ldflags "-X 'main.version=${BUILD_VERSION}' -X 'main.buildDate=${BUILD_DATE}' -X 'main.commitID=${SHA_SHORT}'" .
 clean:

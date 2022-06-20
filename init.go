@@ -2,17 +2,17 @@ package main
 
 import (
 	"log"
-	"paopao-ce/internal/model"
-	"paopao-ce/internal/service"
+	"qingshanyoufeng/internal/model"
+	"qingshanyoufeng/internal/service"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/logger"
-	"paopao-ce/pkg/setting"
-	"paopao-ce/pkg/zinc"
+	"qingshanyoufeng/pkg/logger"
+	"qingshanyoufeng/pkg/setting"
+	"qingshanyoufeng/pkg/zinc"
 )
 
 func init() {

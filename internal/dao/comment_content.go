@@ -1,6 +1,6 @@
 package dao
 
-import "paopao-ce/internal/model"
+import "qingshanyoufeng/internal/model"
 
 func (d *Dao) GetCommentContentsByIDs(ids []int64) ([]*model.CommentContent, error) {
 	commentContent := &model.CommentContent{}

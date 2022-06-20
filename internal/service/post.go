@@ -4,16 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"paopao-ce/internal/dao"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/dao"
+	"qingshanyoufeng/internal/model"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/util"
-	"paopao-ce/pkg/zinc"
+	"qingshanyoufeng/pkg/util"
+	"qingshanyoufeng/pkg/zinc"
 )
 
 type TagType string

@@ -1,6 +1,6 @@
 package dao
 
-import "paopao-ce/internal/model"
+import "qingshanyoufeng/internal/model"
 
 func (d *Dao) CreateTag(tag *model.Tag) (*model.Tag, error) {
 	t, err := tag.Get(d.engine)

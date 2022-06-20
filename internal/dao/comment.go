@@ -1,6 +1,6 @@
 package dao
 
-import "paopao-ce/internal/model"
+import "qingshanyoufeng/internal/model"
 
 func (d *Dao) GetComments(conditions *model.ConditionsT, offset, limit int) ([]*model.Comment, error) {
 	return (&model.Comment{}).List(d.engine, conditions, offset, limit)

@@ -1,6 +1,6 @@
 package dao
 
-import "paopao-ce/internal/model"
+import "qingshanyoufeng/internal/model"
 
 func (d *Dao) CreateMessage(msg *model.Message) (*model.Message, error) {
 	return msg.Create(d.engine)

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"paopao-ce/global"
-	"paopao-ce/pkg/util"
+	"qingshanyoufeng/global"
+	"qingshanyoufeng/pkg/util"
 )
 
 func GetParamSign(param map[string]interface{}, secretKey string) string {

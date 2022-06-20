@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"strconv"
 	"strings"
 	"time"
 
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
 	"gopkg.in/resty.v1"
 )

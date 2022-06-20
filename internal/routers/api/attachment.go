@@ -3,19 +3,19 @@ package api
 import (
 	"image"
 	"net/url"
-	"paopao-ce/internal/model"
-	"paopao-ce/internal/service"
+	"qingshanyoufeng/internal/model"
+	"qingshanyoufeng/internal/service"
 	"strings"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/disintegration/imaging"
 	"github.com/gin-gonic/gin"
 	"github.com/gofrs/uuid"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/app"
-	"paopao-ce/pkg/convert"
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/app"
+	"qingshanyoufeng/pkg/convert"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 func GeneratePath(s string) string {

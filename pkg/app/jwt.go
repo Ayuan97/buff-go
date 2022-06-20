@@ -1,11 +1,11 @@
 package app
 
 import (
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 )
 
 type Claims struct {

@@ -2,10 +2,10 @@ package middleware
 
 import (
 	"github.com/gin-gonic/gin"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 
-	"paopao-ce/pkg/app"
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/app"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 func Priv() gin.HandlerFunc {

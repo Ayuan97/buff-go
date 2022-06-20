@@ -2,8 +2,8 @@ package routers
 
 import (
 	"net/http"
-	"paopao-ce/internal/middleware"
-	"paopao-ce/internal/routers/api"
+	"qingshanyoufeng/internal/middleware"
+	"qingshanyoufeng/internal/routers/api"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"

@@ -10,8 +10,8 @@ import (
 	"gorm.io/gorm/schema"
 	"gorm.io/plugin/dbresolver"
 	"gorm.io/plugin/soft_delete"
-	"paopao-ce/global"
-	"paopao-ce/pkg/setting"
+	"qingshanyoufeng/global"
+	"qingshanyoufeng/pkg/setting"
 )
 
 // 公共Model

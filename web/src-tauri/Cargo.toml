@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Paopao App"
 authors = ["Rocboss"]
 license = "MIT License"
-repository = "https://github.com/rocboss/paopao-ce"
+repository = "https://github.com/rocboss/qingshanyoufeng"
 edition = "2021"
 rust-version = "1.57"
 

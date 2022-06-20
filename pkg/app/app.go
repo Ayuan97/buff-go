@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/gin-gonic/gin"
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 type Response struct {

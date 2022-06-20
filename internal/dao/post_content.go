@@ -1,6 +1,6 @@
 package dao
 
-import "paopao-ce/internal/model"
+import "qingshanyoufeng/internal/model"
 
 func (d *Dao) CreatePostContent(content *model.PostContent) (*model.PostContent, error) {
 	return content.Create(d.engine)

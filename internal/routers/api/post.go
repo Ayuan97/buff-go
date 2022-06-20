@@ -2,14 +2,14 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
-	"paopao-ce/internal/dao"
-	"paopao-ce/internal/model"
-	"paopao-ce/internal/service"
+	"qingshanyoufeng/global"
+	"qingshanyoufeng/internal/dao"
+	"qingshanyoufeng/internal/model"
+	"qingshanyoufeng/internal/service"
 
-	"paopao-ce/pkg/app"
-	"paopao-ce/pkg/convert"
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/app"
+	"qingshanyoufeng/pkg/convert"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 func GetPostList(c *gin.Context) {

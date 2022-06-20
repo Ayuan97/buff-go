@@ -1,7 +1,7 @@
 package dao
 
 import (
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"time"
 )
 

@@ -1,15 +1,15 @@
 package service
 
 import (
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/errcode"
-	"paopao-ce/pkg/util"
+	"qingshanyoufeng/pkg/errcode"
+	"qingshanyoufeng/pkg/util"
 )
 
 type CommentCreationReq struct {

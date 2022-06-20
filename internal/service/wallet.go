@@ -1,13 +1,13 @@
 package service
 
 import (
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/errcode"
+	"qingshanyoufeng/pkg/errcode"
 )
 
 type RechargeReq struct {

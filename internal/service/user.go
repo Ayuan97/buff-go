@@ -2,7 +2,7 @@ package service
 
 import (
 	"fmt"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/internal/model"
 	"regexp"
 	"strings"
 	"time"
@@ -10,11 +10,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gofrs/uuid"
-	"paopao-ce/global"
+	"qingshanyoufeng/global"
 
-	"paopao-ce/pkg/convert"
-	"paopao-ce/pkg/errcode"
-	"paopao-ce/pkg/util"
+	"qingshanyoufeng/pkg/convert"
+	"qingshanyoufeng/pkg/errcode"
+	"qingshanyoufeng/pkg/util"
 )
 
 const MAX_CAPTCHA_TIMES = 2

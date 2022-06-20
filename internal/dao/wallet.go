@@ -1,8 +1,8 @@
 package dao
 
 import (
-	"paopao-ce/global"
-	"paopao-ce/internal/model"
+	"qingshanyoufeng/global"
+	"qingshanyoufeng/internal/model"
 
 	"gorm.io/gorm"
 )

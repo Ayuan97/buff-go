@@ -2,7 +2,7 @@ package dao
 
 import (
 	"gorm.io/gorm"
-	"paopao-ce/pkg/zinc"
+	"qingshanyoufeng/pkg/zinc"
 )
 
 type Dao struct {

@@ -2,8 +2,8 @@ package service
 
 import (
 	"gorm.io/gorm"
-	"paopao-ce/internal/dao"
-	"paopao-ce/pkg/zinc"
+	"qingshanyoufeng/internal/dao"
+	"qingshanyoufeng/pkg/zinc"
 )
 
 var (
