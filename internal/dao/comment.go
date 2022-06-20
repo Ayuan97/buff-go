@@ -1,6 +1,6 @@
 package dao
 
-import "github.com/rocboss/paopao-ce/internal/model"
+import "paopao-ce/internal/model"
 
 func (d *Dao) GetComments(conditions *model.ConditionsT, offset, limit int) ([]*model.Comment, error) {
 	return (&model.Comment{}).List(d.engine, conditions, offset, limit)

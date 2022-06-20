@@ -2,11 +2,11 @@ package routers
 
 import (
 	"net/http"
+	"paopao-ce/internal/middleware"
+	"paopao-ce/internal/routers/api"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/internal/middleware"
-	"github.com/rocboss/paopao-ce/internal/routers/api"
 )
 
 func NewRouter() *gin.Engine {

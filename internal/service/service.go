@@ -1,9 +1,9 @@
 package service
 
 import (
-	"github.com/rocboss/paopao-ce/internal/dao"
-	"github.com/rocboss/paopao-ce/pkg/zinc"
 	"gorm.io/gorm"
+	"paopao-ce/internal/dao"
+	"paopao-ce/pkg/zinc"
 )
 
 var (

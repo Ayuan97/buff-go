@@ -1,14 +1,15 @@
 package service
 
 import (
+	"paopao-ce/internal/model"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
-	"github.com/rocboss/paopao-ce/pkg/util"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/errcode"
+	"paopao-ce/pkg/util"
 )
 
 type CommentCreationReq struct {

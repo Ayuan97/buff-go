@@ -1,8 +1,9 @@
 package dao
 
 import (
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
+	"paopao-ce/global"
+	"paopao-ce/internal/model"
+
 	"gorm.io/gorm"
 )
 

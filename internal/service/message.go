@@ -2,13 +2,14 @@ package service
 
 import (
 	"fmt"
+	"paopao-ce/internal/model"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/pkg/convert"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/convert"
+	"paopao-ce/pkg/errcode"
 )
 
 // MAX_WHISPER_NUM_DAILY 当日单用户私信总数限制（TODO 配置化、积分兑换等）

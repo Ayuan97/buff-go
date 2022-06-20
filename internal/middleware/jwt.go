@@ -1,14 +1,15 @@
 package middleware
 
 import (
+	"paopao-ce/internal/model"
 	"strings"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/errcode"
 )
 
 func JWT() gin.HandlerFunc {

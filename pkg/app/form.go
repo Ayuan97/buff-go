@@ -42,3 +42,17 @@ func BindAndValid(c *gin.Context, v interface{}) (bool, ValidErrors) {
 
 	return true, nil
 }
+
+func BindAndValidQuery(c *gin.Context, v interface{}) (bool, ValidErrors) {
+	var errs ValidErrors
+	err := c.ShouldBindHeader(v)
+	if err != nil {
+		errs = append(errs, &ValidError{
+			Message: err.Error(),
+		})
+
+		return false, errs
+	}
+
+	return true, nil
+}

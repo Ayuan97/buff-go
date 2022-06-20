@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"paopao-ce/internal/dao"
+	"paopao-ce/internal/model"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/dao"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/pkg/util"
-	"github.com/rocboss/paopao-ce/pkg/zinc"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/util"
+	"paopao-ce/pkg/zinc"
 )
 
 type TagType string

@@ -1,9 +1,8 @@
 package dao
 
 import (
+	"paopao-ce/internal/model"
 	"time"
-
-	"github.com/rocboss/paopao-ce/internal/model"
 )
 
 func (d *Dao) CreatePost(post *model.Post) (*model.Post, error) {

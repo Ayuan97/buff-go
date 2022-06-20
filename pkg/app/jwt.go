@@ -1,11 +1,11 @@
 package app
 
 import (
+	"paopao-ce/internal/model"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
+	"paopao-ce/global"
 )
 
 type Claims struct {

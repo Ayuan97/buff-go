@@ -19,7 +19,7 @@ Server: # 服务设置
   ReadTimeout: 60
   WriteTimeout: 60
 Log: # 日志
-  LogType: zinc # 可选file或zinc
+  LogType: file # 可选file或zinc
   LogFileSavePath: storage/logs
   LogFileName: app
   LogFileExt: .log
@@ -37,11 +37,11 @@ Search: # 搜索配置
   ZincUser: admin
   ZincPassword: admin
 Storage: # 阿里云OSS存储配置
-  AliossAccessKeyID: 
-  AliossAccessKeySecret: 
-  AliossEndpoint: 
-  AliossBucket: 
-  AliossDomain: 
+  AliossAccessKeyID: LTAI5tLY2w7PZ1rfC9dDBesQ
+  AliossAccessKeySecret: b5fRiB4kn2RaGQ7dJEHzO2InkRojBS
+  AliossEndpoint: oss-cn-hangzhou.aliyuncs.com
+  AliossBucket: ayuan-223.oss-cn-hangzhou.aliyuncs.com
+  AliossDomain: ayuan-223.oss-cn-hangzhou.aliyuncs.com
 Database: # 数据库
   DBType: mysql
   Username: root # 填写你的数据库账号

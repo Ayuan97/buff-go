@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/rocboss/paopao-ce/pkg/setting"
+	"paopao-ce/pkg/setting"
 )
 
 type ZincClient struct {

@@ -2,9 +2,10 @@ package middleware
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/pkg/app"
-	"github.com/rocboss/paopao-ce/pkg/errcode"
+	"paopao-ce/internal/model"
+
+	"paopao-ce/pkg/app"
+	"paopao-ce/pkg/errcode"
 )
 
 func Priv() gin.HandlerFunc {

@@ -2,16 +2,17 @@ package main
 
 import (
 	"log"
+	"paopao-ce/internal/model"
+	"paopao-ce/internal/service"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/internal/model"
-	"github.com/rocboss/paopao-ce/internal/service"
-	"github.com/rocboss/paopao-ce/pkg/logger"
-	"github.com/rocboss/paopao-ce/pkg/setting"
-	"github.com/rocboss/paopao-ce/pkg/zinc"
+	"paopao-ce/global"
+
+	"paopao-ce/pkg/logger"
+	"paopao-ce/pkg/setting"
+	"paopao-ce/pkg/zinc"
 )
 
 func init() {

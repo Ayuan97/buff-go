@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rocboss/paopao-ce/global"
-	"github.com/rocboss/paopao-ce/pkg/setting"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 	"gorm.io/plugin/dbresolver"
 	"gorm.io/plugin/soft_delete"
+	"paopao-ce/global"
+	"paopao-ce/pkg/setting"
 )
 
 // 公共Model
