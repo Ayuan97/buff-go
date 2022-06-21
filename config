@@ -19,23 +19,27 @@ Server: # 服务设置
   ReadTimeout: 60
   WriteTimeout: 60
 Log: # 日志
-  LogType: file # 可选file或zinc
+  LogType: zinc # 可选file或zinc
   LogFileSavePath: storage/logs
   LogFileName: app
   LogFileExt: .log
   LogZincHost: http://127.0.0.1:4080/es/_bulk
-  LogZincIndex: paopao-log
+  LogZincIndex: qingshan-log
   LogZincUser: admin
-  LogZincPassword: admin
+  LogZincPassword: Complexpass#123
+    #命令行执行 https://docs.zincsearch.com/quickstart/#installation
+    #ZINC_FIRST_ADMIN_USER=admin ZINC_FIRST_ADMIN_PASSWORD=Complexpass#123 zinc
 JWT: # 鉴权加密
   Secret: 18a6413dc4fe394c66345ebe501b2f26
   Issuer: paopao-api
   Expire: 86400
 Search: # 搜索配置
   ZincHost: http://127.0.0.1:4080
-  ZincIndex: paopao-data
+  ZincIndex: qingshan-data
   ZincUser: admin
-  ZincPassword: admin
+  ZincPassword: Complexpass#123
+  #命令行执行 https://docs.zincsearch.com/quickstart/#installation
+  #ZINC_FIRST_ADMIN_USER=admin ZINC_FIRST_ADMIN_PASSWORD=Complexpass#123 zinc
 Storage: # 阿里云OSS存储配置
   AliossAccessKeyID: LTAI5tLY2w7PZ1rfC9dDBesQ
   AliossAccessKeySecret: b5fRiB4kn2RaGQ7dJEHzO2InkRojBS

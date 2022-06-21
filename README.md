@@ -4,7 +4,7 @@
 
     ```sh
     go mod download
-    go build -o qingshang-api .
+    go build -o qingshan-api .
     ```
 
 启动后端
