@@ -1,11 +1,11 @@
 package middleware
 
 import (
+	"Reptile/internal/model"
 	"github.com/gin-gonic/gin"
-	"qingshanyoufeng/internal/model"
 
-	"qingshanyoufeng/pkg/app"
-	"qingshanyoufeng/pkg/errcode"
+	"Reptile/pkg/app"
+	"Reptile/pkg/errcode"
 )
 
 func Priv() gin.HandlerFunc {

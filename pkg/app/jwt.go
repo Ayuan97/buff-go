@@ -1,11 +1,11 @@
 package app
 
 import (
-	"qingshanyoufeng/internal/model"
+	"Reptile/internal/model"
 	"time"
 
+	"Reptile/global"
 	"github.com/dgrijalva/jwt-go"
-	"qingshanyoufeng/global"
 )
 
 type Claims struct {

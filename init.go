@@ -1,18 +1,14 @@
 package main
 
 import (
-	"log"
-	"qingshanyoufeng/internal/model"
-	"qingshanyoufeng/internal/service"
-	"sync"
-	"time"
-
+	"Reptile/global"
+	"Reptile/internal/model"
+	"Reptile/internal/service"
 	"github.com/go-redis/redis/v8"
-	"qingshanyoufeng/global"
+	"log"
 
-	"qingshanyoufeng/pkg/logger"
-	"qingshanyoufeng/pkg/setting"
-	"qingshanyoufeng/pkg/zinc"
+	"Reptile/pkg/logger"
+	"Reptile/pkg/setting"
 )
 
 func init() {
@@ -28,8 +24,7 @@ func init() {
 	if err != nil {
 		log.Fatalf("init.setupDBEngine err: %v", err)
 	}
-	client := zinc.NewClient(global.SearchSetting)
-	service.Initialize(global.DBEngine, client)
+	service.Initialize(global.DBEngine)
 }
 
 func setupSetting() error {
@@ -37,16 +32,7 @@ func setupSetting() error {
 	if err != nil {
 		return err
 	}
-
 	err = setting.ReadSection("Server", &global.ServerSetting)
-	if err != nil {
-		return err
-	}
-	err = setting.ReadSection("App", &global.AppSetting)
-	if err != nil {
-		return err
-	}
-	err = setting.ReadSection("Runtime", &global.RuntimeSetting)
 	if err != nil {
 		return err
 	}
@@ -58,27 +44,10 @@ func setupSetting() error {
 	if err != nil {
 		return err
 	}
-	err = setting.ReadSection("Search", &global.SearchSetting)
-	if err != nil {
-		return err
-	}
 	err = setting.ReadSection("Redis", &global.RedisSetting)
 	if err != nil {
 		return err
 	}
-	err = setting.ReadSection("JWT", &global.JWTSetting)
-	if err != nil {
-		return err
-	}
-	err = setting.ReadSection("Storage", &global.AliossSetting)
-	if err != nil {
-		return err
-	}
-
-	global.JWTSetting.Expire *= time.Second
-	global.ServerSetting.ReadTimeout *= time.Second
-	global.ServerSetting.WriteTimeout *= time.Second
-	global.Mutex = &sync.Mutex{}
 	return nil
 }
 

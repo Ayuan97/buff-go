@@ -1,13 +1,13 @@
 package main
 
 import (
+	"Reptile/global"
+	"Reptile/internal/routers"
+	"Reptile/pkg/util"
 	"fmt"
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"net/http"
-	"qingshanyoufeng/global"
-	"qingshanyoufeng/internal/routers"
-	"qingshanyoufeng/pkg/util"
 )
 
 var (
@@ -16,7 +16,6 @@ var (
 
 func main() {
 	gin.SetMode(global.ServerSetting.RunMode)
-
 	router := routers.NewRouter()
 	s := &http.Server{
 		Addr:           global.ServerSetting.HttpIp + ":" + global.ServerSetting.HttpPort,
@@ -27,7 +26,7 @@ func main() {
 	}
 
 	util.PrintHelloBanner(fmt.Sprintf("paopao %s (build:%s %s)", version, commitID, buildDate))
-	fmt.Fprintf(color.Output, "美女充电冲冲冲 service listen on %s\n",
+	fmt.Fprintf(color.Output, "小趴菜冲啊 service listen on %s\n",
 		color.GreenString(fmt.Sprintf("http://%s:%s", global.ServerSetting.HttpIp, global.ServerSetting.HttpPort)),
 	)
 	s.ListenAndServe()

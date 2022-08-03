@@ -1,9 +1,9 @@
 package app
 
 import (
+	"Reptile/global"
+	"Reptile/pkg/convert"
 	"github.com/gin-gonic/gin"
-	"qingshanyoufeng/global"
-	"qingshanyoufeng/pkg/convert"
 )
 
 func GetPage(c *gin.Context) int {

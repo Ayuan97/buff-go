@@ -36,30 +36,11 @@ type ServerSettingS struct {
 }
 
 type AppSettingS struct {
-	BarkToken             string
-	MaxCommentCount       int64
-	AttachmentIncomeRate  float64
-	DefaultContextTimeout time.Duration
-	DefaultPageSize       int
-	MaxPageSize           int
-	IsShastaTestnet       bool
-	TronApiKeys           []string
-	SmsJuheKey            string
-	SmsJuheTplID          string
-	SmsJuheTplVal         string
-	AlipayAppID           string
-	AlipayPrivateKey      string
+	BarkToken string
 }
 
 type RuntimeSettingS struct {
 	DisablePhoneVerify bool
-}
-
-type SearchSettingS struct {
-	ZincHost     string
-	ZincIndex    string
-	ZincUser     string
-	ZincPassword string
 }
 
 type DatabaseSettingS struct {

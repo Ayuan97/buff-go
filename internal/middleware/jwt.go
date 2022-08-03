@@ -1,15 +1,15 @@
 package middleware
 
 import (
-	"qingshanyoufeng/internal/model"
+	"Reptile/internal/model"
 	"strings"
 
+	"Reptile/global"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
-	"qingshanyoufeng/global"
 
-	"qingshanyoufeng/pkg/app"
-	"qingshanyoufeng/pkg/errcode"
+	"Reptile/pkg/app"
+	"Reptile/pkg/errcode"
 )
 
 func JWT() gin.HandlerFunc {

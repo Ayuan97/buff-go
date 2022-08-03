@@ -1,9 +1,9 @@
 # build app
 FROM golang AS build-env
 
-ADD . /qingshanyoufeng
+ADD . /Reptile
 
-WORKDIR /qingshanyoufeng
+WORKDIR /Reptile
 
 RUN CGO_ENABLED=0 go build .
 
@@ -14,13 +14,13 @@ ENV TZ=Asia/Shanghai
 
 RUN apk update && apk add --no-cache ca-certificates && update-ca-certificates
 
-COPY --from=build-env /qingshanyoufeng/qingshanyoufeng /usr/bin/qingshanyoufeng
-COPY --from=build-env /qingshanyoufeng/assets/comic.ttf /assets/comic.ttf
-COPY --from=build-env /qingshanyoufeng/configs /configs
+COPY --from=build-env /Reptile/Reptile /usr/bin/Reptile
+COPY --from=build-env /Reptile/assets/comic.ttf /assets/comic.ttf
+COPY --from=build-env /Reptile/configs /configs
 
 EXPOSE 8000
 
-CMD ["qingshanyoufeng"]
+CMD ["Reptile"]
 
 # HEALTHCHECK
-HEALTHCHECK --interval=5s --timeout=3s  --retries=3  CMD ps -ef | grep qingshanyoufeng || exit 1
+HEALTHCHECK --interval=5s --timeout=3s  --retries=3  CMD ps -ef | grep Reptile || exit 1

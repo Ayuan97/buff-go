@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"qingshanyoufeng/pkg/setting"
 )
 
 type ZincClient struct {
@@ -68,17 +67,6 @@ type HitItem struct {
 	Score     float64     `json:"_score"`
 	Timestamp time.Time   `json:"@timestamp"`
 	Source    interface{} `json:"_source"`
-}
-
-// NewClient 获取ZincClient新实例
-func NewClient(conf *setting.SearchSettingS) *ZincClient {
-	return &ZincClient{
-		ZincClientConfig: &ZincClientConfig{
-			ZincHost:     conf.ZincHost,
-			ZincUser:     conf.ZincUser,
-			ZincPassword: conf.ZincPassword,
-		},
-	}
 }
 
 // 创建索引
