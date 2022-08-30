@@ -1,7 +1,7 @@
 package dao
 
 import (
-	"Reptile/internal/model"
+	"buff-go/internal/model"
 )
 
 type JuhePhoneCaptchaRsp struct {

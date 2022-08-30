@@ -1,7 +1,7 @@
 package global
 
 import (
-	"Reptile/pkg/setting"
+	"buff-go/pkg/setting"
 	"github.com/sirupsen/logrus"
 	"sync"
 )

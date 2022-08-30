@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"Reptile/global"
-	"Reptile/pkg/setting"
+	"buff-go/global"
+	"buff-go/pkg/setting"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"

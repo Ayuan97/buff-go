@@ -1,7 +1,7 @@
 package service
 
 import (
-	"Reptile/internal/dao"
+	"buff-go/internal/dao"
 	"gorm.io/gorm"
 )
 

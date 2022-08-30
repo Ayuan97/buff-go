@@ -1,8 +1,8 @@
 package service
 
 import (
-	"Reptile/internal/model"
-	"Reptile/pkg/util"
+	"buff-go/internal/model"
+	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
 	"time"

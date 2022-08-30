@@ -1,6 +1,6 @@
 package util
 
-import "Reptile/pkg/util/iploc"
+import "buff-go/pkg/util/iploc"
 
 func GetIPLoc(ip string) string {
 	country, _ := iploc.Find(ip)

@@ -1,9 +1,9 @@
 package main
 
 import (
-	"Reptile/global"
-	"Reptile/internal/routers"
-	"Reptile/pkg/util"
+	"buff-go/global"
+	"buff-go/internal/routers"
+	"buff-go/pkg/util"
 	"fmt"
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"

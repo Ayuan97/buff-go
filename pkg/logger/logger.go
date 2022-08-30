@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"Reptile/global"
-	"Reptile/pkg/setting"
+	"buff-go/global"
+	"buff-go/pkg/setting"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/resty.v1"

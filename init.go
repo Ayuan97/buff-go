@@ -1,14 +1,14 @@
 package main
 
 import (
-	"Reptile/global"
-	"Reptile/internal/model"
-	"Reptile/internal/service"
+	"buff-go/global"
+	"buff-go/internal/model"
+	"buff-go/internal/service"
 	"github.com/go-redis/redis/v8"
 	"log"
 
-	"Reptile/pkg/logger"
-	"Reptile/pkg/setting"
+	"buff-go/pkg/logger"
+	"buff-go/pkg/setting"
 )
 
 func init() {

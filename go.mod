@@ -1,4 +1,4 @@
-module Reptile
+module buff-go
 
 go 1.17
 
