@@ -25,7 +25,7 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	util.PrintHelloBanner(fmt.Sprintf("paopao %s (build:%s %s)", version, commitID, buildDate))
+	util.PrintHelloBanner(fmt.Sprintf("buff-go %s (build:%s %s)", version, commitID, buildDate))
 	fmt.Fprintf(color.Output, "小趴菜冲啊 service listen on %s\n",
 		color.GreenString(fmt.Sprintf("http://%s:%s", global.ServerSetting.HttpIp, global.ServerSetting.HttpPort)),
 	)

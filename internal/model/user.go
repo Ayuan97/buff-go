@@ -4,7 +4,6 @@ import "gorm.io/gorm"
 
 const (
 	UserStatusNormal int = iota + 1
-	UserStatusClosed
 )
 
 type User struct {

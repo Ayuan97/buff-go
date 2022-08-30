@@ -43,7 +43,7 @@ Database: # 数据库
   Password: root # 填写你的数据库密码
   Host: 127.0.0.1:3306
   DBName: buff
-  TablePrefix: p_
+  TablePrefix: bf_
   Charset: utf8mb4
   ParseTime: True
   LogLevel: 2

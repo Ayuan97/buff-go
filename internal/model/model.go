@@ -11,16 +11,13 @@ import (
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 	"gorm.io/plugin/dbresolver"
-	"gorm.io/plugin/soft_delete"
 )
 
 // 公共Model
 type Model struct {
-	ID         int64                 `gorm:"primary_key" json:"id"`
-	CreatedOn  int64                 `json:"created_on"`
-	ModifiedOn int64                 `json:"modified_on"`
-	DeletedOn  int64                 `json:"deleted_on"`
-	IsDel      soft_delete.DeletedAt `gorm:"softDelete:flag" json:"is_del"`
+	ID        int64 `gorm:"primary_key" json:"id"`
+	CreatedAt int64 `json:"created_at"`
+	UpdatedAt int64 `json:"updated_at"`
 }
 
 type ConditionsT map[string]interface{}
@@ -67,14 +64,14 @@ func NewDBEngine(databaseSetting *setting.DatabaseSettingS) (*gorm.DB, error) {
 func (m *Model) BeforeCreate(tx *gorm.DB) (err error) {
 	nowTime := time.Now().Unix()
 
-	tx.Statement.SetColumn("created_on", nowTime)
-	tx.Statement.SetColumn("modified_on", nowTime)
+	tx.Statement.SetColumn("created_at", nowTime)
+	tx.Statement.SetColumn("updated_at", nowTime)
 	return
 }
 
 func (m *Model) BeforeUpdate(tx *gorm.DB) (err error) {
-	if !tx.Statement.Changed("modified_on") {
-		tx.Statement.SetColumn("modified_on", time.Now().Unix())
+	if !tx.Statement.Changed("created_at") {
+		tx.Statement.SetColumn("updated_at", time.Now().Unix())
 	}
 
 	return
