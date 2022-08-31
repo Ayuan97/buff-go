@@ -68,6 +68,7 @@ type RedisSettingS struct {
 	Host     string
 	Password string
 	DB       int
+	Prefix   string
 }
 
 type JWTSettingS struct {

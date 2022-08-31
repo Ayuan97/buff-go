@@ -5,13 +5,6 @@ App: # APP基础设置项
   DefaultContextTimeout: 60
   DefaultPageSize: 10
   MaxPageSize: 100
-  SmsJuheKey:
-  SmsJuheTplID:
-  SmsJuheTplVal: "#code#=%d&#m#=%d"
-  AlipayAppID:
-  AlipayPrivateKey:
-Runtime: # App运行时功能调节
-  DisablePhoneVerify: False # 禁止绑定手机号码时验证短信验证码，为true时任意验证码都可以通过验证
 Server: # 服务设置
   RunMode: debug
   HttpIp: 0.0.0.0
@@ -23,20 +16,6 @@ Log: # 日志
   LogFileSavePath: storage/logs
   LogFileName: app
   LogFileExt: .log
-  LogZincHost: http://127.0.0.1:4080/es/_bulk
-  LogZincIndex: paopao-log
-  LogZincUser: admin
-  LogZincPassword: admin
-JWT: # 鉴权加密
-  Secret: 18a6413dc4fe394c66345ebe501b2f26
-  Issuer: Reptile
-  Expire: 86400
-Storage: # 阿里云OSS存储配置
-  AliossAccessKeyID: 
-  AliossAccessKeySecret: 
-  AliossEndpoint: 
-  AliossBucket: 
-  AliossDomain: 
 Database: # 数据库
   DBType: mysql
   Username: root # 填写你的数据库账号
@@ -52,4 +31,5 @@ Database: # 数据库
 Redis:
   Host: 127.0.0.1:6379
   Password: 
-  DB: 
+  DB:
+  Proxy: buff
