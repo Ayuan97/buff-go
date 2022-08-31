@@ -214,3 +214,10 @@ func RPop(key string) (res string, err error) {
 	return result, nil
 
 }
+
+//返回集合中的一个随机元素
+func Srandmember(key string) *redis.StringCmd {
+	key = global.RedisSetting.Prefix + key
+	result := global.Redis.SRandMember(ctx, key)
+	return result
+}

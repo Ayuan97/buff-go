@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
+	"log"
 	"net/http"
 )
 
@@ -18,16 +19,18 @@ func main() {
 	gin.SetMode(global.ServerSetting.RunMode)
 	router := routers.NewRouter()
 	s := &http.Server{
-		Addr:           global.ServerSetting.HttpIp + ":" + global.ServerSetting.HttpPort,
+		Addr:           ":" + global.ServerSetting.HttpPort,
 		Handler:        router,
 		ReadTimeout:    global.ServerSetting.ReadTimeout,
 		WriteTimeout:   global.ServerSetting.WriteTimeout,
 		MaxHeaderBytes: 1 << 20,
 	}
-
 	util.PrintHelloBanner(fmt.Sprintf("buff-go %s (build:%s %s)", version, commitID, buildDate))
 	fmt.Fprintf(color.Output, "小趴菜冲啊 service listen on %s\n",
-		color.GreenString(fmt.Sprintf("http://%s:%s", global.ServerSetting.HttpIp, global.ServerSetting.HttpPort)),
+		color.GreenString(fmt.Sprintf("[info] start http server listening %s", global.ServerSetting.HttpPort)),
 	)
-	s.ListenAndServe()
+	err := s.ListenAndServe()
+	if err != nil {
+		log.Printf("Server err: %v", err)
+	}
 }

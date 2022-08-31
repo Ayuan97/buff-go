@@ -1,27 +1,25 @@
 package routers
 
 import (
+	"buff-go/internal/routers/api"
 	"net/http"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
 func NewRouter() *gin.Engine {
 	r := gin.New()
-	r.HandleMethodNotAllowed = true
-	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
+	//r.HandleMethodNotAllowed = true
+	//r.Use(gin.Logger())
+	//r.Use(gin.Recovery())
 
 	// 跨域配置
-	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowAllOrigins = true
-	corsConfig.AddAllowHeaders("Authorization")
-	r.Use(cors.New(corsConfig))
+	//corsConfig := cors.DefaultConfig()
+	//corsConfig.AllowAllOrigins = true
+	//corsConfig.AddAllowHeaders("Authorization")
+	//r.Use(cors.New(corsConfig))
 
-	// 获取version
-	//r.GET("/", api.Version)
-
+	r.POST("/test", api.Test)
 	//// 无鉴权路由组
 	//noAuthApi := r.Group("/")
 	//{
@@ -40,14 +38,14 @@ func NewRouter() *gin.Engine {
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code": 404,
-			"msg":  "Not Found",
+			"msg":  "Not Found ~",
 		})
 	})
 	// 默认405
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
 			"code": 405,
-			"msg":  "Method Not Allowed",
+			"msg":  "Method Not Allowed ",
 		})
 	})
 	return r

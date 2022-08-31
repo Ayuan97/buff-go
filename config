@@ -6,9 +6,9 @@ App: # APP基础设置项
   DefaultPageSize: 10
   MaxPageSize: 100
 Server: # 服务设置
-  RunMode: debug
-  HttpIp: 0.0.0.0
-  HttpPort: 9001
+  RunMode: release
+  HttpIp: 127.0.0.1
+  HttpPort: 8008
   ReadTimeout: 60
   WriteTimeout: 60
 Log: # 日志
@@ -32,4 +32,4 @@ Redis:
   Host: 127.0.0.1:6379
   Password: 
   DB:
-  Proxy: buff
+  Proxy: buff:api
