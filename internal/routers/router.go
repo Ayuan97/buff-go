@@ -12,10 +12,10 @@ func NewRouter() *gin.Engine {
 	r.HandleMethodNotAllowed = true
 	r.Use(gin.Logger(), gin.Recovery())
 
-	apiGroup := r.Group("/api/")
+	apiGroup := r.Group("/api")
 	apiGroup.Use(middleware.Cors())
 	{
-		apiGroup.GET("/", api.Test)
+		apiGroup.GET("/test", api.Test)
 	}
 
 	// 默认404
