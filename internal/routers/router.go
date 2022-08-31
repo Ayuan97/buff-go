@@ -1,39 +1,23 @@
 package routers
 
 import (
+	"buff-go/internal/middleware"
 	"buff-go/internal/routers/api"
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+	"net/http"
 )
 
 func NewRouter() *gin.Engine {
 	r := gin.New()
-	//r.HandleMethodNotAllowed = true
-	//r.Use(gin.Logger())
-	//r.Use(gin.Recovery())
+	r.HandleMethodNotAllowed = true
+	r.Use(gin.Logger(), gin.Recovery())
 
-	// 跨域配置
-	//corsConfig := cors.DefaultConfig()
-	//corsConfig.AllowAllOrigins = true
-	//corsConfig.AddAllowHeaders("Authorization")
-	//r.Use(cors.New(corsConfig))
+	apiGroup := r.Group("/api/")
+	apiGroup.Use(middleware.Cors())
+	{
+		apiGroup.GET("/", api.Test)
+	}
 
-	r.POST("/test", api.Test)
-	//// 无鉴权路由组
-	//noAuthApi := r.Group("/")
-	//{
-	//	noAuthApi.GET("/posts", api.GetPostList)
-	//}
-
-	//// 鉴权路由组
-	//authApi := r.Group("/").Use(middleware.JWT())
-	//privApi := r.Group("/").Use(middleware.JWT()).Use(middleware.Priv())
-	//{
-	//	authApi.GET("/sync/index", api.SyncSearchIndex)
-	//	privApi.POST("/attachment", api.UploadAttachment)
-	//
-	//}
 	// 默认404
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
