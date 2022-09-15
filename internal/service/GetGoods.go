@@ -2,9 +2,13 @@ package service
 
 import (
 	"buff-go/internal/model"
+	"buff-go/pkg/gredis"
 	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -54,103 +58,137 @@ type T struct {
 	TransactedNum         int         `json:"transacted_num"`
 }
 
-func GetGoods(start int, end int) {
-
-	//循环50次
-	for i := start; i <= end; i++ {
-		//等待50毫秒
-		time.Sleep(20 * time.Millisecond)
-		game := "csgo"
-		pageNum := i
-		pageSize := 80
-		url := "https://buff.163.com/api/market/goods?game=" + game + "&page_num=" + util.IntToString(pageNum) + "&page_size=" + util.IntToString(pageSize)
-		isSuccess := getRequest(url)
-		if !isSuccess {
-			break
-		}
-	}
-}
-func getRequest(url string) bool {
-	data := util.StartRequestProxy(url)
-	var response Response
-	errJson := json.Unmarshal([]byte(data), &response)
-	if errJson != nil {
-		fmt.Println("重试:", url)
-		getRequest(url)
-	}
-	if response.Code == "OK" {
-		go InsertGoods(response.Data.Items)
-	} else if response.Code == "Login Required" {
-		return false
-	}
-	return true
+type UrlParam struct {
+	Path     string
+	Game     string
+	PageNum  int
+	PageSize int
+	MinPrice int
+	MaxPrice int
 }
 
-//func GetGoods()  {
-//	client := &http.Client{}
-//	game := "csgo"
-//	pageNum := 1
-//	pageSize := 100
-//	url := "https://buff.163.com/api/market/goods?game="+game+"&page_num="+util.IntToString(pageNum)+"&page_size="+util.IntToString(pageSize)
-//	req, err := http.NewRequest("GET", "https://buff.163.com/api/market/goods?game=csgo&page_num=1", nil)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//	//设置cookie 并写出cookie
-//	cookie := http.Cookie{Name: "session", Value: "1-XMnMS_ZKw8eQBTopkCSEuQ3sq8bVAeIy9OmW4iZuoWmL2034674671"}
-//	req.AddCookie(&cookie)
-//	resp, err := client.Do(req)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//	bodyText, err := ioutil.ReadAll(resp.Body)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//	var response Response
-//	errJson := json.Unmarshal(bodyText, &response)
-//	if err != nil {
-//		fmt.Println("json.Unmarshal failed:", errJson)
-//	}
-//	//fmt.Println(response)
-//	if response.Code == "OK"{
-//		//判断总页数
-//		if response.Data.TotalPage > 1 {
-//			for i := 1; i <= response.Data.TotalPage; i++ {
-//				req, err := http.NewRequest("GET", "https://buff.163.com/api/market/goods?game=csgo&page_num="+strconv.Itoa(i)+"&use_suggestion=1&trigger=undefined_trigger", nil)
-//				if err != nil {
-//					log.Fatal(err)
-//				}
-//				//设置cookie 并写出cookie
-//				cookie := http.Cookie{Name: "session", Value: "1-XMnMS_ZKw8eQBTopkCSEuQ3sq8bVAeIy9OmW4iZuoWmL2034674671"}
-//				req.AddCookie(&cookie)
-//				resp, err := client.Do(req)
-//				if err != nil {
-//					log.Fatal(err)
-//				}
-//				bodyText, err := ioutil.ReadAll(resp.Body)
-//				if err != nil {
-//					log.Fatal(err)
-//				}
-//				fmt.Println("第", i, "页","code:",response.Code,"msg:",response.Msg,"error:",response.Error,"extra:",response.Extra)
-//				var response Response
-//				errJson := json.Unmarshal(bodyText, &response)
-//				if err != nil {
-//					fmt.Println("json.Unmarshal failed:", errJson)
-//				}
-//				if response.Code == "OK"{
-//					go	InsertGoods(response.Data.Items)
-//				}
-//				//等待100毫秒
-//				time.Sleep(1500 * time.Millisecond)
-//			}
-//		}else{
-//			fmt.Println(response.Data.Items)
-//		}
-//	}else{
-//		fmt.Println("获取失败 err:", response.Error)
-//	}
-//}
+var proxy string
+
+func GetGooDsList() {
+
+	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
+	var urlParam UrlParam
+	urlParam.PageNum = 10000
+	urlParam.Game = "csgo"
+	urlParam.MaxPrice = 4000
+	urlParam.MinPrice = 1
+	urlParam.PageSize = 80
+	postUrl := PrimitiveUrl + "game=" + urlParam.Game +
+		"&page_num=" + fmt.Sprintf("%d", urlParam.PageNum) +
+		"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
+		"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
+		"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize)
+	totalNum := GetTotalPageNum(postUrl)
+	var pageNum float64
+	pageNum = float64(int(float64(totalNum)))
+	//计算循环次数
+	forNum := int(math.Ceil(pageNum / 10))
+	for i := 1; i <= forNum; i++ {
+		time.Sleep(time.Millisecond * 500)
+		go func(i int) {
+			for l := 1; l <= 10; l++ {
+				var CureePageNum int
+				if i == 1 {
+					CureePageNum = l
+				} else {
+					CureePageNum = (i-1)*10 + l
+				}
+				if CureePageNum > totalNum {
+					break
+				}
+				var Url string
+				Url = PrimitiveUrl + "game=" + urlParam.Game +
+					"&page_num=" + fmt.Sprintf("%d", CureePageNum) +
+					"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
+					"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
+					"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize)
+				fmt.Println(Url)
+				GetGoods(Url)
+			}
+		}(i)
+	}
+}
+
+//获取商品
+func GetGoods(getUrl string) {
+	isProxy := gredis.Get("proxy-" + proxy)
+	if isProxy == "0" {
+		fmt.Println("proxy 不可用  切换代理")
+		proxy = GetProxy()
+	}
+	gredis.Set(getUrl, proxy, time.Minute*1)
+	cli := util.NewHttpClient(proxy)
+	cli.Do(&http.Request{
+		Method: "GET",
+		Header: http.Header{
+			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
+		},
+	})
+
+	data, err, code := util.HttpGET(cli, getUrl)
+	if code == 429 || err != nil {
+		val := gredis.Get(getUrl)
+		gredis.Set("proxy-"+val, 0, time.Minute*2)
+		GetGoods(getUrl)
+		time.Sleep(time.Millisecond * 1000)
+		fmt.Println("proxy:", proxy)
+	}
+
+	result, err := BindData(data)
+	if err != nil {
+		time.Sleep(time.Millisecond * 500)
+		GetGoods(getUrl)
+	}
+	if len(result.Data.Items) > 0 {
+		InsertGoods(result.Data.Items)
+	}
+}
+
+//获取页码
+func GetTotalPageNum(getUrl string) int {
+	url := ""
+	cli := util.NewHttpClient(url)
+	cli.Do(&http.Request{
+		Method: "GET",
+		Header: http.Header{
+			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
+		},
+	})
+
+	data, err, code := util.HttpGET(cli, getUrl)
+	if code == 429 {
+		time.Sleep(time.Millisecond * 1000)
+		proxy = GetProxy()
+		GetGoods(getUrl)
+	}
+	if err != nil || len(data) == 0 {
+		fmt.Println("err:", err, "data:", data)
+		//等待500毫秒后重新请求
+		time.Sleep(time.Millisecond * 500)
+		//获取代理
+		proxy = GetProxy()
+		GetGoods(getUrl)
+	}
+	result, _ := BindData(data)
+	return result.Data.TotalPage
+}
+
+func BindData(data []byte) (Response, error) {
+	var GoodList Response
+	str := string(data)
+	result, _ := url.QueryUnescape(str)
+	err := json.Unmarshal([]byte(result), &GoodList)
+	if err != nil {
+		fmt.Println("json err :", result)
+		return GoodList, err
+	}
+	return GoodList, err
+}
 
 //批量插入商品信息
 func InsertGoods(data []T) {

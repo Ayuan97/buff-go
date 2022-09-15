@@ -4,6 +4,8 @@ import (
 	"buff-go/global"
 	"buff-go/internal/model"
 	"buff-go/internal/service"
+	"fmt"
+	"github.com/fatih/color"
 	"github.com/go-redis/redis/v8"
 	"log"
 
@@ -12,6 +14,8 @@ import (
 )
 
 func init() {
+	fmt.Fprintf(color.Output, "%s\n", color.GreenString(fmt.Sprintf("开始初始化....")))
+
 	err := setupSetting()
 	if err != nil {
 		log.Fatalf("init.setupSetting err: %v", err)
@@ -25,6 +29,8 @@ func init() {
 		log.Fatalf("init.setupDBEngine err: %v", err)
 	}
 	service.Initialize(global.DBEngine)
+	fmt.Fprintf(color.Output, "%s\n", color.GreenString(fmt.Sprintf("初始化成功....")))
+
 }
 
 func setupSetting() error {

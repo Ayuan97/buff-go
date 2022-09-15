@@ -6,5 +6,6 @@ import (
 )
 
 func Test(c *gin.Context) {
-	service.GetProxy()
+
+	service.GetGooDsList()
 }

@@ -92,14 +92,14 @@ func Decr(key string) (int64, error) {
 }
 
 //无序集合相关
-func SAdd(key string, members ...interface{}) (res int64, err error) {
+func SAdd(key string, members ...interface{}) (res int64) {
 	key = global.RedisSetting.Prefix + key
 	val, err := global.Redis.SAdd(ctx, key, members).Result()
 	if err != nil {
 		global.Logger.Errorf("redis sadd failed %v", err)
-		return 0, err
+		return 0
 	}
-	return val, nil
+	return val
 }
 
 func SRem(key string, members ...interface{}) (res int64, err error) {
@@ -220,4 +220,10 @@ func Srandmember(key string) *redis.StringCmd {
 	key = global.RedisSetting.Prefix + key
 	result := global.Redis.SRandMember(ctx, key)
 	return result
+}
+
+func Srem(key string, name string) int64 {
+	key = global.RedisSetting.Prefix + key
+	result := global.Redis.SRem(ctx, key, name)
+	return result.Val()
 }

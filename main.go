@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
+	"time"
 )
 
 var (
@@ -19,13 +20,12 @@ func main() {
 	gin.SetMode(global.ServerSetting.RunMode)
 	router := routers.NewRouter()
 	s := &http.Server{
-		Addr:           global.ServerSetting.HttpIp + ":" + global.ServerSetting.HttpPort,
+		Addr:           ":" + global.ServerSetting.HttpPort,
 		Handler:        router,
-		ReadTimeout:    global.ServerSetting.ReadTimeout,
-		WriteTimeout:   global.ServerSetting.WriteTimeout,
+		ReadTimeout:    global.ServerSetting.ReadTimeout * time.Second,
+		WriteTimeout:   global.ServerSetting.WriteTimeout * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-
 	util.PrintHelloBanner(fmt.Sprintf("buff-go %s (build:%s %s)", version, commitID, buildDate))
 	fmt.Fprintf(color.Output, "小趴菜冲啊 service listen on %s\n",
 		color.GreenString(fmt.Sprintf("[info] start http server listening %s", global.ServerSetting.HttpPort)),

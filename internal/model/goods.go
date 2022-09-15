@@ -1,8 +1,8 @@
 package model
 
 import (
-	"fmt"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Goods struct {
@@ -11,7 +11,7 @@ type Goods struct {
 	BuyMaxPrice        float64 `json:"buy_max_price"`
 	BuyNum             int     `json:"buy_num"`
 	Game               string  `json:"game"`
-	GoodsId            int     `json:"goods_id"`
+	GoodsId            int     `gorm:"unique_index" json:"goods_id"`
 	IconUrl            string  `json:"icon_url"`
 	SteamPrice         float64 `json:"steam_price"`
 	SteamPriceCny      float64 `json:"steam_price_cny"`
@@ -23,10 +23,11 @@ type Goods struct {
 	TransactedNum      int     `json:"transacted_num"`
 }
 
-func (g *Goods) Create(db *gorm.DB, goods []*Goods) (bool, error) {
-	err := db.Create(&goods).Error
-	if err != nil {
-		fmt.Println("create goods failed:", err)
-	}
-	return true, err
+func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
+	db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "goods_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"buy_max_price", "buy_num", "steam_price", "steam_price_cny", "quick_price"}),
+	}).Create(&goods)
+
+	return true
 }

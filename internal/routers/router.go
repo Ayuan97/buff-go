@@ -15,21 +15,21 @@ func NewRouter() *gin.Engine {
 	apiGroup := r.Group("/api")
 	apiGroup.Use(middleware.Cors())
 	{
-		apiGroup.GET("/test", api.Test)
+		apiGroup.POST("/test", api.Test)
 	}
 
 	// 默认404
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code": 404,
-			"msg":  "Not Found ~",
+			"msg":  "弄啥嘞?",
 		})
 	})
 	// 默认405
 	r.NoMethod(func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{
 			"code": 405,
-			"msg":  "Method Not Allowed ",
+			"msg":  "怼错了!",
 		})
 	})
 	return r

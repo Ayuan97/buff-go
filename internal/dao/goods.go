@@ -10,7 +10,7 @@ type JuhePhoneCaptchaRsp struct {
 }
 
 // 创建用户
-func (d *Dao) BatchCreateGoods(goodsList []*model.Goods) (bool, error) {
+func (d *Dao) BatchCreateGoods(goodsList []*model.Goods) bool {
 	var goods model.Goods
 	return goods.Create(d.engine, goodsList)
 }
