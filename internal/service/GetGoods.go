@@ -118,10 +118,22 @@ func GetGooDsList() {
 func GetGoods(getUrl string) {
 	isProxy := gredis.Get("proxy-" + proxy)
 	if isProxy == "0" {
-		fmt.Println("proxy 不可用  切换代理")
 		proxy = GetProxy()
+		if proxy == "" {
+			//代理池为空 改为2s一次请求
+			fmt.Println("代理池为空 改为2s一次请求")
+			time.Sleep(time.Millisecond * 2000)
+		} else {
+			fmt.Println(proxy + " 不可用切换代理 : " + proxy)
+		}
 	}
-	gredis.Set(getUrl, proxy, time.Minute*1)
+	//本次url所使用的代理
+	//请求失败后 获取本次使用的代理 设置等待时间
+	//proxy == ""  不设置
+	if proxy != "" {
+		gredis.Set(getUrl, proxy, time.Minute*1)
+	}
+	//设置代理 创建http连接
 	cli := util.NewHttpClient(proxy)
 	cli.Do(&http.Request{
 		Method: "GET",
@@ -129,19 +141,26 @@ func GetGoods(getUrl string) {
 			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
 		},
 	})
-
+	//获取请求结果
 	data, err, code := util.HttpGET(cli, getUrl)
 	if code == 429 || err != nil {
+		//频繁请求  获取url所使用的代理
 		val := gredis.Get(getUrl)
-		gredis.Set("proxy-"+val, 0, time.Minute*2)
-		GetGoods(getUrl)
+		if val != "" {
+			//设置代理不可用 N分钟后恢复
+			gredis.Set("proxy-"+val, 0, time.Minute*1)
+		} else {
+			//本次请求没有使用代理
+			time.Sleep(time.Millisecond * 1000)
+		}
+		//重新获取内容
 		time.Sleep(time.Millisecond * 1000)
-		fmt.Println("proxy:", proxy)
+		GetGoods(getUrl)
 	}
 
 	result, err := BindData(data)
 	if err != nil {
-		time.Sleep(time.Millisecond * 500)
+		time.Sleep(time.Millisecond * 1000)
 		GetGoods(getUrl)
 	}
 	if len(result.Data.Items) > 0 {
@@ -184,7 +203,8 @@ func BindData(data []byte) (Response, error) {
 	result, _ := url.QueryUnescape(str)
 	err := json.Unmarshal([]byte(result), &GoodList)
 	if err != nil {
-		fmt.Println("json err :", result)
+		fmt.Println("json err :", string(data))
+
 		return GoodList, err
 	}
 	return GoodList, err
