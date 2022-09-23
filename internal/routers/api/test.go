@@ -7,7 +7,5 @@ import (
 
 func Test(c *gin.Context) {
 
-	service.GetGooDsList()
-	//res := service.GetProxy()
-	//fmt.Println(res)
+	service.GetGooDsListV2()
 }

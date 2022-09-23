@@ -31,7 +31,6 @@ type Proxy struct {
 // 获取代理
 func GetProxy() string {
 
-	//return  GetProxyInfo()
 	key := rediskey.GetProxyMap(1)
 	result := gredis.Srandmember(key)
 	return result.Val()
@@ -56,7 +55,7 @@ func AddProxy(ipAddr string, number int64) {
 
 }
 
-//获取代理信息
+//快代理 - 获取代理信息
 func GetProxyInfo() string {
 	client := &http.Client{}
 	var url string

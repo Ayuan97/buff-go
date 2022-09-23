@@ -114,6 +114,51 @@ func GetGooDsList() {
 	}
 }
 
+func GetGooDsListV2() {
+
+	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
+	var urlParam UrlParam
+	urlParam.PageNum = 10000
+	urlParam.Game = "csgo"
+	urlParam.MaxPrice = 4000
+	urlParam.MinPrice = 1
+	urlParam.PageSize = 80
+
+	for i := 1; i <= 200; i++ {
+		time.Sleep(time.Millisecond * 700)
+		Url := PrimitiveUrl + "game=" + urlParam.Game +
+			"&page_num=" + fmt.Sprintf("%d", i) +
+			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
+			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
+			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize)
+		fmt.Println(Url)
+		go GetGoodsV2(Url)
+	}
+}
+
+//获取商品
+func GetGoodsV2(getUrl string) {
+	proxies := ""
+	//设置代理 创建http连接
+	cli := util.NewHttpClient(proxies)
+	//获取请求结果
+	data, err, code := util.HttpGET(cli, getUrl)
+	if code == 429 {
+		//重新获取内容
+		time.Sleep(time.Second * 2)
+		GetGoodsV2(getUrl)
+	} else {
+		result, err := BindData(data, err, code)
+		if err != nil {
+			time.Sleep(time.Second * 2)
+			GetGoodsV2(getUrl)
+		}
+		if len(result.Data.Items) > 0 {
+			InsertGoods(result.Data.Items)
+		}
+	}
+}
+
 //获取商品
 func GetGoods(getUrl string) {
 	isProxy := gredis.Get("proxy-" + proxy)
@@ -135,32 +180,26 @@ func GetGoods(getUrl string) {
 	}
 	//设置代理 创建http连接
 	cli := util.NewHttpClient(proxy)
-	cli.Do(&http.Request{
-		Method: "GET",
-		Header: http.Header{
-			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
-		},
-	})
 	//获取请求结果
 	data, err, code := util.HttpGET(cli, getUrl)
-	if code == 429 || err != nil {
+	if code == 429 {
 		//频繁请求  获取url所使用的代理
 		val := gredis.Get(getUrl)
 		if val != "" {
 			//设置代理不可用 N分钟后恢复
-			gredis.Set("proxy-"+val, 0, time.Minute*1)
+			gredis.Set("proxy-"+val, 0, time.Second*30)
 		} else {
 			//本次请求没有使用代理
-			time.Sleep(time.Millisecond * 1000)
+			time.Sleep(time.Second * 2)
 		}
 		//重新获取内容
-		time.Sleep(time.Millisecond * 1000)
+		time.Sleep(time.Second * 2)
 		GetGoods(getUrl)
 	}
 
-	result, err := BindData(data)
+	result, err := BindData(data, err, code)
 	if err != nil {
-		time.Sleep(time.Millisecond * 1000)
+		time.Sleep(time.Second * 2)
 		GetGoods(getUrl)
 	}
 	if len(result.Data.Items) > 0 {
@@ -168,44 +207,17 @@ func GetGoods(getUrl string) {
 	}
 }
 
-//获取页码
-func GetTotalPageNum(getUrl string) int {
-	url := ""
-	cli := util.NewHttpClient(url)
-	cli.Do(&http.Request{
-		Method: "GET",
-		Header: http.Header{
-			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
-		},
-	})
-
-	data, err, code := util.HttpGET(cli, getUrl)
-	if code == 429 {
-		time.Sleep(time.Millisecond * 1000)
-		proxy = GetProxy()
-		GetGoods(getUrl)
-	}
-	if err != nil || len(data) == 0 {
-		fmt.Println("err:", err, "data:", data)
-		//等待500毫秒后重新请求
-		time.Sleep(time.Millisecond * 500)
-		//获取代理
-		proxy = GetProxy()
-		GetGoods(getUrl)
-	}
-	result, _ := BindData(data)
-	return result.Data.TotalPage
-}
-
-func BindData(data []byte) (Response, error) {
+func BindData(data []byte, httpError error, httpCode int) (Response, error) {
 	var GoodList Response
 	str := string(data)
 	result, _ := url.QueryUnescape(str)
 	err := json.Unmarshal([]byte(result), &GoodList)
 	if err != nil {
-		fmt.Println("json err :", string(data))
-
+		fmt.Println("json err :", string(data), " http error:", httpError, " http code : ", httpCode)
 		return GoodList, err
+	}
+	if GoodList.Code == "Login Required" {
+		fmt.Println("登录超时:", GoodList.Code)
 	}
 	return GoodList, err
 }
@@ -233,4 +245,33 @@ func InsertGoods(data []T) {
 	}
 	myDao.BatchCreateGoods(goods)
 	fmt.Println("插入成功")
+}
+
+//获取页码
+func GetTotalPageNum(getUrl string) int {
+	url := ""
+	cli := util.NewHttpClient(url)
+	cli.Do(&http.Request{
+		Method: "GET",
+		Header: http.Header{
+			"User-Agent": []string{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"},
+		},
+	})
+
+	data, err, code := util.HttpGET(cli, getUrl)
+	if code == 429 {
+		time.Sleep(time.Millisecond * 1000)
+		proxy = GetProxy()
+		GetGoods(getUrl)
+	}
+	if err != nil || len(data) == 0 {
+		fmt.Println("err:", err, "data:", data)
+		//等待500毫秒后重新请求
+		time.Sleep(time.Millisecond * 500)
+		//获取代理
+		proxy = GetProxy()
+		GetGoods(getUrl)
+	}
+	result, _ := BindData(data, err, code)
+	return result.Data.TotalPage
 }
