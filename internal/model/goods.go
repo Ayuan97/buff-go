@@ -1,6 +1,8 @@
 package model
 
 import (
+	"buff-go/global"
+	"fmt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -33,6 +35,42 @@ func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
 	}).Create(&goods)
 
 	return true
+}
+
+func (g *Goods) CreateOn(db *gorm.DB, goods *Goods) bool {
+	var goodsCount int64
+	err2 := db.Model(g).Where("goods_id = ?", goods.GoodsId).Count(&goodsCount).Error
+	if err2 != nil {
+		global.Logger.Errorf("CreateOn error: %v", err2)
+		return false
+	}
+	if goodsCount > 0 {
+		//更新
+		err := db.Model(g).Where("goods_id = ?", goods.GoodsId).Updates(Goods{
+			BuyMaxPrice:        goods.BuyMaxPrice,
+			BuyNum:             goods.BuyNum,
+			SteamPrice:         goods.SteamPrice,
+			SteamPriceCny:      goods.SteamPriceCny,
+			QuickPrice:         goods.QuickPrice,
+			SellMinPrice:       goods.SellMinPrice,
+			SellNum:            goods.SellNum,
+			SellReferencePrice: goods.SellReferencePrice,
+			SteamMarketUrl:     goods.SteamMarketUrl,
+			TransactedNum:      goods.TransactedNum,
+		}).Error
+		if err != nil {
+			fmt.Println("更新错误", err)
+		}
+	} else {
+		err := db.Model(g).Create(goods).Error
+		if err != nil {
+			fmt.Println("新增错误", err)
+			return false
+		}
+		return true
+	}
+
+	return false
 }
 
 func (g *Goods) Get(db *gorm.DB) ([]*Goods, error) {

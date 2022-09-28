@@ -54,8 +54,8 @@ func HttpClient(proxyAddr string) *http.Client {
 	NetTransport := &http.Transport{}
 	if proxyAddr == "" {
 		NetTransport = &http.Transport{
-			MaxIdleConnsPerHost:   10,                             //每个host最大空闲连接
-			ResponseHeaderTimeout: time.Second * time.Duration(5), //数据收发5秒超时
+			MaxIdleConnsPerHost:   10,                              //每个host最大空闲连接
+			ResponseHeaderTimeout: time.Second * time.Duration(10), //数据收发5秒超时
 		}
 	} else {
 		proxy, err := url.Parse(proxyAddr)
@@ -64,8 +64,8 @@ func HttpClient(proxyAddr string) *http.Client {
 		}
 		NetTransport = &http.Transport{
 			Proxy:                 http.ProxyURL(proxy),
-			MaxIdleConnsPerHost:   10,                             //每个host最大空闲连接
-			ResponseHeaderTimeout: time.Second * time.Duration(5), //数据收发5秒超时
+			MaxIdleConnsPerHost:   10,                              //每个host最大空闲连接
+			ResponseHeaderTimeout: time.Second * time.Duration(10), //数据收发5秒超时
 		}
 	}
 
