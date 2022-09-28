@@ -68,6 +68,7 @@ type UrlParam struct {
 
 var proxy string
 
+//开启任务
 func GetGooDsListV2() {
 	key := rediskey.GetBuffKey()
 	err := gredis.Set(key, "1", time.Minute*5)
@@ -118,6 +119,7 @@ func GetGoodsV2(getUrl string, page int) {
 	}
 }
 
+//绑定数据
 func BindData(data []byte, httpError error, httpCode int) (Response, error) {
 	var GoodList Response
 	str := string(data)
