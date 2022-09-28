@@ -3,6 +3,7 @@ package service
 import (
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
@@ -69,6 +70,56 @@ type UrlParam struct {
 
 var proxy string
 
+func GetGooDsListV2() {
+	key := rediskey.GetBuffKey()
+	err := gredis.Set(key, "1", time.Minute*5)
+	if err != nil {
+		return
+	}
+	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
+	var urlParam UrlParam
+	urlParam.PageNum = 10000
+	urlParam.Game = "csgo"
+	urlParam.MaxPrice = 4000
+	urlParam.MinPrice = 1
+	urlParam.PageSize = 80
+
+	for i := 1; i <= 243; i++ {
+		num := randNum()
+		num = 900 + num
+		time.Sleep(time.Millisecond * time.Duration(num))
+		Url := PrimitiveUrl + "game=" + urlParam.Game +
+			"&page_num=" + fmt.Sprintf("%d", i) +
+			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
+			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
+			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize) +
+			"&sort_by=price.desc"
+		go GetGoodsV2(Url, i)
+	}
+	gredis.Del(key)
+}
+
+//获取商品
+func GetGoodsV2(getUrl string, page int) {
+	proxies := ""
+	//设置代理 创建http连接
+	cli := util.NewHttpClient(proxies)
+	//获取请求结果
+	data, err, code := util.HttpGET(cli, getUrl)
+	if code == 429 {
+		//重新获取内容
+		fmt.Println("抓取失败:", page, "err:", err, "code:", code)
+	} else {
+		result, err := BindData(data, err, code)
+		if err != nil {
+			fmt.Println("抓取失败:", page, "err:", err, "code:", code)
+		}
+		if len(result.Data.Items) > 0 {
+			InsertGoods(result.Data.Items, page)
+		}
+	}
+}
+
 func GetGooDsList() {
 
 	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
@@ -111,51 +162,6 @@ func GetGooDsList() {
 				GetGoods(Url)
 			}
 		}(i)
-	}
-}
-
-func GetGooDsListV2() {
-
-	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
-	var urlParam UrlParam
-	urlParam.PageNum = 10000
-	urlParam.Game = "csgo"
-	urlParam.MaxPrice = 4000
-	urlParam.MinPrice = 1
-	urlParam.PageSize = 80
-
-	for i := 1; i <= 200; i++ {
-		time.Sleep(time.Millisecond * 700)
-		Url := PrimitiveUrl + "game=" + urlParam.Game +
-			"&page_num=" + fmt.Sprintf("%d", i) +
-			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
-			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
-			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize)
-		fmt.Println(Url)
-		go GetGoodsV2(Url)
-	}
-}
-
-//获取商品
-func GetGoodsV2(getUrl string) {
-	proxies := ""
-	//设置代理 创建http连接
-	cli := util.NewHttpClient(proxies)
-	//获取请求结果
-	data, err, code := util.HttpGET(cli, getUrl)
-	if code == 429 {
-		//重新获取内容
-		time.Sleep(time.Second * 2)
-		GetGoodsV2(getUrl)
-	} else {
-		result, err := BindData(data, err, code)
-		if err != nil {
-			time.Sleep(time.Second * 2)
-			GetGoodsV2(getUrl)
-		}
-		if len(result.Data.Items) > 0 {
-			InsertGoods(result.Data.Items)
-		}
 	}
 }
 
@@ -203,7 +209,7 @@ func GetGoods(getUrl string) {
 		GetGoods(getUrl)
 	}
 	if len(result.Data.Items) > 0 {
-		InsertGoods(result.Data.Items)
+		//InsertGoods(result.Data.Items)
 	}
 }
 
@@ -223,7 +229,7 @@ func BindData(data []byte, httpError error, httpCode int) (Response, error) {
 }
 
 //批量插入商品信息
-func InsertGoods(data []T) {
+func InsertGoods(data []T, page int) {
 	//批量插入数据库
 	var goods []*model.Goods
 	for _, v := range data {
@@ -232,6 +238,9 @@ func InsertGoods(data []T) {
 		goodsInfo.BuyMaxPrice = util.StringToFloat64(v.BuyMaxPrice)
 		goodsInfo.BuyNum = v.BuyNum
 		goodsInfo.Game = v.Game
+		goodsInfo.Name = v.Name
+		goodsInfo.MarketHashName = v.MarketHashName
+		goodsInfo.ShortName = v.ShortName
 		goodsInfo.GoodsId = v.Id
 		goodsInfo.IconUrl = v.GoodsInfo.IconUrl
 		goodsInfo.SteamPrice = util.StringToFloat64(v.GoodsInfo.SteamPrice)
@@ -244,7 +253,7 @@ func InsertGoods(data []T) {
 		goods = append(goods, &goodsInfo)
 	}
 	myDao.BatchCreateGoods(goods)
-	fmt.Println("插入成功")
+	fmt.Println("第", page, "页抓取成功")
 }
 
 //获取页码

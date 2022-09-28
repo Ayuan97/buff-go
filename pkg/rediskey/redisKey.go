@@ -3,8 +3,13 @@ package rediskey
 import "fmt"
 
 const ProxyMap = "proxy:list:map:%d" //代理池
+const GetbuffKey = "get:buff:key"
 
 // GetProxyMap 获取代理池
 func GetProxyMap(poolType int) string {
 	return fmt.Sprintf(ProxyMap, poolType)
+}
+
+func GetBuffKey() string {
+	return GetbuffKey
 }

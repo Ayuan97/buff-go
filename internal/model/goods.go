@@ -11,6 +11,9 @@ type Goods struct {
 	BuyMaxPrice        float64 `json:"buy_max_price"`
 	BuyNum             int     `json:"buy_num"`
 	Game               string  `json:"game"`
+	Name               string  `json:"name"`
+	MarketHashName     string  `json:"market_hash_name"`
+	ShortName          string  `json:"short_name"`
 	GoodsId            int     `gorm:"unique_index" json:"goods_id"`
 	IconUrl            string  `json:"icon_url"`
 	SteamPrice         float64 `json:"steam_price"`
@@ -30,4 +33,14 @@ func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
 	}).Create(&goods)
 
 	return true
+}
+
+func (g *Goods) Get(db *gorm.DB) ([]*Goods, error) {
+	var goods []*Goods
+	err := db.Order("id desc").Find(&goods).Error
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	return goods, nil
 }
