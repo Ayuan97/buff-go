@@ -11,5 +11,5 @@ func Test(c *gin.Context) {
 }
 
 func GetBuffList(c *gin.Context) {
-	service.GetGooDsListV2()
+	//service.GetGooDsListV2()
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+//BUFF
 func NewHttpClient(proxyAddr string) *http.Client {
 	NetTransport := &http.Transport{}
 	if proxyAddr == "" {
@@ -50,6 +51,8 @@ func NewHttpClient(proxyAddr string) *http.Client {
 		Jar:       jar,
 	}
 }
+
+//STEMA
 func HttpClient(proxyAddr string) *http.Client {
 	NetTransport := &http.Transport{}
 	if proxyAddr == "" {
@@ -90,9 +93,36 @@ func HttpClient(proxyAddr string) *http.Client {
 		Jar:       jar,
 	}
 }
+
+//GET
 func HttpGET(client *http.Client, url string) (body []byte, err error, StatusCode int) {
 	client.Do(&http.Request{
 		Method: "GET",
+		Header: http.Header{
+			"User-Agent": []string{"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"},
+		},
+	})
+	rsp, err := client.Get(url)
+	if err != nil {
+		return nil, err, 0
+	}
+	//if rsp.StatusCode != http.StatusOK || err != nil {
+	//	return nil, err, rsp.StatusCode
+	//}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			fmt.Println("Close error:", err)
+		}
+	}(rsp.Body)
+	rspBody, err := ioutil.ReadAll(rsp.Body)
+	return rspBody, err, rsp.StatusCode
+}
+
+//POST
+func HttpPOST(client *http.Client, url string) (body []byte, err error, StatusCode int) {
+	client.Do(&http.Request{
+		Method: "POST",
 		Header: http.Header{
 			"User-Agent": []string{"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"},
 		},

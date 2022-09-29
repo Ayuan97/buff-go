@@ -1,11 +1,11 @@
 package service
 
 import (
-	"buff-go/pkg/util"
-	"encoding/json"
+	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 	"fmt"
-	"math/rand"
-	"net/url"
+	"github.com/gocolly/colly"
+	"regexp"
 	"time"
 )
 
@@ -27,44 +27,42 @@ type T2 struct {
 }
 
 func GetInfo() {
+	key := rediskey.GetSteamItemId()
+	err := gredis.Set(key, "1", time.Minute*5)
+	if err != nil {
+		return
+	}
+	c := colly.NewCollector()
+
 	goods, _ := myDao.BatchGetGoods()
 	for _, v := range goods {
-		num := randNum()
-		num = 10 + num
-		time.Sleep(time.Millisecond * time.Duration(num))
-		//name := url.QueryEscape(v.MarketHashName)
-		//url := "https://steamcommunity.com/market/priceoverview/?appid=730&currency=23&market_hash_name="+name
-		url := "https://steamcommunity.com/market/itemordershistogram?country=CN&language=schinese&currency=23&item_nameid=176057786&two_factor=0"
-		//url := "https://steamcommunity.com/market/listings/" + fmt.Sprintf("%d", v.Appid) + "/" + v.MarketHashName
-		go GetSteamInfo(url, v.MarketHashName)
-	}
+		time.Sleep(time.Millisecond * 1000)
 
-}
-
-//获取商品
-func GetSteamInfo(getUrl string, name string) {
-	proxies := ""
-	//设置代理 创建http连接
-	cli := util.HttpClient(proxies)
-	//获取请求结果
-	data, err, code := util.HttpGET(cli, getUrl)
-	if err != nil {
-		fmt.Println("err:", err)
+		b := c.Clone()
+		b.Limit(&colly.LimitRule{
+			RandomDelay: 2 * time.Second,
+		})
+		b.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
+		b.OnRequest(func(r *colly.Request) {
+			r.Headers.Add("cookie", "sessionid=cc08c404785bc602e1ae2ef5")
+		})
+		b.OnResponse(func(response *colly.Response) {
+			str := string(response.Body)
+			re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
+			match := re1.FindString(str)
+			re2 := regexp.MustCompile("[0-9]+")
+			match2 := re2.FindAllString(match, -1)
+			fmt.Println("name:", v.Name, "id:", match2[0])
+			myDao.UpdateItemId(v.ID, match2[0])
+		})
+		//发送错误
+		b.OnError(func(response *colly.Response, err error) {
+			fmt.Println("steam 访问限制", response.StatusCode, "name:", v.Name, "err:", err)
+			return
+		})
+		url := "https://steamcommunity.com/market/listings/" + fmt.Sprintf("%d", v.Appid) + "/" + v.MarketHashName
+		b.Visit(url)
 	}
-	if code == 429 {
-		fmt.Println("请求频繁")
-	} else {
-		var Info T2
-		str := string(data)
-		result, _ := url.QueryUnescape(str)
-		err := json.Unmarshal([]byte(result), &Info)
-		if err != nil {
-			fmt.Println("json err :", string(data))
-		}
-		fmt.Println("商品:", name, "结果:", Info.Success)
-	}
-}
+	gredis.Del(key)
 
-func randNum() int {
-	return rand.Intn(50)
 }

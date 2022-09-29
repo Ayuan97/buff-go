@@ -7,6 +7,7 @@ import (
 	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
+	"github.com/gocolly/colly"
 	"net/url"
 	"time"
 )
@@ -82,51 +83,61 @@ func GetGooDsListV2() {
 	urlParam.MaxPrice = 5000
 	urlParam.MinPrice = 2
 	urlParam.PageSize = 80
+	c := colly.NewCollector(
+		//colly.Debugger(&debug.LogDebugger{}),
+		colly.Async(true), //设置为异步请求
+	)
 
+	//c.Limit(&colly.LimitRule{
+	//	DomainGlob:  "*https://buff.163.com/*",
+	//	Parallelism: 1,
+	//	RandomDelay: time.Millisecond * 1000,
+	//	Delay:      5 * time.Second,
+	//})
+	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
+
+	c.OnRequest(func(r *colly.Request) {
+		r.Method = "GET"
+		r.Headers.Add("cookie", "session=1-8ZFOvWWGLnOKp1n9Oku2BN_yu7Q_GdmQX4-mbNPAQoJC2034674671")
+	})
+
+	c.OnResponse(func(response *colly.Response) {
+		data, _ := BindData(response.Body)
+		InsertGoods(data.Data.Items, data.Data.PageNum)
+	})
+	//发送错误
+	c.OnError(func(response *colly.Response, err error) {
+		page := response.Ctx.Get("page")
+		//fmt.Println("code:",response.StatusCode)
+		fmt.Println("第 ", page, "页", "code:", response.StatusCode)
+	})
 	for i := 1; i <= 187; i++ {
-		num := randNum()
-		num = 1000 + num
-		time.Sleep(time.Millisecond * time.Duration(num))
+		time.Sleep(time.Millisecond * 900)
+		c.OnResponse(func(response *colly.Response) {
+			response.Ctx.Put("page", i)
+		})
 		Url := PrimitiveUrl + "game=" + urlParam.Game +
 			"&page_num=" + fmt.Sprintf("%d", i) +
 			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
 			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
 			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize) +
 			"&sort_by=price.desc"
-		go GetGoodsV2(Url, i)
+
+		c.Visit(Url)
 	}
+	c.Wait()
+
 	gredis.Del(key)
 }
 
-//获取商品
-func GetGoodsV2(getUrl string, page int) {
-	proxies := ""
-	//设置代理 创建http连接
-	cli := util.NewHttpClient(proxies)
-	//获取请求结果
-	data, err, code := util.HttpGET(cli, getUrl)
-	if code == 429 {
-		//重新获取内容
-		fmt.Println("抓取失败:", page, "err:", err, "code:", code)
-	} else {
-		result, err := BindData(data, err, code)
-		if err != nil {
-			fmt.Println("抓取失败:", page, "err:", err, "code:", code)
-		}
-		if len(result.Data.Items) > 0 {
-			InsertGoods(result.Data.Items, page)
-		}
-	}
-}
-
 //绑定数据
-func BindData(data []byte, httpError error, httpCode int) (Response, error) {
+func BindData(data []byte) (Response, error) {
 	var GoodList Response
 	str := string(data)
 	result, _ := url.QueryUnescape(str)
 	err := json.Unmarshal([]byte(result), &GoodList)
 	if err != nil {
-		fmt.Println("json err :", string(data), " http error:", httpError, " http code : ", httpCode)
+		fmt.Println("json err :", string(data))
 		return GoodList, err
 	}
 	if GoodList.Code == "Login Required" {
@@ -159,5 +170,5 @@ func InsertGoods(data []T, page int) {
 		myDao.CreateGoods(&goodsInfo)
 	}
 
-	fmt.Println("第", page, "页抓取成功")
+	fmt.Println("第", page, "页抓取成功", "time:", time.Now().Format("2006-01-02 15:04:05"))
 }

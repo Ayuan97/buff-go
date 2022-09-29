@@ -26,6 +26,7 @@ type Goods struct {
 	SellReferencePrice float64 `json:"sell_reference_price"`
 	SteamMarketUrl     string  `json:"steam_market_url"`
 	TransactedNum      int     `json:"transacted_num"`
+	SteamItemNameId    string  `json:"steam_item_name_id"`
 }
 
 func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
@@ -75,10 +76,22 @@ func (g *Goods) CreateOn(db *gorm.DB, goods *Goods) bool {
 
 func (g *Goods) Get(db *gorm.DB) ([]*Goods, error) {
 	var goods []*Goods
-	err := db.Order("id desc").Find(&goods).Error
+	err := db.Where("steam_item_name_id = '' ").Order("id desc").Find(&goods).Limit(200).Error
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return nil, err
 	}
 
 	return goods, nil
+}
+
+func (g *Goods) UpdateItemId(db *gorm.DB, id int64, ItemId string) error {
+	//更新
+	err := db.Model(g).Where("id = ?", id).Updates(Goods{
+		SteamItemNameId: ItemId,
+	}).Error
+	if err != nil {
+		fmt.Println("UpdateItemId err :", err)
+		return err
+	}
+	return nil
 }

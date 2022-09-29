@@ -2,34 +2,38 @@ package main
 
 import (
 	"buff-go/internal/service"
-	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
-	"fmt"
 	"github.com/robfig/cron/v3"
 
 	"time"
 )
 
 func main() {
-	var err error
 	c := cron.New(cron.WithSeconds())
+	service.GetInfo()
 	//添加2秒钟定时任务 处理
-	_, err = c.AddFunc("1 * * * * *", func() {
-		key := rediskey.GetBuffKey()
-		value := gredis.Get(key)
-		if value == "1" {
-			fmt.Println("任务执行中")
-		} else {
-			fmt.Println("开始执行任务:", time.Now())
-			service.GetGooDsListV2()
-			fmt.Println("任务结束:", time.Now())
-		}
+	//c.AddFunc("1 * * * * *", func() {
+	//	key := rediskey.GetBuffKey()
+	//	value := gredis.Get(key)
+	//	if value == "1" {
+	//		fmt.Println("buff列表获取 - 任务执行中")
+	//	} else {
+	//		fmt.Println("buff列表获取 - 开始执行任务:", time.Now())
+	//		service.GetGooDsListV2()
+	//		fmt.Println("buff列表获取 - 任务结束:", time.Now())
+	//	}
+	//})
 
-	})
-	if err != nil {
-		fmt.Println("AddFun:", err)
-		return
-	}
+	//c.AddFunc("1 * * * * *", func() {
+	//	itemIdKey := rediskey.GetSteamItemId()
+	//	itemValue := gredis.Get(itemIdKey)
+	//	if itemValue == "1" {
+	//		fmt.Println("itemid 获取 -任务执行中")
+	//	} else {
+	//		fmt.Println("itemid 获取 -开始执行任务:", time.Now())
+	//		service.GetInfo()
+	//		fmt.Println("itemid 获取 -任务结束:", time.Now())
+	//	}
+	//})
 
 	c.Start()
 	t1 := time.NewTimer(time.Second * 10)
