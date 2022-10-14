@@ -88,45 +88,41 @@ func GetGooDsListV2() {
 		colly.Async(true), //设置为异步请求
 	)
 
-	//c.Limit(&colly.LimitRule{
-	//	DomainGlob:  "*https://buff.163.com/*",
-	//	Parallelism: 1,
-	//	RandomDelay: time.Millisecond * 1000,
-	//	Delay:      5 * time.Second,
-	//})
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*buff.163.com*",
+		Parallelism: 3,
+		RandomDelay: 2 * time.Second,
+	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
 
 	c.OnRequest(func(r *colly.Request) {
 		r.Method = "GET"
-		r.Headers.Add("cookie", "session=1-8ZFOvWWGLnOKp1n9Oku2BN_yu7Q_GdmQX4-mbNPAQoJC2034674671")
+		r.Headers.Add("cookie", "session=1--AuPJk0CF1B7Q-7xbboTCu6todznhm5aSrJPO5hvAIFp2034674671")
 	})
 
-	c.OnResponse(func(response *colly.Response) {
-		data, _ := BindData(response.Body)
+	c.OnResponse(func(r *colly.Response) {
+		data, _ := BindData(r.Body)
 		InsertGoods(data.Data.Items, data.Data.PageNum)
 	})
 	//发送错误
-	c.OnError(func(response *colly.Response, err error) {
-		page := response.Ctx.Get("page")
-		//fmt.Println("code:",response.StatusCode)
-		fmt.Println("第 ", page, "页", "code:", response.StatusCode)
+	c.OnError(func(r *colly.Response, err error) {
+		fmt.Println("抓取错误:", r.StatusCode, "重试")
+		r.Request.Retry()
 	})
 	for i := 1; i <= 187; i++ {
-		time.Sleep(time.Millisecond * 900)
-		c.OnResponse(func(response *colly.Response) {
-			response.Ctx.Put("page", i)
-		})
 		Url := PrimitiveUrl + "game=" + urlParam.Game +
 			"&page_num=" + fmt.Sprintf("%d", i) +
 			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
 			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
 			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize) +
 			"&sort_by=price.desc"
-
 		c.Visit(Url)
-	}
-	c.Wait()
 
+	}
+	c.Visit(PrimitiveUrl)
+
+	c.Wait()
+	fmt.Println("抓取结束")
 	gredis.Del(key)
 }
 

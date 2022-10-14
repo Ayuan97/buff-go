@@ -135,7 +135,39 @@ func GetSteamInfo() {
 }
 
 func GetTest() {
+	url := "https://httpbin.org/delay/2"
 
+	// Instantiate default collector
+	c := colly.NewCollector(
+		// Attach a debugger to the collector
+		//colly.Debugger(&debug.LogDebugger{}),
+		colly.Async(true),
+	)
+
+	// Limit the number of threads started by colly to two
+	// when visiting links which domains' matches "*httpbin.*" glob
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*httpbin.*",
+		Parallelism: 2,
+		RandomDelay: 1 * time.Second,
+	})
+
+	c.OnResponse(func(response *colly.Response) {
+		fmt.Println("url3:", response.Request.URL)
+		//fmt.Println("url:", response.Request.URL.String())
+		//fmt.Println("time:",time.Now())
+	})
+	// Start scraping in four threads on https://httpbin.org/delay/2
+	for i := 0; i < 10; i++ {
+		url2 := fmt.Sprintf("%s?n=%d", url, i)
+		fmt.Println(url2)
+		c.Visit(url2)
+	}
+	fmt.Println(url)
+	// Start scraping on https://httpbin.org/delay/2
+	c.Visit(url)
+	// Wait until threads are finished
+	c.Wait()
 }
 
 //绑定数据

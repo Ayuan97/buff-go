@@ -9,7 +9,9 @@ import (
 
 func main() {
 	c := cron.New(cron.WithSeconds())
-	service.GetSteamInfo()
+	service.GetGooDsListV2()
+	//service.GetTest()
+
 	//添加2秒钟定时任务 处理
 	//c.AddFunc("1 * * * * *", func() {
 	//	key := rediskey.GetBuffKey()
