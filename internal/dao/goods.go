@@ -21,10 +21,14 @@ func (d *Dao) CreateGoods(info *model.Goods) bool {
 	return goods.CreateOn(d.engine, info)
 }
 
-// 获取所有商品
+// 获取所有商品 itemid != ''
 func (d *Dao) BatchGetGoods() ([]*model.Goods, error) {
 	var goods model.Goods
 	return goods.Get(d.engine)
+}
+func (d *Dao) BatchGetGoodsItemId() ([]*model.Goods, error) {
+	var goods model.Goods
+	return goods.GetItemId(d.engine)
 }
 
 // 更新单个商品

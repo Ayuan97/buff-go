@@ -1,14 +1,42 @@
 package service
 
 import (
-	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
+	"encoding/json"
 	"fmt"
-	"github.com/gocolly/colly"
 	"regexp"
 	"time"
+
+	"github.com/gocolly/colly"
+
+	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 )
 
+type T3 struct {
+	Success        int         `json:"success"`
+	SellOrderCount interface{} `json:"sell_order_count"`
+	SellOrderPrice string      `json:"sell_order_price"`
+	SellOrderTable []struct {
+		Price        string `json:"price"`
+		PriceWithFee string `json:"price_with_fee"`
+		Quantity     string `json:"quantity"`
+	} `json:"sell_order_table"`
+	BuyOrderCount string `json:"buy_order_count"`
+	BuyOrderPrice string `json:"buy_order_price"`
+	BuyOrderTable []struct {
+		Price    string `json:"price"`
+		Quantity string `json:"quantity"`
+	} `json:"buy_order_table"`
+	HighestBuyOrder string          `json:"highest_buy_order"`
+	LowestSellOrder string          `json:"lowest_sell_order"`
+	BuyOrderGraph   [][]interface{} `json:"buy_order_graph"`
+	SellOrderGraph  [][]interface{} `json:"sell_order_graph"`
+	GraphMaxY       int             `json:"graph_max_y"`
+	GraphMinX       float64         `json:"graph_min_x"`
+	GraphMaxX       float64         `json:"graph_max_x"`
+	PricePrefix     string          `json:"price_prefix"`
+	PriceSuffix     string          `json:"price_suffix"`
+}
 type T2 struct {
 	Success          int             `json:"success"`
 	SellOrderTable   string          `json:"sell_order_table"`
@@ -26,7 +54,7 @@ type T2 struct {
 	PriceSuffix      string          `json:"price_suffix"`
 }
 
-func GetInfo() {
+func GetItemNameId() {
 	key := rediskey.GetSteamItemId()
 	err := gredis.Set(key, "1", time.Minute*5)
 	if err != nil {
@@ -65,4 +93,59 @@ func GetInfo() {
 	}
 	gredis.Del(key)
 
+}
+
+func GetSteamInfo() {
+	c := colly.NewCollector(
+		colly.MaxDepth(2),
+		colly.Async(true),
+	)
+	c.Limit(&colly.LimitRule{
+		Parallelism: 2,
+		RandomDelay: 2 * time.Second,
+	})
+	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
+	c.OnResponse(func(response *colly.Response) {
+		id := response.Ctx.Get("itemNameId")
+		result, _ := Bind(response.Body)
+		fmt.Println("id:", id, "success:", result.Success, "sell_order_count:", result.SellOrderCount)
+	})
+	c.OnError(func(r *colly.Response, err error) {
+		if r.StatusCode == 503 {
+			fmt.Println(string(r.Body))
+		}
+		fmt.Println("steam:", r.StatusCode)
+	})
+	goods, _ := myDao.BatchGetGoodsItemId()
+	for _, v := range goods {
+		if v.SteamItemNameId == "" {
+			fmt.Println("id = 空")
+			continue
+		}
+		c.OnRequest(func(r *colly.Request) {
+			r.Headers.Add("cookie", "sessionid=cc08c404785bc602e1ae2ef5")
+			r.Ctx.Put("itemNameId", v.SteamItemNameId)
+		})
+		time.Sleep(time.Millisecond * 50)
+		getUrl := "https://steamcommunity.com/market/itemordershistogram?country=PK&language=schinese&currency=23&item_nameid=" + v.SteamItemNameId + "&two_factor=0&norender=1"
+		c.Visit(getUrl)
+	}
+
+	c.Wait()
+}
+
+func GetTest() {
+
+}
+
+//绑定数据
+func Bind(data []byte) (T3, error) {
+	var SteamInfo T3
+	str := string(data)
+	err := json.Unmarshal([]byte(str), &SteamInfo)
+	if err != nil {
+		fmt.Println("json err :", err)
+		return SteamInfo, err
+	}
+	return SteamInfo, err
 }
