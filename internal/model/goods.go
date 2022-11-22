@@ -27,6 +27,7 @@ type Goods struct {
 	SteamMarketUrl     string  `json:"steam_market_url"`
 	TransactedNum      int     `json:"transacted_num"`
 	SteamItemNameId    string  `json:"steam_item_name_id"`
+	SteamSellPrice     float64 `json:"steam_sell_price"`
 }
 
 func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
@@ -103,4 +104,27 @@ func (g *Goods) UpdateItemId(db *gorm.DB, id int64, ItemId string) error {
 		return err
 	}
 	return nil
+}
+
+// GetBySteamItemNameId 通过商品名称获取商品信息ID
+func (g *Goods) GetBySteamItemNameId(db *gorm.DB, name string) (*Goods, error) {
+	var goods Goods
+	err := db.Where("market_hash_name = ?", name).First(&goods).Error
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	return &goods, nil
+}
+
+// 更新steam出售价格
+func (g *Goods) UpdateSteamSellPrice(db *gorm.DB) error {
+	//更新
+	err := db.Model(g).Where("id = ?", g.ID).Updates(Goods{
+		SteamSellPrice: g.SteamSellPrice,
+	}).Error
+	if err != nil {
+		fmt.Println("UpdateSteamSellPrice err :", err)
+	}
+	return err
 }

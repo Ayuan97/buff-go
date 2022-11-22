@@ -21,7 +21,7 @@ Database: # 数据库
   Username: root # 填写你的数据库账号
   Password: root # 填写你的数据库密码
   Host: 127.0.0.1:3306
-  DBName: buff
+  DBName: buff-go
   TablePrefix: bf_
   Charset: utf8mb4
   ParseTime: True
@@ -31,5 +31,5 @@ Database: # 数据库
 Redis:
   Host: 127.0.0.1:6379
   Password: 
-  DB: 15
+  DB: 1
   Prefix: buff-

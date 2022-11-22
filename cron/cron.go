@@ -9,7 +9,8 @@ import (
 
 func main() {
 	c := cron.New(cron.WithSeconds())
-	service.GetGooDsListV2()
+	//service.GetGooDsListV2()
+	service.GetSellingPrice()
 	//service.GetTest()
 
 	//添加2秒钟定时任务 处理

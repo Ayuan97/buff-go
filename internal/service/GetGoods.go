@@ -69,7 +69,7 @@ type UrlParam struct {
 
 var proxy string
 
-//开启任务
+// 开启任务
 func GetGooDsListV2() {
 	key := rediskey.GetBuffKey()
 	err := gredis.Set(key, "1", time.Minute*5)
@@ -97,7 +97,7 @@ func GetGooDsListV2() {
 
 	c.OnRequest(func(r *colly.Request) {
 		r.Method = "GET"
-		r.Headers.Add("cookie", "session=1--AuPJk0CF1B7Q-7xbboTCu6todznhm5aSrJPO5hvAIFp2034674671")
+		r.Headers.Add("cookie", "session=1-g8qwAfbqlg_cagOTeu86Z7RkJTTm_PhlAFKoAWGO78Gf2034674671")
 	})
 
 	c.OnResponse(func(r *colly.Response) {
@@ -107,6 +107,7 @@ func GetGooDsListV2() {
 	//发送错误
 	c.OnError(func(r *colly.Response, err error) {
 		fmt.Println("抓取错误:", r.StatusCode, "重试")
+		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
 	for i := 1; i <= 187; i++ {
@@ -126,7 +127,7 @@ func GetGooDsListV2() {
 	gredis.Del(key)
 }
 
-//绑定数据
+// 绑定数据
 func BindData(data []byte) (Response, error) {
 	var GoodList Response
 	str := string(data)
@@ -142,7 +143,7 @@ func BindData(data []byte) (Response, error) {
 	return GoodList, err
 }
 
-//批量插入商品信息
+// 批量插入商品信息
 func InsertGoods(data []T, page int) {
 	//批量插入数据库
 	for _, v := range data {
