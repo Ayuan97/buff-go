@@ -211,8 +211,8 @@ func GetSellingPrice() {
 
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
-		Parallelism: 1,
-		RandomDelay: 5 * time.Second,
+		Parallelism: 2,
+		RandomDelay: 15 * time.Second,
 	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
 
