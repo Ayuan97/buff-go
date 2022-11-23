@@ -14,14 +14,14 @@ func (d *Dao) BatchCreateGoods(goodsList []*model.Goods) bool {
 	return goods.Create(d.engine, goodsList)
 }
 
-//创建单个商品 存在即更新
+// 创建单个商品 存在即更新
 func (d *Dao) CreateGoods(info *model.Goods) bool {
 	var goods model.Goods
 	goods.GoodsId = info.GoodsId
 	return goods.CreateOn(d.engine, info)
 }
 
-// 获取所有商品 itemid != ''
+// 获取所有商品 itemid != ”
 func (d *Dao) BatchGetGoods() ([]*model.Goods, error) {
 	var goods model.Goods
 	return goods.Get(d.engine)
@@ -35,4 +35,15 @@ func (d *Dao) BatchGetGoodsItemId() ([]*model.Goods, error) {
 func (d *Dao) UpdateItemId(Id int64, itemId string) error {
 	var goods model.Goods
 	return goods.UpdateItemId(d.engine, Id, itemId)
+}
+
+// 获取单个商品信息
+func (d *Dao) GetGoodsByGoodsId(goodsId int64) (*model.Goods, error) {
+	var goods model.Goods
+	return goods.GetOne(d.engine, goodsId)
+}
+
+// 更新比例
+func (d *Dao) UpdateGoodsRatio(goods *model.Goods, Ratio float64) error {
+	return goods.UpdateRatio(d.engine, Ratio)
 }

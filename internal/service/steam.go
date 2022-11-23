@@ -231,8 +231,8 @@ func GetSellingPrice() {
 		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
-	var start = 1000
-	for i := 1; i <= 50; i++ {
+	var start = 1
+	for i := 1; i <= 60; i++ {
 		Url := PrimitiveUrl + "start=" + fmt.Sprintf("%d", start) +
 			"&count=" + fmt.Sprintf("%d", 100) +
 			"&search_descriptions=" + fmt.Sprintf("%d", 0) +
@@ -271,6 +271,8 @@ func InsertSteamGoods(list T4) {
 			fmt.Println("更新商品价格错误:", err)
 			continue
 		}
+		//更新比例
+		go UpdateGoodsProportion(goods.GoodsId)
 	}
 
 }

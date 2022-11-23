@@ -30,7 +30,7 @@ func main() {
 	})
 
 	//添加2秒钟定时任务 处理
-	c.AddFunc("2 * * * * *", func() {
+	c.AddFunc("1 * * * * *", func() {
 		key := rediskey.GetSteamSePriceKey()
 		value := gredis.Get(key)
 		if value == "1" {

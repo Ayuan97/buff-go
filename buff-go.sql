@@ -23,3 +23,7 @@ CREATE TABLE `bf_goods` (
                             `steam_sell_price` decimal(10,2) unsigned NOT NULL,
                             PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=14932 DEFAULT CHARSET=utf8;
+
+ALTER TABLE `buff-go`.`bf_goods`
+    ADD COLUMN `proportion` decimal(10, 2) UNSIGNED NOT NULL AFTER `steam_item_name_id`,
+MODIFY COLUMN `steam_sell_price` decimal(10, 2) UNSIGNED NOT NULL AFTER `steam_item_name_id`;

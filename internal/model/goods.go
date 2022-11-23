@@ -28,6 +28,7 @@ type Goods struct {
 	TransactedNum      int     `json:"transacted_num"`
 	SteamItemNameId    string  `json:"steam_item_name_id"`
 	SteamSellPrice     float64 `json:"steam_sell_price"`
+	Proportion         float64
 }
 
 func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
@@ -125,6 +126,29 @@ func (g *Goods) UpdateSteamSellPrice(db *gorm.DB) error {
 	}).Error
 	if err != nil {
 		fmt.Println("UpdateSteamSellPrice err :", err)
+	}
+	return err
+}
+
+// 获取单个商品信息
+func (g *Goods) GetOne(db *gorm.DB, goodsId int64) (*Goods, error) {
+	var goods Goods
+	err := db.Where("goods_id = ?", goodsId).First(&goods).Error
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	return &goods, nil
+}
+
+// 更新商品比例
+func (g *Goods) UpdateRatio(db *gorm.DB, Ratio float64) error {
+	//更新
+	err := db.Model(g).Where("id = ?", g.ID).Updates(Goods{
+		Proportion: Ratio,
+	}).Error
+	if err != nil {
+		fmt.Println("UpdateRatio err :", err)
 	}
 	return err
 }
