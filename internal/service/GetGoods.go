@@ -81,7 +81,7 @@ func GetGooDsListV2() {
 	urlParam.PageNum = 10000
 	urlParam.Game = "csgo"
 	urlParam.MaxPrice = 5000
-	urlParam.MinPrice = 2
+	urlParam.MinPrice = 50
 	urlParam.PageSize = 80
 	c := colly.NewCollector(
 		//colly.Debugger(&debug.LogDebugger{}),
@@ -110,10 +110,10 @@ func GetGooDsListV2() {
 		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
-	for i := 1; i <= 187; i++ {
+	for i := 1; i <= 90; i++ {
 		Url := PrimitiveUrl + "game=" + urlParam.Game +
 			"&page_num=" + fmt.Sprintf("%d", i) +
-			"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
+			//"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
 			"&min_price=" + fmt.Sprintf("%d", urlParam.MinPrice) +
 			"&page_size=" + fmt.Sprintf("%d", urlParam.PageSize) +
 			"&sort_by=price.desc"
