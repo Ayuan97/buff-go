@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/gocolly/colly/proxy"
 	"net/http"
 	"regexp"
 	"strings"
@@ -214,13 +215,20 @@ func GetSellingPrice() {
 		Parallelism: 2,
 		RandomDelay: 12 * time.Second,
 	})
-	////设置代理
-	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
-	//	"http://185.126.200.141:80",
-	//	"http://83.229.72.174:80",
-	//); proxyerr == nil {
-	//	c.SetProxyFunc(p)
-	//}
+	//设置代理
+	if p, proxyerr := proxy.RoundRobinProxySwitcher(
+
+		"http://185.199.231.45:8382",
+		//"http://188.74.210.207:6286",
+		//"http://188.74.183.10:8279",
+		//"http://188.74.210.21:6100",
+		"http://45.155.68.129:8133",
+		"http://154.95.36.199:6893",
+		//"http://45.94.47.66:8110",
+		"http://144.168.217.88:8780",
+	); proxyerr == nil {
+		c.SetProxyFunc(p)
+	}
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
 
 	cookie := []*http.Cookie{
