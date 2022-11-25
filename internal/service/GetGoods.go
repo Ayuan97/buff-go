@@ -67,8 +67,6 @@ type UrlParam struct {
 	MaxPrice int
 }
 
-var proxy string
-
 // 开启任务
 func GetGooDsListV2() {
 	key := rediskey.GetBuffKey()

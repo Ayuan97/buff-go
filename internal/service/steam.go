@@ -214,6 +214,13 @@ func GetSellingPrice() {
 		Parallelism: 2,
 		RandomDelay: 12 * time.Second,
 	})
+	////设置代理
+	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
+	//	"http://185.126.200.141:80",
+	//	"http://83.229.72.174:80",
+	//); proxyerr == nil {
+	//	c.SetProxyFunc(p)
+	//}
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
 
 	cookie := []*http.Cookie{
@@ -223,7 +230,7 @@ func GetSellingPrice() {
 		},
 		{
 			Name:  "steamLoginSecure",
-			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NV8yMUE4NkREN181MDZBMCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTM2Nzg5MiwgIm5iZiI6IDE2NjA2Mzk2OTksICJpYXQiOiAxNjY5Mjc5Njk5LCAianRpIjogIjBDNjlfMjFBODZFMjZfN0ExQjYiLCAib2F0IjogMTY2OTI3MzQ3NCwgInJ0X2V4cCI6IDE2ODcyMTgxNTgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.oykbl7I_Rn723RAgKcyePWBJrYxb0jm1hLsSvQYeHLEou3_3U7lzjzLjAtVCOUcVv_RUSRoXwWlHntGuK9CgDQ",
+			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NF8yMUE4NkVBNF84ODU4NCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTQ0MTQzMSwgIm5iZiI6IDE2NjA3MTQ2MjAsICJpYXQiOiAxNjY5MzU0NjIwLCAianRpIjogIjBDNjlfMjFBODZFQ0ZfOUI0MzMiLCAib2F0IjogMTY2OTM1NDYyMCwgInJ0X2V4cCI6IDE2ODc1ODI1MDgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.r8IhWk4iTOKpZLVuMYMyNcKIVoih6EWPhb7sM_pcNIxVebGitNWXipPLK7CEx4PI4HzdNCLua7nffqww0JZhCw",
 		},
 		{
 			Name:  "Steam_Language",
@@ -259,8 +266,9 @@ func GetSellingPrice() {
 	})
 	//发送错误
 	c.OnError(func(r *colly.Response, err error) {
-		fmt.Println("抓取steam错误:", r.StatusCode, "重试", "err:", err)
-		r.Request.ProxyURL = ""
+
+		fmt.Println("抓取steam错误:", r.StatusCode, "当前代理", r.Request.ProxyURL, "err:", err, "string:", string(r.Body))
+		//r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
 	var start = 0

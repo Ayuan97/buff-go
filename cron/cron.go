@@ -50,11 +50,11 @@ func GetList() {
 	})
 
 	c.Start()
-	t1 := time.NewTimer(time.Second * 10)
+	t1 := time.NewTimer(time.Second * 1)
 	for {
 		select {
 		case <-t1.C:
-			t1.Reset(time.Second * 10)
+			t1.Reset(time.Second * 1)
 
 		}
 	}
