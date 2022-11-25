@@ -6,6 +6,7 @@ import (
 	"github.com/gocolly/colly/proxy"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,86 +118,99 @@ type T4 struct {
 	} `json:"results"`
 }
 
+// 获取游戏商品的itemid
 func GetItemNameId() {
 	key := rediskey.GetSteamItemId()
-	err := gredis.Set(key, "1", time.Minute*5)
+	err := gredis.Set(key, "1", time.Minute*100)
 	if err != nil {
 		return
 	}
-	c := colly.NewCollector()
+	c := colly.NewCollector(
+		colly.Async(true), //设置为异步请求
+	)
+	//设置代理
+	if p, proxyerr := proxy.RoundRobinProxySwitcher(
+
+		"http://185.199.231.45:8382",
+		//"http://188.74.210.207:6286",
+		//"http://188.74.183.10:8279",
+		//"http://188.74.210.21:6100",
+		"http://45.155.68.129:8133",
+		"http://154.95.36.199:6893",
+		//"http://45.94.47.66:8110",
+		"http://144.168.217.88:8780",
+	); proxyerr == nil {
+		c.SetProxyFunc(p)
+	}
+	PrimitiveUrl := "https://steamcommunity.com/market/listings/"
+	cookie := []*http.Cookie{
+		{
+			Name:  "sessionid",
+			Value: "dc75823731edb06e3cdf0f50",
+		},
+		{
+			Name:  "steamLoginSecure",
+			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NF8yMUE4NkVBNF84ODU4NCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTQ0MTQzMSwgIm5iZiI6IDE2NjA3MTQ2MjAsICJpYXQiOiAxNjY5MzU0NjIwLCAianRpIjogIjBDNjlfMjFBODZFQ0ZfOUI0MzMiLCAib2F0IjogMTY2OTM1NDYyMCwgInJ0X2V4cCI6IDE2ODc1ODI1MDgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.r8IhWk4iTOKpZLVuMYMyNcKIVoih6EWPhb7sM_pcNIxVebGitNWXipPLK7CEx4PI4HzdNCLua7nffqww0JZhCw",
+		},
+		{
+			Name:  "Steam_Language",
+			Value: "tchinese",
+		},
+		{
+			Name:  "browserid",
+			Value: "2708381203747910562",
+		},
+		{
+			Name:  "steamCountry",
+			Value: "HK|8ad7d7ea3737e06297549f92142430ad",
+		},
+	} //设置cookie
+	c.SetCookies("https://steamcommunity.com", cookie)
 
 	goods, _ := myDao.BatchGetGoods()
-	for _, v := range goods {
-		time.Sleep(time.Millisecond * 1000)
 
-		b := c.Clone()
-		b.Limit(&colly.LimitRule{
-			RandomDelay: 2 * time.Second,
-		})
-		b.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
-		b.OnRequest(func(r *colly.Request) {
-			r.Headers.Add("cookie", "sessionid=cc08c404785bc602e1ae2ef5")
-		})
-		b.OnResponse(func(response *colly.Response) {
-			str := string(response.Body)
-			re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
-			match := re1.FindString(str)
-			re2 := regexp.MustCompile("[0-9]+")
-			match2 := re2.FindAllString(match, -1)
-			fmt.Println("name:", v.Name, "id:", match2[0])
-			myDao.UpdateItemId(v.ID, match2[0])
-		})
-		//发送错误
-		b.OnError(func(response *colly.Response, err error) {
-			fmt.Println("steam 访问限制", response.StatusCode, "name:", v.Name, "err:", err)
-			return
-		})
-		url := "https://steamcommunity.com/market/listings/" + fmt.Sprintf("%d", v.Appid) + "/" + v.MarketHashName
-		b.Visit(url)
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*steamcommunity.com*",
+		Parallelism: 5,
+		RandomDelay: 10 * time.Second,
+	})
+	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
+
+	c.OnResponse(func(response *colly.Response) {
+		str := string(response.Body)
+		re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
+		match := re1.FindString(str)
+		re2 := regexp.MustCompile("[0-9]+")
+		match2 := re2.FindAllString(match, -1)
+		//获取?后的参数
+		query := response.Request.URL.Query()
+		//获取id
+		id := query.Get("id")
+		//string 转int64
+		tableId, _ := strconv.ParseInt(id, 10, 64)
+		//更新itemid
+		fmt.Println("itemid", match2[0], "id:", tableId)
+		myDao.UpdateItemId(tableId, match2[0])
+	})
+
+	//发送错误
+	c.OnError(func(response *colly.Response, err error) {
+		fmt.Println("抓取 itemId 错误", "error:", err)
+		return
+	})
+	for _, v := range goods {
+		url := PrimitiveUrl + fmt.Sprintf("%d", v.Appid) + "/" + v.MarketHashName + "?id=" + fmt.Sprintf("%d", v.ID)
+		c.Visit(url)
 	}
+	c.Visit(PrimitiveUrl)
+
+	c.Wait()
+	fmt.Println("抓取结束")
 	gredis.Del(key)
 
 }
 
-func GetSteamInfo() {
-	c := colly.NewCollector(
-		colly.MaxDepth(2),
-		colly.Async(true),
-	)
-	c.Limit(&colly.LimitRule{
-		Parallelism: 2,
-		RandomDelay: 2 * time.Second,
-	})
-	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
-	c.OnResponse(func(response *colly.Response) {
-		id := response.Ctx.Get("itemNameId")
-		result, _ := BindT3(response.Body)
-		fmt.Println("id:", id, "success:", result.Success, "sell_order_count:", result.SellOrderCount)
-	})
-	c.OnError(func(r *colly.Response, err error) {
-		if r.StatusCode == 503 {
-			fmt.Println(string(r.Body))
-		}
-		fmt.Println("steam:", r.StatusCode)
-	})
-	goods, _ := myDao.BatchGetGoodsItemId()
-	for _, v := range goods {
-		if v.SteamItemNameId == "" {
-			fmt.Println("id = 空")
-			continue
-		}
-		c.OnRequest(func(r *colly.Request) {
-			r.Headers.Add("cookie", "sessionid=cc08c404785bc602e1ae2ef5")
-			r.Ctx.Put("itemNameId", v.SteamItemNameId)
-		})
-		time.Sleep(time.Millisecond * 50)
-		getUrl := "https://steamcommunity.com/market/itemordershistogram?country=PK&language=schinese&currency=23&item_nameid=" + v.SteamItemNameId + "&two_factor=0&norender=1"
-		c.Visit(getUrl)
-	}
-
-	c.Wait()
-}
-
+// 获取steam出售价格
 func GetSellingPrice() {
 	//https://steamcommunity.com/market/search/render/?query=&start=1&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23
 	key := rediskey.GetSteamSePriceKey()
@@ -212,7 +226,7 @@ func GetSellingPrice() {
 	)
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
-		Parallelism: 2,
+		Parallelism: 5,
 		RandomDelay: 12 * time.Second,
 	})
 	//设置代理

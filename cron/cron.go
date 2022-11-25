@@ -15,8 +15,8 @@ func main() {
 	//service.GetSellingPrice()
 	//service.GetTest()
 
-	//GetTest()
-	GetList()
+	GetTest()
+	//GetList()
 
 }
 
@@ -61,5 +61,6 @@ func GetList() {
 }
 
 func GetTest() {
-	service.LoginSteam()
+	//service.LoginSteam()
+	service.GetItemNameId()
 }
