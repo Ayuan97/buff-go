@@ -90,8 +90,8 @@ func GetGooDsListV2() {
 
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*buff.163.com*",
-		Parallelism: 3,
-		RandomDelay: 2 * time.Second,
+		Parallelism: 2,
+		RandomDelay: 6 * time.Second,
 	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
 

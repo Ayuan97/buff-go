@@ -3,13 +3,14 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
+	"strings"
 	"time"
-
-	"github.com/gocolly/colly"
 
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
+	"github.com/gocolly/colly"
 )
 
 type T3 struct {
@@ -208,30 +209,61 @@ func GetSellingPrice() {
 		//colly.Debugger(&debug.LogDebugger{}),
 		colly.Async(true), //设置为异步请求
 	)
-
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
 		Parallelism: 2,
-		RandomDelay: 15 * time.Second,
+		RandomDelay: 12 * time.Second,
 	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
 
+	cookie := []*http.Cookie{
+		{
+			Name:  "sessionid",
+			Value: "dc75823731edb06e3cdf0f50",
+		},
+		{
+			Name:  "steamLoginSecure",
+			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NV8yMUE4NkREN181MDZBMCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTM2Nzg5MiwgIm5iZiI6IDE2NjA2Mzk2OTksICJpYXQiOiAxNjY5Mjc5Njk5LCAianRpIjogIjBDNjlfMjFBODZFMjZfN0ExQjYiLCAib2F0IjogMTY2OTI3MzQ3NCwgInJ0X2V4cCI6IDE2ODcyMTgxNTgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.oykbl7I_Rn723RAgKcyePWBJrYxb0jm1hLsSvQYeHLEou3_3U7lzjzLjAtVCOUcVv_RUSRoXwWlHntGuK9CgDQ",
+		},
+		{
+			Name:  "Steam_Language",
+			Value: "tchinese",
+		},
+		{
+			Name:  "browserid",
+			Value: "2708381203747910562",
+		},
+		{
+			Name:  "steamCountry",
+			Value: "HK|8ad7d7ea3737e06297549f92142430ad",
+		},
+	} //设置cookie
+
+	c.SetCookies("https://steamcommunity.com", cookie)
+
 	c.OnRequest(func(r *colly.Request) {
-		r.Method = "GET"
-		r.Headers.Add("cookie", "steamLoginSecure=76561199029489705%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2Ql8yMUE1QUYwM19EQzVFNyIsICJzdWIiOiAiNzY1NjExOTkwMjk0ODk3MDUiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTE5NTAyMSwgIm5iZiI6IDE2NjA0NjgwNDksICJpYXQiOiAxNjY5MTA4MDQ5LCAianRpIjogIjBDNjZfMjFBNUFGMTFfMUQ4OTYiLCAib2F0IjogMTY2OTEwMjM1NCwgInJ0X2V4cCI6IDE2ODY5OTkyNzQsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.VpeDNUqb3lH50BbBxu4A6_8jUDNcpgpMNpoz8BQx1nibVWRgzD84sO5ywHahOQESk1eJi55MXyYLBWyoUKYWCw;sessionid=c10831710a7d0ffe7443b219;Steam_Language=tchinese;browserid=2708381203747910562;steamCountry=HK|8ad7d7ea3737e06297549f92142430ad")
+
 	})
 
 	c.OnResponse(func(r *colly.Response) {
 		data, _ := BindT4(r.Body)
-		InsertSteamGoods(data)
+		isUpdateCookie := InsertSteamGoods(data)
+		if isUpdateCookie {
+			siteCokkie := c.Cookies("https://steamcommunity.com")
+			fmt.Println("siteCokkie:", siteCokkie)
+			errCookie := c.SetCookies("https://steamcommunity.com", siteCokkie)
+			if errCookie != nil {
+				fmt.Println("设置cookie失败")
+			}
+		}
 	})
 	//发送错误
 	c.OnError(func(r *colly.Response, err error) {
-		fmt.Println("抓取错误:", r.StatusCode, "重试")
+		fmt.Println("抓取steam错误:", r.StatusCode, "重试", "err:", err)
 		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
-	var start = 1
+	var start = 0
 	for i := 1; i <= 60; i++ {
 		Url := PrimitiveUrl + "start=" + fmt.Sprintf("%d", start) +
 			"&count=" + fmt.Sprintf("%d", 100) +
@@ -252,28 +284,36 @@ func GetSellingPrice() {
 	gredis.Del(key)
 }
 
-func InsertSteamGoods(list T4) {
+func InsertSteamGoods(list T4) bool {
+	isUpdateCookie := false
 	for _, v := range list.Results {
-		fmt.Println("商品名称:", v.HashName, "商品价格:", v.SellPrice)
-		//查找是否存在 存在更新steam出售价格
-		goods, err := myDao.GetGoodsBySteamItemNameId(v.HashName)
-		if err != nil {
-			fmt.Println("查询商品错误:", err)
-			continue
+		fmt.Println("商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
+		//检查是否有 ¥ 符号
+		if strings.Contains(v.SellPriceText, "¥") {
+			//查找是否存在 存在更新steam出售价格
+			goods, err := myDao.GetGoodsBySteamItemNameId(v.HashName)
+			if err != nil {
+				fmt.Println("查询商品错误:", err)
+				continue
+			}
+			if goods.MarketHashName == "" {
+				fmt.Println("商品不存在")
+				continue
+			}
+			//更新商品价格
+			err = myDao.UpdateGoodsPrice(goods, v.SellPrice)
+			if err != nil {
+				fmt.Println("更新商品价格错误:", err)
+				continue
+			}
+			//更新比例
+			go UpdateGoodsProportion(goods.GoodsId)
+		} else {
+			fmt.Println("不是人民币 需要重新获取cookie")
+			isUpdateCookie = true
 		}
-		if goods.MarketHashName == "" {
-			fmt.Println("商品不存在")
-			continue
-		}
-		//更新商品价格
-		err = myDao.UpdateGoodsPrice(goods, v.SellPrice)
-		if err != nil {
-			fmt.Println("更新商品价格错误:", err)
-			continue
-		}
-		//更新比例
-		go UpdateGoodsProportion(goods.GoodsId)
 	}
+	return isUpdateCookie
 
 }
 

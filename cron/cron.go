@@ -11,12 +11,19 @@ import (
 )
 
 func main() {
-	c := cron.New(cron.WithSeconds())
 	//service.GetGooDsListV2()
 	//service.GetSellingPrice()
 	//service.GetTest()
 
-	//添加2秒钟定时任务 处理
+	//GetTest()
+	GetList()
+
+}
+
+func GetList() {
+	c := cron.New(cron.WithSeconds())
+
+	//buff-商品列表
 	c.AddFunc("1 * * * * *", func() {
 		key := rediskey.GetBuffKey()
 		value := gredis.Get(key)
@@ -29,7 +36,7 @@ func main() {
 		}
 	})
 
-	//添加2秒钟定时任务 处理
+	//steamc出售列表
 	c.AddFunc("1 * * * * *", func() {
 		key := rediskey.GetSteamSePriceKey()
 		value := gredis.Get(key)
@@ -42,18 +49,6 @@ func main() {
 		}
 	})
 
-	//c.AddFunc("1 * * * * *", func() {
-	//	itemIdKey := rediskey.GetSteamItemId()
-	//	itemValue := gredis.Get(itemIdKey)
-	//	if itemValue == "1" {
-	//		fmt.Println("itemid 获取 -任务执行中")
-	//	} else {
-	//		fmt.Println("itemid 获取 -开始执行任务:", time.Now())
-	//		service.GetInfo()
-	//		fmt.Println("itemid 获取 -任务结束:", time.Now())
-	//	}
-	//})
-
 	c.Start()
 	t1 := time.NewTimer(time.Second * 10)
 	for {
@@ -63,4 +58,8 @@ func main() {
 
 		}
 	}
+}
+
+func GetTest() {
+	service.LoginSteam()
 }
