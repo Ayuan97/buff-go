@@ -283,7 +283,7 @@ func GetSellingPrice() {
 		isUpdateCookie := InsertSteamGoods(data)
 		if isUpdateCookie {
 			siteCokkie := c.Cookies("https://steamcommunity.com")
-			fmt.Println("siteCokkie:", siteCokkie)
+			//fmt.Println("siteCokkie:", siteCokkie)
 			errCookie := c.SetCookies("https://steamcommunity.com", siteCokkie)
 			if errCookie != nil {
 				fmt.Println("设置cookie失败")
