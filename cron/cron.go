@@ -23,6 +23,14 @@ func main() {
 func GetList() {
 	c := cron.New(cron.WithSeconds())
 
+	//清空redis
+	key1 := rediskey.GetBuffKey()
+	gredis.Del(key1)
+	key2 := rediskey.GetSteamSePriceKey()
+	gredis.Del(key2)
+	key3 := rediskey.GetSteamItemId()
+	gredis.Del(key3)
+
 	//buff-商品列表
 	c.AddFunc("1 * * * * *", func() {
 		key := rediskey.GetBuffKey()
