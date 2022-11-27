@@ -188,8 +188,13 @@ func GetItemNameId() {
 		//string 转int64
 		tableId, _ := strconv.ParseInt(id, 10, 64)
 		//更新itemid
-		fmt.Println("itemid", match2[0], "id:", tableId)
-		myDao.UpdateItemId(tableId, match2[0])
+		if len(match2) > 0 {
+			fmt.Println("itemid", match2[0], "id:", tableId)
+			myDao.UpdateItemId(tableId, match2[0])
+		} else {
+			fmt.Println("itemid", match2, "id:", tableId)
+		}
+
 	})
 
 	//发送错误
@@ -247,11 +252,11 @@ func GetSellingPrice() {
 	cookie := []*http.Cookie{
 		{
 			Name:  "sessionid",
-			Value: "dc75823731edb06e3cdf0f50",
+			Value: "83477152196a50cc61fe3771",
 		},
 		{
 			Name:  "steamLoginSecure",
-			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NF8yMUE4NkVBNF84ODU4NCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTQ0MTQzMSwgIm5iZiI6IDE2NjA3MTQ2MjAsICJpYXQiOiAxNjY5MzU0NjIwLCAianRpIjogIjBDNjlfMjFBODZFQ0ZfOUI0MzMiLCAib2F0IjogMTY2OTM1NDYyMCwgInJ0X2V4cCI6IDE2ODc1ODI1MDgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.r8IhWk4iTOKpZLVuMYMyNcKIVoih6EWPhb7sM_pcNIxVebGitNWXipPLK7CEx4PI4HzdNCLua7nffqww0JZhCw",
+			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2QV8yMUFBQzNERl8zMjRGQiIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTYxMDE3NywgIm5iZiI6IDE2NjA4ODM0ODgsICJpYXQiOiAxNjY5NTIzNDg4LCAianRpIjogIjBDNjlfMjFBQUMzREZfQTNERUYiLCAib2F0IjogMTY2OTUyMzQ4OCwgInJ0X2V4cCI6IDE2ODc2NzM2MTAsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICI0Mi4yLjIwMy4yNDUiLCAiaXBfY29uZmlybWVyIjogIjQyLjIuMjAzLjI0NSIgfQ.Bi52M_eWjQtLHnF5tHbRRYWPEB3I6QGTuW1ADec5uaCr1Of5HBw33AcAx_SUAWgV-xtzor1EAigDLNVCoJCNCA",
 		},
 		{
 			Name:  "Steam_Language",
