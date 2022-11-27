@@ -58,17 +58,17 @@ func GetList() {
 	})
 
 	//itemid获取
-	c.AddFunc("1 * * * * *", func() {
-		key := rediskey.GetSteamItemId()
-		value := gredis.Get(key)
-		if value == "1" {
-			fmt.Println("itemid获取 - 任务执行中")
-		} else {
-			fmt.Println("itemid获取 - 开始执行任务:", time.Now())
-			service.GetItemNameId()
-			fmt.Println("itemid获取 - 任务结束:", time.Now())
-		}
-	})
+	//c.AddFunc("1 * * * * *", func() {
+	//	key := rediskey.GetSteamItemId()
+	//	value := gredis.Get(key)
+	//	if value == "1" {
+	//		fmt.Println("itemid获取 - 任务执行中")
+	//	} else {
+	//		fmt.Println("itemid获取 - 开始执行任务:", time.Now())
+	//		service.GetItemNameId()
+	//		fmt.Println("itemid获取 - 任务结束:", time.Now())
+	//	}
+	//})
 
 	c.Start()
 	t1 := time.NewTimer(time.Second * 1)

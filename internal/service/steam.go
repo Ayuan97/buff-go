@@ -231,7 +231,7 @@ func GetSellingPrice() {
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
 		Parallelism: 2,
-		RandomDelay: 12 * time.Second,
+		RandomDelay: 14 * time.Second,
 	})
 	//设置代理
 	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
@@ -264,11 +264,15 @@ func GetSellingPrice() {
 		},
 		{
 			Name:  "browserid",
-			Value: "2708381203747910562",
+			Value: "2565381858770267309",
 		},
 		{
 			Name:  "steamCountry",
 			Value: "HK|8ad7d7ea3737e06297549f92142430ad",
+		},
+		{
+			Name:  "steamMachineAuth76561199029489705",
+			Value: "AE24446E2A06AA0CBC7B761C87C529A59B8FF279",
 		},
 	} //设置cookie
 
