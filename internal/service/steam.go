@@ -218,12 +218,37 @@ func GetItemNameId() {
 func GetSellingPrice() {
 	//https://steamcommunity.com/market/search/render/?query=&start=1&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23
 	key := rediskey.GetSteamSePriceKey()
-	err := gredis.Set(key, "1", time.Minute*20)
+	err := gredis.Set(key, "1", time.Minute*200)
 	if err != nil {
 		return
 	}
-	PrimitiveUrl := "https://steamcommunity.com/market/search/render/?query=&"
+	config := myDao.GetSteamConfig()
+	Sessionid := ""
+	SteamLoginSecure := ""
+	Steam_Language := ""
+	browserid := ""
+	steamCountry := ""
+	//循环config
+	for _, v := range config {
+		if v.Key == "sessionid" {
+			Sessionid = v.Value
+		}
+		if v.Key == "steamLoginSecure" {
+			SteamLoginSecure = v.Value
+		}
+		if v.Key == "Steam_Language" {
+			Steam_Language = v.Value
+		}
+		if v.Key == "browserid" {
+			browserid = v.Value
+		}
+		if v.Key == "steamCountry" {
+			steamCountry = v.Value
+		}
 
+	}
+
+	PrimitiveUrl := "https://steamcommunity.com/market/search/render/?query=&"
 	c := colly.NewCollector(
 		//colly.Debugger(&debug.LogDebugger{}),
 		colly.Async(true), //设置为异步请求
@@ -231,7 +256,7 @@ func GetSellingPrice() {
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
 		Parallelism: 2,
-		RandomDelay: 14 * time.Second,
+		RandomDelay: 15 * time.Second,
 	})
 	//设置代理
 	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
@@ -252,27 +277,23 @@ func GetSellingPrice() {
 	cookie := []*http.Cookie{
 		{
 			Name:  "sessionid",
-			Value: "83477152196a50cc61fe3771",
+			Value: Sessionid,
 		},
 		{
 			Name:  "steamLoginSecure",
-			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2QV8yMUFBQzNERl8zMjRGQiIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTYxMDE3NywgIm5iZiI6IDE2NjA4ODM0ODgsICJpYXQiOiAxNjY5NTIzNDg4LCAianRpIjogIjBDNjlfMjFBQUMzREZfQTNERUYiLCAib2F0IjogMTY2OTUyMzQ4OCwgInJ0X2V4cCI6IDE2ODc2NzM2MTAsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICI0Mi4yLjIwMy4yNDUiLCAiaXBfY29uZmlybWVyIjogIjQyLjIuMjAzLjI0NSIgfQ.Bi52M_eWjQtLHnF5tHbRRYWPEB3I6QGTuW1ADec5uaCr1Of5HBw33AcAx_SUAWgV-xtzor1EAigDLNVCoJCNCA",
+			Value: SteamLoginSecure,
 		},
 		{
 			Name:  "Steam_Language",
-			Value: "tchinese",
+			Value: Steam_Language,
 		},
 		{
 			Name:  "browserid",
-			Value: "2565381858770267309",
+			Value: browserid,
 		},
 		{
 			Name:  "steamCountry",
-			Value: "HK|8ad7d7ea3737e06297549f92142430ad",
-		},
-		{
-			Name:  "steamMachineAuth76561199029489705",
-			Value: "AE24446E2A06AA0CBC7B761C87C529A59B8FF279",
+			Value: steamCountry,
 		},
 	} //设置cookie
 
