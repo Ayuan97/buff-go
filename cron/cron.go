@@ -44,10 +44,10 @@ func GetList() {
 			config := service.GetSystemConfig()
 			if config.BuffCookie == 1 && config.StartBuff == 1 {
 				service.GetGooDsListV2()
+				fmt.Println("buff列表获取 - 任务结束:", time.Now())
 			} else {
 				fmt.Println("buff列表获取 - 任务未开启 ", "Cookie 状态:", config.BuffCookie, "buff 价格获取状态 :", config.StartBuff)
 			}
-			fmt.Println("buff列表获取 - 任务结束:", time.Now())
 		}
 	})
 
@@ -63,10 +63,10 @@ func GetList() {
 			config := service.GetSystemConfig()
 			if config.SteamCookie == 1 && config.StartSteamSell == 1 {
 				service.GetSellingPrice()
+				fmt.Println("steamc出售价格获取 - 任务结束:", time.Now())
 			} else {
 				fmt.Println("steamc出售价格获取 - 任务未开启 ", "Cookie 状态:", config.SteamCookie, "steam 价格获取状态 :", config.StartSteamSell)
 			}
-			fmt.Println("steamc出售价格获取 - 任务结束:", time.Now())
 		}
 	})
 
