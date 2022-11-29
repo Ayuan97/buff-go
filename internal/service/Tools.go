@@ -1,12 +1,18 @@
 package service
 
 import (
+	"buff-go/internal/model"
 	"context"
 	"fmt"
 	"github.com/chromedp/chromedp"
 	"log"
 	"time"
 )
+
+//获取系统配置
+func GetSystemConfig() model.Config {
+	return myDao.GetOneSystemConfig(1)
+}
 
 // 更新比例
 func UpdateGoodsProportion(goodsId int) {

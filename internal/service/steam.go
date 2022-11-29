@@ -218,45 +218,25 @@ func GetItemNameId() {
 func GetSellingPrice() {
 	//https://steamcommunity.com/market/search/render/?query=&start=1&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23
 	key := rediskey.GetSteamSePriceKey()
+	CronSteamErrNum := rediskey.GetCronSteamSellPriceKey()
+	gredis.Set(CronSteamErrNum, 0, 0)
+
 	err := gredis.Set(key, "1", time.Minute*200)
 	if err != nil {
 		return
 	}
-	config := myDao.GetSteamConfig()
-	Sessionid := ""
-	SteamLoginSecure := ""
-	Steam_Language := ""
-	browserid := ""
-	steamCountry := ""
-	//循环config
-	for _, v := range config {
-		if v.Key == "sessionid" {
-			Sessionid = v.Value
-		}
-		if v.Key == "steamLoginSecure" {
-			SteamLoginSecure = v.Value
-		}
-		if v.Key == "Steam_Language" {
-			Steam_Language = v.Value
-		}
-		if v.Key == "browserid" {
-			browserid = v.Value
-		}
-		if v.Key == "steamCountry" {
-			steamCountry = v.Value
-		}
-
-	}
-
+	SteamConfig := myDao.GetOneSteamConfig(1)
+	SystemConfig := myDao.GetOneSystemConfig(1)
 	PrimitiveUrl := "https://steamcommunity.com/market/search/render/?query=&"
 	c := colly.NewCollector(
 		//colly.Debugger(&debug.LogDebugger{}),
 		colly.Async(true), //设置为异步请求
 	)
+	second := SystemConfig.SteamSellCatSecond
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
 		Parallelism: 2,
-		RandomDelay: 15 * time.Second,
+		RandomDelay: time.Duration(second) * time.Second,
 	})
 	//设置代理
 	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
@@ -277,49 +257,61 @@ func GetSellingPrice() {
 	cookie := []*http.Cookie{
 		{
 			Name:  "sessionid",
-			Value: Sessionid,
+			Value: SteamConfig.Sessionid,
 		},
 		{
 			Name:  "steamLoginSecure",
-			Value: SteamLoginSecure,
+			Value: SteamConfig.SteamLoginSecure,
 		},
 		{
 			Name:  "Steam_Language",
-			Value: Steam_Language,
+			Value: SteamConfig.SteamLanguage,
 		},
 		{
 			Name:  "browserid",
-			Value: browserid,
+			Value: SteamConfig.Browserid,
 		},
 		{
 			Name:  "steamCountry",
-			Value: steamCountry,
+			Value: SteamConfig.SteamCountry,
 		},
 	} //设置cookie
 
 	c.SetCookies("https://steamcommunity.com", cookie)
 
 	c.OnRequest(func(r *colly.Request) {
-
+		//系统任务是否停止
+		//SystemConfig := myDao.GetOneSystemConfig(1)
+		//if SystemConfig.StartSteamSell == 0  || SystemConfig.SteamCookie == 0 {
+		//	//停止任务
+		//	fmt.Println("停止任务","steam start:",SystemConfig.StartSteamSell,"cookie:",SystemConfig.SteamCookie)
+		//	r.Abort()
+		//}
 	})
 
 	c.OnResponse(func(r *colly.Response) {
 		data, _ := BindT4(r.Body)
 		isUpdateCookie := InsertSteamGoods(data)
 		if isUpdateCookie {
-			siteCokkie := c.Cookies("https://steamcommunity.com")
-			//fmt.Println("siteCokkie:", siteCokkie)
-			errCookie := c.SetCookies("https://steamcommunity.com", siteCokkie)
-			if errCookie != nil {
-				fmt.Println("设置cookie失败")
-			}
+			//cookie 失效 更新系统配置
+			myDao.UpdateSteamCookie(1, 0)
 		}
 	})
 	//发送错误
 	c.OnError(func(r *colly.Response, err error) {
-
+		errNum := gredis.Get(CronSteamErrNum)
+		//string 转 int
+		errNumInt, _ := strconv.Atoi(errNum)
+		if errNumInt >= 20 {
+			fmt.Println("本次任务失败过多，停止任务")
+			myDao.UpdateStartSteamSellPrice(1, 0)
+		} else {
+			if r.StatusCode == 0 {
+				//自增加1
+				gredis.Incr(CronSteamErrNum)
+			}
+		}
 		fmt.Println("抓取steam错误:", r.StatusCode, "当前代理", r.Request.ProxyURL, "err:", err, "string:", string(r.Body))
-		//r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
 	var start = 0
@@ -341,6 +333,7 @@ func GetSellingPrice() {
 	c.Wait()
 	fmt.Println("抓取结束")
 	gredis.Del(key)
+	gredis.Del(CronSteamErrNum)
 }
 
 func InsertSteamGoods(list T4) bool {
@@ -370,6 +363,7 @@ func InsertSteamGoods(list T4) bool {
 		} else {
 			fmt.Println("不是人民币 需要重新获取cookie")
 			isUpdateCookie = true
+			//
 		}
 	}
 	return isUpdateCookie

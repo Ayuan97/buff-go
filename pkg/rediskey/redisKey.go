@@ -7,6 +7,19 @@ const GetbuffKey = "get:buff:key"
 const GetSteamItemIdKey = "get:steamItemId:key"
 const GetSteamSellPriceKey = "get:steamSellPrice:key"
 
+const CronBuffKey = "cron:buff:key"
+const CronSteamSellPriceKey = "cron:steam:sell:price:key"
+
+//系统是否开启了steam出售价格获取
+func GetCronSteamSellPriceKey() string {
+	return CronSteamSellPriceKey
+}
+
+//系统是否开启了buff商品列表获取
+func GetCronBuffKey() string {
+	return CronBuffKey
+}
+
 // GetProxyMap 获取代理池
 func GetProxyMap(poolType int) string {
 	return fmt.Sprintf(ProxyMap, poolType)

@@ -35,11 +35,18 @@ func GetList() {
 	c.AddFunc("1 * * * * *", func() {
 		key := rediskey.GetBuffKey()
 		value := gredis.Get(key)
+
 		if value == "1" {
 			fmt.Println("buff列表获取 - 任务执行中")
 		} else {
 			fmt.Println("buff列表获取 - 开始执行任务:", time.Now())
-			service.GetGooDsListV2()
+			//
+			config := service.GetSystemConfig()
+			if config.BuffCookie == 1 && config.StartBuff == 1 {
+				service.GetGooDsListV2()
+			} else {
+				fmt.Println("buff列表获取 - 任务未开启 ", "Cookie 状态:", config.BuffCookie, "buff 价格获取状态 :", config.StartBuff)
+			}
 			fmt.Println("buff列表获取 - 任务结束:", time.Now())
 		}
 	})
@@ -52,7 +59,13 @@ func GetList() {
 			fmt.Println("steamc出售价格获取 - 任务执行中")
 		} else {
 			fmt.Println("steamc出售价格获取 - 开始执行任务:", time.Now())
-			service.GetSellingPrice()
+			//
+			config := service.GetSystemConfig()
+			if config.SteamCookie == 1 && config.StartSteamSell == 1 {
+				service.GetSellingPrice()
+			} else {
+				fmt.Println("steamc出售价格获取 - 任务未开启 ", "Cookie 状态:", config.SteamCookie, "steam 价格获取状态 :", config.StartSteamSell)
+			}
 			fmt.Println("steamc出售价格获取 - 任务结束:", time.Now())
 		}
 	})
