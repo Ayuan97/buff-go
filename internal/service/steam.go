@@ -312,7 +312,7 @@ func GetSellingPrice() {
 			}
 		}
 		fmt.Println("抓取steam错误:", r.StatusCode, "当前代理", r.Request.ProxyURL, "err:", err, "string:", string(r.Body))
-		r.Request.Retry()
+		//r.Request.Retry()
 	})
 	var start = 0
 	for i := 1; i <= 60; i++ {
