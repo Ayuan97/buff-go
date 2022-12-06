@@ -95,7 +95,7 @@ func GetGooDsListV2() {
 
 	c.OnRequest(func(r *colly.Request) {
 		r.Method = "GET"
-		r.Headers.Add("cookie", "session=1-g8qwAfbqlg_cagOTeu86Z7RkJTTm_PhlAFKoAWGO78Gf2034674671")
+		r.Headers.Add("cookie", "session=1-9hDskWV5LVfnM280Ft1trfe4RstcVWfX0mNZnvUezy2R2034674671")
 	})
 
 	c.OnResponse(func(r *colly.Response) {
