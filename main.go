@@ -2,36 +2,36 @@ package main
 
 import (
 	"buff-go/global"
-	"buff-go/internal/routers"
-	"buff-go/pkg/util"
-	"fmt"
-	"github.com/fatih/color"
 	"github.com/gin-gonic/gin"
 	"log"
-	"net/http"
-	"time"
-)
 
-var (
-	version, buildDate, commitID string
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func main() {
 	gin.SetMode(global.ServerSetting.RunMode)
-	router := routers.NewRouter()
-	s := &http.Server{
-		Addr:           ":" + global.ServerSetting.HttpPort,
-		Handler:        router,
-		ReadTimeout:    global.ServerSetting.ReadTimeout * time.Second,
-		WriteTimeout:   global.ServerSetting.WriteTimeout * time.Second,
-		MaxHeaderBytes: 1 << 20,
-	}
-	util.PrintHelloBanner(fmt.Sprintf("buff-go %s (build:%s %s)", version, commitID, buildDate))
-	fmt.Fprintf(color.Output, "小趴菜冲啊 service listen on %s\n",
-		color.GreenString(fmt.Sprintf("[info] start http server listening %s", global.ServerSetting.HttpPort)),
-	)
-	err := s.ListenAndServe()
+	bot, err := tgbotapi.NewBotAPI("5972902393:AAEWNlCSZ0YUqRHcNfHA9nu4jtxPqEeqNb0")
 	if err != nil {
-		log.Printf("Server err: %v", err)
+		log.Panic(err)
+	}
+
+	bot.Debug = true
+
+	log.Printf("Authorized on account %s", bot.Self.UserName)
+
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		if update.Message != nil { // If we got a message
+			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
+
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, update.Message.Text)
+			msg.ReplyToMessageID = update.Message.MessageID
+
+			bot.Send(msg)
+		}
 	}
 }
