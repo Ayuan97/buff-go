@@ -30,6 +30,9 @@ func sendTelegram(info *model.Goods) {
 	buffPrice := strconv.FormatFloat(info.BuyMaxPrice, 'f', 2, 64)
 	steamPrice := strconv.FormatFloat(info.SteamSellPrice, 'f', 2, 64)
 	Proportion := strconv.FormatFloat(info.Proportion, 'f', 2, 64)
+	//url 编码
+	buffUrl := "https://buff.163.com/goods/" + strconv.Itoa(info.GoodsId) + "?from=market#tab=buying"
+
 	//替换模板中的变量
 	text := fmt.Sprintf(str,
 		upTime,
@@ -37,8 +40,7 @@ func sendTelegram(info *model.Goods) {
 		buffPrice,
 		steamPrice,
 		Proportion,
-		fmt.Sprintf("https://buff.163.com/goods/ %s ?from=market#tab=buying",
-			strconv.Itoa(info.GoodsId)),
+		buffUrl,
 		info.SteamMarketUrl,
 	)
 	msg := tgbotapi.NewMessage(-842545535, text)
