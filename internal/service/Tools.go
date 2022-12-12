@@ -2,6 +2,8 @@ package service
 
 import (
 	"buff-go/internal/model"
+	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 	"context"
 	"fmt"
 	"github.com/chromedp/chromedp"
@@ -28,6 +30,19 @@ func UpdateGoodsProportion(goodsId int) {
 		if err != nil {
 			fmt.Println("更新比例失败", err)
 			return
+		}
+
+		if goodsInfo.Proportion > 0.9 && goodsInfo.SteamSellPrice > 100 {
+			//设置五分钟缓存 3*60
+			key := rediskey.GetGoodsNameKey(goodsInfo.GoodsId)
+			value := gredis.Get(key)
+			if value != "1" {
+				sendTelegram(goodsInfo)
+				gredis.Set(key, "1", 3*60)
+			} else {
+				//fmt.Println("已经发送过了")
+			}
+
 		}
 	}
 
