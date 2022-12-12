@@ -6,6 +6,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
 	"strconv"
+	"time"
 )
 
 func sendTelegram(info *model.Goods) {
@@ -24,13 +25,18 @@ func sendTelegram(info *model.Goods) {
 		"<strong>比例:%s</strong>" + "\n\r" +
 		"<a href='%s'>buff链接</a>" + "\n\r" +
 		"<a href='%s'>stema链接</a>" + "\n\r"
+	//所有变量转换为string
+	upTime := time.Unix(info.UpdatedAt, 0).Format("2006-01-02 15:04:05")
+	buffPrice := strconv.FormatFloat(info.BuyMaxPrice, 'f', 2, 64)
+	steamPrice := strconv.FormatFloat(info.SteamSellPrice, 'f', 2, 64)
+	Proportion := strconv.FormatFloat(info.Proportion, 'f', 2, 64)
 	//替换模板中的变量
 	text := fmt.Sprintf(str,
-		info.UpdatedAt,
+		upTime,
 		info.Name,
-		strconv.Itoa(int(info.BuyMaxPrice)),
-		strconv.Itoa(int(info.SteamSellPrice)),
-		strconv.Itoa(int(info.Proportion)),
+		buffPrice,
+		steamPrice,
+		Proportion,
 		fmt.Sprintf("https://buff.163.com/goods/ %s ?from=market#tab=buying",
 			strconv.Itoa(info.GoodsId)),
 		info.SteamMarketUrl,

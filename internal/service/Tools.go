@@ -33,12 +33,12 @@ func UpdateGoodsProportion(goodsId int) {
 		}
 
 		if goodsInfo.Proportion > 0.9 && goodsInfo.SteamSellPrice > 100 {
-			//设置五分钟缓存 3*60
+			//设置1分钟缓存 1*60
 			key := rediskey.GetGoodsNameKey(goodsInfo.GoodsId)
 			value := gredis.Get(key)
 			if value != "1" {
 				sendTelegram(goodsInfo)
-				gredis.Set(key, "1", 3*60)
+				gredis.Set(key, "1", time.Second*1*60)
 			} else {
 				//fmt.Println("已经发送过了")
 			}
