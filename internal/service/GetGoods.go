@@ -172,7 +172,7 @@ func InsertGoods(data []T, page int) {
 		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
 		myDao.CreateGoods(&goodsInfo)
 		//更新比例
-		go UpdateGoodsProportion(goodsInfo.GoodsId)
+		go UpdateGoodsProportion(goodsInfo.GoodsId, 1)
 	}
 
 	fmt.Println("第", page, "页抓取成功", "time:", time.Now().Format("2006-01-02 15:04:05"))

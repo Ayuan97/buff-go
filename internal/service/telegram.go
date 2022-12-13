@@ -23,8 +23,8 @@ func sendTelegram(info *model.Goods) {
 		"<u>buff求购:%s</u>" + "\n\r" +
 		"<u>steam出售:%s</u>" + "\n\r" +
 		"<strong>比例:%s</strong>" + "\n\r" +
-		"<a href='%s'>buff链接</a>" + "\n\r" +
-		"<a href='%s'>stema链接</a>" + "\n\r"
+		"<b>%s</b>" + "\n\r" +
+		"<b>%s</b>" + "\n\r"
 	//所有变量转换为string
 	upTime := time.Unix(info.UpdatedAt, 0).Format("2006-01-02 15:04:05")
 	buffPrice := strconv.FormatFloat(info.BuyMaxPrice, 'f', 2, 64)
@@ -45,6 +45,7 @@ func sendTelegram(info *model.Goods) {
 	)
 	msg := tgbotapi.NewMessage(-842545535, text)
 	msg.ParseMode = "HTML"
+	msg.DisableWebPagePreview = true
 
 	bot.Send(msg)
 }
