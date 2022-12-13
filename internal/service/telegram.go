@@ -5,6 +5,7 @@ import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -41,7 +42,7 @@ func sendTelegram(info *model.Goods) {
 		steamPrice,
 		Proportion,
 		buffUrl,
-		info.SteamMarketUrl,
+		url.QueryEscape(info.SteamMarketUrl),
 	)
 	msg := tgbotapi.NewMessage(-842545535, text)
 	msg.ParseMode = "HTML"
