@@ -42,7 +42,7 @@ func sendTelegram(info *model.Goods) {
 		steamPrice,
 		Proportion,
 		buffUrl,
-		url.QueryEscape(info.SteamMarketUrl),
+		url.PathEscape(info.SteamMarketUrl),
 	)
 	msg := tgbotapi.NewMessage(-842545535, text)
 	msg.ParseMode = "HTML"
