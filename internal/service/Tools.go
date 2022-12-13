@@ -30,7 +30,7 @@ func UpdateGoodsProportion(goodsId int, cat_type int) {
 			return
 		}
 		config := myDao.GetOneSystemConfig(1)
-		if cat_type == 2 && goodsInfo.Proportion > config.BotProportion && goodsInfo.SteamSellPrice > config.BotPrice {
+		if cat_type == 2 && goodsInfo.Proportion >= config.BotProportion && goodsInfo.SteamSellPrice >= config.BotPrice {
 			sendTelegram(goodsInfo)
 		}
 	}
