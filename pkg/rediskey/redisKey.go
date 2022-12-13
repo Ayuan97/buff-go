@@ -6,17 +6,21 @@ const ProxyMap = "proxy:list:map:%d" //代理池
 const GetbuffKey = "get:buff:key"
 const GetSteamItemIdKey = "get:steamItemId:key"
 const GetSteamSellPriceKey = "get:steamSellPrice:key"
-
+const ConfigKey = "get:config:key"
 const CronBuffKey = "cron:buff:key"
 const CronSteamSellPriceKey = "cron:steam:sell:price:key"
 const GoodsNameKey = "goods:name:key:%d"
 
-//系统是否开启了steam出售价格获取
+func GetConfigKey() string {
+	return ConfigKey
+}
+
+// 系统是否开启了steam出售价格获取
 func GetCronSteamSellPriceKey() string {
 	return CronSteamSellPriceKey
 }
 
-//系统是否开启了buff商品列表获取
+// 系统是否开启了buff商品列表获取
 func GetCronBuffKey() string {
 	return CronBuffKey
 }

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-//获取系统配置
+// 获取系统配置
 func GetSystemConfig() model.Config {
 	return myDao.GetOneSystemConfig(1)
 }
@@ -29,8 +29,8 @@ func UpdateGoodsProportion(goodsId int, cat_type int) {
 			fmt.Println("更新比例失败", err)
 			return
 		}
-
-		if cat_type == 2 && goodsInfo.Proportion > 0.9 && goodsInfo.SteamSellPrice > 100 {
+		config := myDao.GetOneSystemConfig(1)
+		if cat_type == 2 && goodsInfo.Proportion > config.BotProportion && goodsInfo.SteamSellPrice > config.BotPrice {
 			sendTelegram(goodsInfo)
 		}
 	}
