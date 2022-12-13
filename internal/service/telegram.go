@@ -33,7 +33,7 @@ func sendTelegram(info *model.Goods) {
 	Proportion := strconv.FormatFloat(info.Proportion, 'f', 2, 64)
 	//url 编码
 	buffUrl := "https://buff.163.com/goods/" + strconv.Itoa(info.GoodsId) + "?from=market#tab=buying"
-	steamUrl := "https://steamcommunity.com/market/listings/730/" + url.QueryEscape(info.MarketHashName)
+	steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(info.MarketHashName)
 
 	//替换模板中的变量
 	text := fmt.Sprintf(str,
