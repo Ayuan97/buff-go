@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gocolly/colly"
+	"net/http"
 	"net/url"
 	"time"
 )
@@ -70,16 +71,18 @@ type UrlParam struct {
 // 开启任务
 func GetGooDsListV2() {
 	key := rediskey.GetBuffKey()
-	err := gredis.Set(key, "1", time.Minute*5)
+	err := gredis.Set(key, "1", time.Minute*10)
 	if err != nil {
 		return
 	}
+	BuffConfig := myDao.GetOneBuffConfig(1)
+
 	PrimitiveUrl := "https://buff.163.com/api/market/goods?"
 	var urlParam UrlParam
 	urlParam.PageNum = 10000
 	urlParam.Game = "csgo"
-	urlParam.MaxPrice = 5000
-	urlParam.MinPrice = 50
+	urlParam.MaxPrice = BuffConfig.MaxPrice
+	urlParam.MinPrice = BuffConfig.MinPrice
 	urlParam.PageSize = 80
 	c := colly.NewCollector(
 		//colly.Debugger(&debug.LogDebugger{}),
@@ -88,15 +91,19 @@ func GetGooDsListV2() {
 
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*buff.163.com*",
-		Parallelism: 2,
-		RandomDelay: 6 * time.Second,
+		Parallelism: BuffConfig.Parallelism,
+		RandomDelay: time.Duration(BuffConfig.RandomDelay) * time.Second,
 	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
 
-	c.OnRequest(func(r *colly.Request) {
-		r.Method = "GET"
-		r.Headers.Add("cookie", "session=1-9hDskWV5LVfnM280Ft1trfe4RstcVWfX0mNZnvUezy2R2034674671")
-	})
+	cookie := []*http.Cookie{
+		{
+			Name:  "session",
+			Value: BuffConfig.Sessionid,
+		},
+	} //设置cookie
+
+	c.SetCookies("https://buff.163.com", cookie)
 
 	c.OnResponse(func(r *colly.Response) {
 		data, _ := BindData(r.Body)
@@ -108,7 +115,7 @@ func GetGooDsListV2() {
 		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
-	for i := 1; i <= 90; i++ {
+	for i := 1; i <= BuffConfig.PageNum; i++ {
 		Url := PrimitiveUrl + "game=" + urlParam.Game +
 			"&page_num=" + fmt.Sprintf("%d", i) +
 			//"&max_price=" + fmt.Sprintf("%d", urlParam.MaxPrice) +
@@ -137,6 +144,7 @@ func BindData(data []byte) (Response, error) {
 	}
 	if GoodList.Code == "Login Required" {
 		fmt.Println("登录超时:", GoodList.Code)
+		myDao.UpdateBuffCookie(1, 0)
 	}
 	return GoodList, err
 }
@@ -164,7 +172,7 @@ func InsertGoods(data []T, page int) {
 		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
 		myDao.CreateGoods(&goodsInfo)
 		//更新比例
-		go UpdateGoodsProportion(goodsInfo.GoodsId)
+		go UpdateGoodsProportion(goodsInfo.GoodsId, 1)
 	}
 
 	fmt.Println("第", page, "页抓取成功", "time:", time.Now().Format("2006-01-02 15:04:05"))

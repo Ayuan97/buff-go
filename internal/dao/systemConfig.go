@@ -21,6 +21,15 @@ func (d *Dao) UpdateSteamCookie(id int64, res int) error {
 	return SystemConfig.UpdateSteamCookie(d.engine)
 }
 
+//根据id 更新buffCookie
+func (d *Dao) UpdateBuffCookie(id int64, res int) error {
+	SystemConfig := model.Config{
+		Model:      &model.Model{ID: id},
+		BuffCookie: res,
+	}
+	return SystemConfig.UpdateBuffCookie(d.engine)
+}
+
 //根据id  更新 StartSteamSellPrice
 func (d *Dao) UpdateStartSteamSellPrice(id int64, res int) error {
 

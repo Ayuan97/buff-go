@@ -30,3 +30,8 @@ func (s *Config) UpdateSteamCookie(db *gorm.DB) error {
 func (s *Config) UpdateStartSteamSell(db *gorm.DB) error {
 	return db.Model(&Config{}).Where("id = ?", s.Model.ID).Update("start_steam_sell", s.StartSteamSell).Error
 }
+
+//根据id 更新buffCookie
+func (s *Config) UpdateBuffCookie(db *gorm.DB) error {
+	return db.Model(&Config{}).Where("id = ?", s.Model.ID).Update("buff_cookie", s.BuffCookie).Error
+}

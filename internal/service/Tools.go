@@ -15,7 +15,7 @@ func GetSystemConfig() model.Config {
 }
 
 // 更新比例
-func UpdateGoodsProportion(goodsId int) {
+func UpdateGoodsProportion(goodsId int, cat_type int) {
 
 	goodsInfo, err := myDao.GetGoodsByGoodsId(int64(goodsId))
 	if err != nil {
@@ -28,6 +28,10 @@ func UpdateGoodsProportion(goodsId int) {
 		if err != nil {
 			fmt.Println("更新比例失败", err)
 			return
+		}
+
+		if cat_type == 2 && goodsInfo.Proportion > 0.9 && goodsInfo.SteamSellPrice > 100 {
+			sendTelegram(goodsInfo)
 		}
 	}
 

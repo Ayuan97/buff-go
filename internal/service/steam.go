@@ -359,7 +359,7 @@ func InsertSteamGoods(list T4) bool {
 				continue
 			}
 			//更新比例
-			go UpdateGoodsProportion(goods.GoodsId)
+			go UpdateGoodsProportion(goods.GoodsId, 2)
 		} else {
 			fmt.Println("不是人民币 需要重新获取cookie")
 			isUpdateCookie = true
