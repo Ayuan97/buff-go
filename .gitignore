@@ -5,3 +5,5 @@ config.yaml
 *.log
 Reptile*
 dist
+/go.mod
+/go.sum
