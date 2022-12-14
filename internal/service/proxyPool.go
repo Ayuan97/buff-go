@@ -47,20 +47,13 @@ func StartGetProxy() {
 	}()
 
 	// 检查 chan 中的ip
-	go func() {
-		for {
-			//判断 chan 中的ip数量
-			if len(ipChan) > 0 {
-				fmt.Println("检查 chan 中的ip")
+	for i := 0; i < 50; i++ {
+		go func() {
+			for {
 				CheckProxy(<-ipChan)
-			} else {
-				fmt.Println("chan 中的ip数量不足")
-				time.Sleep(time.Second * 5)
 			}
-
-			time.Sleep(60 * time.Second)
-		}
-	}()
+		}()
+	}
 
 	//开启抓取  写入channel
 	for {
@@ -106,7 +99,6 @@ func run(ipChan chan<- *model.Ip) {
 
 		source.FreeProxy,
 	}
-	fmt.Println("funs:", funs)
 	for _, f := range funs {
 		wg.Add(1)
 		go func(f func() []*model.Ip) {
@@ -154,7 +146,7 @@ func CheckIP(ip *model.Ip) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		fmt.Printf("[CheckIP] testIP = %s, 代理不可用", testIP)
+		fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
 		return false
 	}
 
@@ -173,10 +165,10 @@ func CheckIP(ip *model.Ip) bool {
 			fmt.Printf("[CheckIP] testIP = %s, good good! 代理可用 \n", testIP)
 			return true
 		}
+		fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
 		return false
 	} else {
 		fmt.Printf("[CheckIP] testIP = %s, 代理不可用\n", testIP)
 		return false
 	}
-	return false
 }
