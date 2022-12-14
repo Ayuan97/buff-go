@@ -33,6 +33,10 @@ type Proxy struct {
 	PriceSuffix      string          `json:"price_suffix"`
 }
 
+func Test() {
+	source.Hidemy()
+}
+
 func StartGetProxy() {
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -96,7 +100,7 @@ func ProxyAdd(ip *model.Ip) {
 func run(ipChan chan<- *model.Ip) {
 	var wg sync.WaitGroup
 	funs := []func() []*model.Ip{
-
+		source.Hidemy,
 		source.FreeProxy,
 	}
 	for _, f := range funs {

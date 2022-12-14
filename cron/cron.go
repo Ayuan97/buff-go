@@ -99,4 +99,5 @@ func GetTest() {
 
 func GetProxy() {
 	service.StartGetProxy()
+	//service.Test()
 }
