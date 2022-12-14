@@ -39,38 +39,59 @@ func StartGetProxy() {
 	ipChan := make(chan *model.Ip, 2000)
 	// 检查库中的ip
 	go func() {
-		CheckProxyDB()
+		for {
+			fmt.Println("检查库中的ip")
+			CheckProxyDB()
+			time.Sleep(time.Minute * 5)
+		}
 	}()
 
 	// 检查 chan 中的ip
-	for i := 0; i < 50; i++ {
-		go func() {
-			for {
+	go func() {
+		for {
+			//判断 chan 中的ip数量
+			if len(ipChan) > 0 {
+				fmt.Println("检查 chan 中的ip")
 				CheckProxy(<-ipChan)
+			} else {
+				fmt.Println("chan 中的ip数量不足")
+				time.Sleep(time.Second * 5)
 			}
-		}()
-	}
+
+			time.Sleep(60 * time.Second)
+		}
+	}()
 
 	//开启抓取  写入channel
 	for {
-
-		n := myDao.CountIps()
-		log.Printf("Chan: %v, IP: %v\n", len(ipChan), n)
-		if len(ipChan) < 100 {
-			go run(ipChan)
-		}
-		time.Sleep(10 * time.Minute)
+		fmt.Println("开启抓取  写入channel")
+		go run(ipChan)
+		time.Sleep(3 * time.Minute)
 	}
 
 }
 
 func CheckProxyDB() {
+	ips, err := myDao.GetIpCount()
+	if err != nil {
+		return
+	}
+	var wg sync.WaitGroup
+	for _, v := range ips {
+		wg.Add(1)
+		go func(v *model.Ip) {
+			if !CheckIP(v) {
+				myDao.DeleteIp(v)
+			}
+			wg.Done()
+		}(v)
+	}
+	wg.Wait()
 
 }
 
 func CheckProxy(ip *model.Ip) {
 	if CheckIP(ip) {
-		fmt.Println("ip可用 添加到库中:", ip)
 		ProxyAdd(ip)
 	}
 }
@@ -133,7 +154,7 @@ func CheckIP(ip *model.Ip) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err.Error())
+		//fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err.Error())
 		return false
 	}
 
@@ -145,11 +166,11 @@ func CheckIP(ip *model.Ip) bool {
 		bodyByte, _ := io.ReadAll(body)
 		err := json.Unmarshal(bodyByte, &t)
 		if err != nil {
-			fmt.Println("json.Unmarshal err:", err)
+			//fmt.Println("json.Unmarshal err:", err, "body:", string(bodyByte))
 			return false
 		}
 		if t.Success == 1 {
-			fmt.Println("求购价格:", t.LowestSellOrder, "出售价格:", t.HighestBuyOrder)
+			//fmt.Println("求购价格:", t.LowestSellOrder, "出售价格:", t.HighestBuyOrder)
 			return true
 		}
 		return false

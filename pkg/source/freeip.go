@@ -23,19 +23,14 @@ func FreeProxy() []*model.Ip {
 	//RandomDelay: 5 * time.Second,
 	//})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36"
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL)
-	})
-	c.OnHTML("#list > div > div.table-responsive > div", func(e *colly.HTMLElement) {
 
-		fmt.Println("分析html")
+	c.OnHTML("#list > div > div.table-responsive > div", func(e *colly.HTMLElement) {
 
 		e.ForEach("tr", func(i int, element *colly.HTMLElement) {
 			//fmt.Println("分析tr", i, element.Text)
 			ip := element.ChildText("td:nth-child(1)")
 			port, _ := strconv.Atoi(element.ChildText("td:nth-child(2)"))
 			ok := element.ChildText("td:nth-child(7)")
-			fmt.Println("ip:", ip, "port:", port, "ok:", ok)
 			IsHttps := 0
 			if ok == "yes" {
 				IsHttps = 1

@@ -27,3 +27,16 @@ func (i *Ip) CountIps(db *gorm.DB) int64 {
 func (i *Ip) AddIp(db *gorm.DB) error {
 	return db.Create(i).Error
 }
+
+func (i *Ip) DeleteIp(db *gorm.DB) error {
+	return db.Delete(i).Error
+}
+
+func (i *Ip) GetIpCount(db *gorm.DB) ([]*Ip, error) {
+	var ips []*Ip
+	err := db.Find(&ips).Error
+	if err != nil {
+		return nil, err
+	}
+	return ips, nil
+}
