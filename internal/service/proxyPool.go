@@ -154,7 +154,7 @@ func CheckIP(ip *model.Ip) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		//fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err.Error())
+		fmt.Printf("[CheckIP] testIP = %s, 代理不可用", testIP)
 		return false
 	}
 
@@ -166,13 +166,16 @@ func CheckIP(ip *model.Ip) bool {
 		bodyByte, _ := io.ReadAll(body)
 		err := json.Unmarshal(bodyByte, &t)
 		if err != nil {
-			//fmt.Println("json.Unmarshal err:", err, "body:", string(bodyByte))
+			fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
 			return false
 		}
 		if t.Success == 1 {
-			//fmt.Println("求购价格:", t.LowestSellOrder, "出售价格:", t.HighestBuyOrder)
+			fmt.Printf("[CheckIP] testIP = %s, good good! 代理可用 \n", testIP)
 			return true
 		}
+		return false
+	} else {
+		fmt.Printf("[CheckIP] testIP = %s, 代理不可用\n", testIP)
 		return false
 	}
 	return false
