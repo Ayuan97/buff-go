@@ -47,6 +47,8 @@ func FreeProxy() []*model.Ip {
 				Ip:      ip,
 				Port:    port,
 				IsHttps: strconv.Itoa(IsHttps),
+				Type:    1,
+				Source:  "free-proxy-list.net",
 			})
 		})
 

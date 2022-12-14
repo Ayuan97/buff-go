@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -76,7 +76,7 @@ func CheckProxy(ip *model.Ip) {
 }
 
 func ProxyAdd(ip *model.Ip) {
-	//myDao.AddIp(ip)
+	myDao.AddIp(ip)
 }
 
 func run(ipChan chan<- *model.Ip) {
@@ -133,24 +133,26 @@ func CheckIP(ip *model.Ip) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err)
+		fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err.Error())
 		return false
 	}
 
 	defer resp.Body.Close()
 	if resp.StatusCode == 200 {
 		var t Proxy
-		body, _ := ioutil.ReadAll(resp.Body)
 		//判读内容是否正确
-		err := json.Unmarshal(body, &t)
+		body := resp.Body
+		bodyByte, _ := io.ReadAll(body)
+		err := json.Unmarshal(bodyByte, &t)
 		if err != nil {
-			fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err)
+			fmt.Println("json.Unmarshal err:", err)
 			return false
 		}
 		if t.Success == 1 {
+			fmt.Println("求购价格:", t.LowestSellOrder, "出售价格:", t.HighestBuyOrder)
 			return true
 		}
-		return true
+		return false
 	}
 	return false
 }

@@ -16,7 +16,7 @@ func main() {
 	//爬虫抓取
 	GetProxy()
 	//抓取buff和steamc的信息
-	GetList()
+	//GetList()
 
 }
 
