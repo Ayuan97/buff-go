@@ -124,6 +124,8 @@ func GetItemNameId() {
 	if err != nil {
 		return
 	}
+	SteamConfig := myDao.GetOneSteamConfig(1)
+	//SystemConfig := myDao.GetOneSystemConfig(1)
 	c := colly.NewCollector(
 		colly.Async(true), //设置为异步请求
 	)
@@ -145,25 +147,26 @@ func GetItemNameId() {
 	cookie := []*http.Cookie{
 		{
 			Name:  "sessionid",
-			Value: "dc75823731edb06e3cdf0f50",
+			Value: SteamConfig.Sessionid,
 		},
 		{
 			Name:  "steamLoginSecure",
-			Value: "76561198385127796%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEM2NF8yMUE4NkVBNF84ODU4NCIsICJzdWIiOiAiNzY1NjExOTgzODUxMjc3OTYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY2OTQ0MTQzMSwgIm5iZiI6IDE2NjA3MTQ2MjAsICJpYXQiOiAxNjY5MzU0NjIwLCAianRpIjogIjBDNjlfMjFBODZFQ0ZfOUI0MzMiLCAib2F0IjogMTY2OTM1NDYyMCwgInJ0X2V4cCI6IDE2ODc1ODI1MDgsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.r8IhWk4iTOKpZLVuMYMyNcKIVoih6EWPhb7sM_pcNIxVebGitNWXipPLK7CEx4PI4HzdNCLua7nffqww0JZhCw",
+			Value: SteamConfig.SteamLoginSecure,
 		},
 		{
 			Name:  "Steam_Language",
-			Value: "tchinese",
+			Value: SteamConfig.SteamLanguage,
 		},
 		{
 			Name:  "browserid",
-			Value: "2708381203747910562",
+			Value: SteamConfig.Browserid,
 		},
 		{
 			Name:  "steamCountry",
-			Value: "HK|8ad7d7ea3737e06297549f92142430ad",
+			Value: SteamConfig.SteamCountry,
 		},
 	} //设置cookie
+
 	c.SetCookies("https://steamcommunity.com", cookie)
 
 	goods, _ := myDao.BatchGetGoods()
@@ -171,7 +174,8 @@ func GetItemNameId() {
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
 		Parallelism: 1,
-		RandomDelay: 10 * time.Second,
+		Delay:       30 * time.Second,
+		RandomDelay: 5 * time.Second,
 	})
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
 

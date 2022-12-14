@@ -11,11 +11,11 @@ import (
 )
 
 func main() {
-	//service.GetGooDsListV2()
-	//service.GetSellingPrice()
-	//service.GetTest()
-
 	//GetTest()
+
+	//爬虫抓取
+	GetProxy()
+	//抓取buff和steamc的信息
 	GetList()
 
 }
@@ -95,5 +95,8 @@ func GetList() {
 }
 
 func GetTest() {
-	//service.LoginSteam()
+}
+
+func GetProxy() {
+	service.StartGetProxy()
 }

@@ -1,85 +1,156 @@
 package service
 
 import (
-	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
+	"buff-go/internal/model"
+	"buff-go/pkg/source"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
+	"runtime"
+	"strconv"
+	"sync"
 	"time"
 )
 
-type Pool struct {
-	Ip     string
-	Port   int
-	Https  int
-	Status int
-}
-
 type Proxy struct {
-	Msg  string `json:"msg"`
-	Code int    `json:"code"`
-	Data struct {
-		Count          int      `json:"count"`
-		DedupCount     int      `json:"dedup_count"`
-		OrderLeftCount int      `json:"order_left_count"`
-		ProxyList      []string `json:"proxy_list"`
-	} `json:"data"`
+	Success          int             `json:"success"`
+	SellOrderTable   string          `json:"sell_order_table"`
+	SellOrderSummary string          `json:"sell_order_summary"`
+	BuyOrderTable    string          `json:"buy_order_table"`
+	BuyOrderSummary  string          `json:"buy_order_summary"`
+	HighestBuyOrder  string          `json:"highest_buy_order"`
+	LowestSellOrder  string          `json:"lowest_sell_order"`
+	BuyOrderGraph    [][]interface{} `json:"buy_order_graph"`
+	SellOrderGraph   [][]interface{} `json:"sell_order_graph"`
+	GraphMaxY        int             `json:"graph_max_y"`
+	GraphMinX        float64         `json:"graph_min_x"`
+	GraphMaxX        float64         `json:"graph_max_x"`
+	PricePrefix      string          `json:"price_prefix"`
+	PriceSuffix      string          `json:"price_suffix"`
 }
 
-// 获取代理
-func GetProxy() string {
+func StartGetProxy() {
 
-	key := rediskey.GetProxyMap(1)
-	result := gredis.Srandmember(key)
-	return result.Val()
-}
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	ipChan := make(chan *model.Ip, 2000)
+	// 检查库中的ip
+	go func() {
+		CheckProxyDB()
+	}()
 
-// 代理失效 移出代理池 n s后再试
-func FailProxy(ipAddr string) int {
-	key := rediskey.GetProxyMap(1)
-	result := gredis.Srem(key, ipAddr)
-	if result > 0 {
-		go AddProxy(ipAddr, 10)
-		return 1
+	// 检查 chan 中的ip
+	for i := 0; i < 50; i++ {
+		go func() {
+			for {
+				CheckProxy(<-ipChan)
+			}
+		}()
 	}
-	return 0
+
+	//开启抓取  写入channel
+	for {
+
+		n := myDao.CountIps()
+		log.Printf("Chan: %v, IP: %v\n", len(ipChan), n)
+		if len(ipChan) < 100 {
+			go run(ipChan)
+		}
+		time.Sleep(10 * time.Minute)
+	}
+
 }
 
-func AddProxy(ipAddr string, number int64) {
-	fmt.Printf("等待 %d s 重新加入代理池\n", number)
-	time.Sleep(time.Duration(number) * time.Second)
-	key := rediskey.GetProxyMap(1)
-	gredis.SAdd(key, ipAddr)
+func CheckProxyDB() {
 
 }
 
-//快代理 - 获取代理信息
-func GetProxyInfo() string {
-	client := &http.Client{}
-	var url string
-	url = "https://dps.kdlapi.com/api/getdps/?orderid=955975957452070&num=1&signature=swzue8lxt5l3etjr45h17de7drek0axn&pt=1&sep=1"
-	req, err := http.NewRequest("GET", url, nil)
+func CheckProxy(ip *model.Ip) {
+	if CheckIP(ip) {
+		fmt.Println("ip可用 添加到库中:", ip)
+		ProxyAdd(ip)
+	}
+}
+
+func ProxyAdd(ip *model.Ip) {
+	//myDao.AddIp(ip)
+}
+
+func run(ipChan chan<- *model.Ip) {
+	var wg sync.WaitGroup
+	funs := []func() []*model.Ip{
+
+		source.FreeProxy,
+	}
+	fmt.Println("funs:", funs)
+	for _, f := range funs {
+		wg.Add(1)
+		go func(f func() []*model.Ip) {
+			temp := f()
+			for _, v := range temp {
+				ipChan <- v
+			}
+			wg.Done()
+		}(f)
+	}
+	wg.Wait()
+	log.Println("所有代理抓取完成")
+}
+
+// CheckIP is to check the ip work or not
+func CheckIP(ip *model.Ip) bool {
+	var pollURL string
+	var testIP string
+	port := strconv.Itoa(ip.Port)
+	if ip.IsHttps == "1" {
+		testIP = "https://" + ip.Ip + ":" + port
+		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=176288647"
+	} else {
+		testIP = "http://" + ip.Ip + ":" + port
+		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=176288647"
+	}
+	proxy, _ := url.Parse(testIP)
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+	netTransport := &http.Transport{
+		Proxy:               http.ProxyURL(proxy),
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: 50,
+	}
+	httpClient := &http.Client{
+		Timeout:   time.Second * 20,
+		Transport: netTransport,
+	}
+
+	request, _ := http.NewRequest("GET", pollURL, nil)
+	//设置一个header
+	request.Header.Add("accept", "text/plain")
+
+	resp, err := httpClient.Do(request)
+
 	if err != nil {
-		log.Fatal(err)
+		fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err)
+		return false
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
+
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var t Proxy
+		body, _ := ioutil.ReadAll(resp.Body)
+		//判读内容是否正确
+		err := json.Unmarshal(body, &t)
+		if err != nil {
+			fmt.Printf("[CheckIP] testIP = %s, Error = %v\n", testIP, err)
+			return false
+		}
+		if t.Success == 1 {
+			return true
+		}
+		return true
 	}
-	bodyText, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return "http://" + string(bodyText)
-	//fmt.Println(string(bodyText))
-	//解析到结构体
-	//var proxy Proxy
-	//err = json.Unmarshal(bodyText, &proxy)
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-	//fmt.Println(proxy.Data.ProxyList[0])
-	//return "https://" + proxy.Data.ProxyList[0]
+	return false
 }
