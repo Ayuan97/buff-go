@@ -11,9 +11,12 @@ type SteamConfig struct {
 	SteamLanguage    string `json:"steam_language"`
 	Browserid        string `json:"browserid"`
 	SteamCountry     string `json:"steam_country"`
+	Delay            int    `json:"delay"`
+	Parallelism      int    `json:"parallelism"`
+	RandomDelay      int    `json:"random_delay"`
 }
 
-//获取所有配置
+// 获取所有配置
 func (s *SteamConfig) GetAll(db *gorm.DB) []*SteamConfig {
 	var steamConfig []*SteamConfig
 	//查询所有
@@ -21,7 +24,7 @@ func (s *SteamConfig) GetAll(db *gorm.DB) []*SteamConfig {
 	return steamConfig
 }
 
-//根据id  获取单个配置
+// 根据id  获取单个配置
 func (s *SteamConfig) GetOne(db *gorm.DB) SteamConfig {
 	var steamConfig SteamConfig
 	//查询所有

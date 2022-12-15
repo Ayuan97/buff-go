@@ -6,13 +6,12 @@ import (
 
 type Config struct {
 	*Model
-	StartBuff          int     `json:"start_buff"`
-	StartSteamSell     int     `json:"start_steam_sell"`
-	SteamSellCatSecond int     `json:"steam_sell_cat_second"`
-	BuffCookie         int     `json:"buff_cookie"`
-	SteamCookie        int     `json:"steam_cookie"`
-	BotProportion      float64 `json:"bot_proportion"`
-	BotPrice           float64 `json:"bot_price"`
+	StartBuff      int     `json:"start_buff"`
+	StartSteamSell int     `json:"start_steam_sell"`
+	BuffCookie     int     `json:"buff_cookie"`
+	SteamCookie    int     `json:"steam_cookie"`
+	BotProportion  float64 `json:"bot_proportion"`
+	BotPrice       float64 `json:"bot_price"`
 }
 
 // 根据id  获取单个配置

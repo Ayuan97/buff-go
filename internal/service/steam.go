@@ -368,32 +368,18 @@ func GetSellingPrice() {
 		return
 	}
 	SteamConfig := myDao.GetOneSteamConfig(1)
-	SystemConfig := myDao.GetOneSystemConfig(1)
 	PrimitiveUrl := "https://steamcommunity.com/market/search/render/?query=&"
 	c := colly.NewCollector(
 		//colly.Debugger(&debug.LogDebugger{}),
 		colly.Async(true), //设置为异步请求
 	)
-	second := SystemConfig.SteamSellCatSecond
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
-		Parallelism: 2,
-		RandomDelay: time.Duration(second) * time.Second,
+		Delay:       time.Duration(SteamConfig.Delay),
+		Parallelism: SteamConfig.Parallelism,
+		RandomDelay: time.Duration(SteamConfig.RandomDelay) * time.Second,
 	})
-	//设置代理
-	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
-	//
-	//	"http://185.199.231.45:8382",
-	//	//"http://188.74.210.207:6286",
-	//	//"http://188.74.183.10:8279",
-	//	//"http://188.74.210.21:6100",
-	//	"http://45.155.68.129:8133",
-	//	"http://154.95.36.199:6893",
-	//	//"http://45.94.47.66:8110",
-	//	"http://144.168.217.88:8780",
-	//); proxyerr == nil {
-	//	c.SetProxyFunc(p)
-	//}
+
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
 
 	cookie := []*http.Cookie{
@@ -420,16 +406,6 @@ func GetSellingPrice() {
 	} //设置cookie
 
 	c.SetCookies("https://steamcommunity.com", cookie)
-
-	c.OnRequest(func(r *colly.Request) {
-		//系统任务是否停止
-		//SystemConfig := myDao.GetOneSystemConfig(1)
-		//if SystemConfig.StartSteamSell == 0  || SystemConfig.SteamCookie == 0 {
-		//	//停止任务
-		//	fmt.Println("停止任务","steam start:",SystemConfig.StartSteamSell,"cookie:",SystemConfig.SteamCookie)
-		//	r.Abort()
-		//}
-	})
 
 	c.OnResponse(func(r *colly.Response) {
 		data, _ := BindT4(r.Body)

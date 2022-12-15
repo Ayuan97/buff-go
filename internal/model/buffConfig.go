@@ -11,10 +11,11 @@ type BuffConfig struct {
 	MaxPrice    int    `json:"max_price"`
 	Parallelism int    `json:"parallelism"`
 	RandomDelay int    `json:"random_delay"`
+	Delay       int    `json:"delay"`
 	PageNum     int    `json:"page_num"`
 }
 
-//获取所有配置
+// 获取所有配置
 func (s *BuffConfig) GetBuffConfigAll(db *gorm.DB) []*BuffConfig {
 	var buffConfig []*BuffConfig
 	//查询所有
@@ -22,7 +23,7 @@ func (s *BuffConfig) GetBuffConfigAll(db *gorm.DB) []*BuffConfig {
 	return buffConfig
 }
 
-//根据id  获取单个配置
+// 根据id  获取单个配置
 func (s *BuffConfig) GetBuffConfigOne(db *gorm.DB) BuffConfig {
 	var buffConfig BuffConfig
 	//查询所有
