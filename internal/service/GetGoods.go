@@ -138,7 +138,6 @@ func GetGooDsListV2() {
 func BindData(data []byte) (Response, error) {
 	var GoodList Response
 	str := string(data)
-	fmt.Println("str:", str)
 	result, _ := url.QueryUnescape(str)
 	err := json.Unmarshal([]byte(result), &GoodList)
 	if err != nil {
