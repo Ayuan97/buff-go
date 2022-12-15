@@ -363,7 +363,7 @@ func GetSellingPrice() {
 	CronSteamErrNum := rediskey.GetCronSteamSellPriceKey()
 	gredis.Set(CronSteamErrNum, 0, 0)
 
-	err := gredis.Set(key, "1", time.Minute*200)
+	err := gredis.Set(key, "1", time.Hour*12)
 	if err != nil {
 		return
 	}

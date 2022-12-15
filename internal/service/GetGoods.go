@@ -71,7 +71,7 @@ type UrlParam struct {
 // 开启任务
 func GetGooDsListV2() {
 	key := rediskey.GetBuffKey()
-	err := gredis.Set(key, "1", time.Minute*10)
+	err := gredis.Set(key, "1", time.Hour*12)
 	if err != nil {
 		return
 	}
