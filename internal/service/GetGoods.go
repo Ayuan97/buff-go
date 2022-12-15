@@ -105,10 +105,19 @@ func GetGooDsListV2() {
 	} //设置cookie
 
 	c.SetCookies("https://buff.163.com", cookie)
-
+	Stop := false
+	c.OnRequest(func(r *colly.Request) {
+		if Stop == true {
+			r.Abort()
+		}
+	})
 	c.OnResponse(func(r *colly.Response) {
 		data, _ := BindData(r.Body)
 		InsertGoods(data.Data.Items, data.Data.PageNum)
+		if data.Code == "Login Required" || data.Code == "Action Forbidden" {
+			//结束任务
+			Stop = true
+		}
 	})
 	//发送错误
 	c.OnError(func(r *colly.Response, err error) {
