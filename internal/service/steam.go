@@ -375,7 +375,7 @@ func GetSellingPrice() {
 	)
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*steamcommunity.com*",
-		Delay:       time.Duration(SteamConfig.Delay),
+		Delay:       time.Duration(SteamConfig.Delay) * time.Second,
 		Parallelism: SteamConfig.Parallelism,
 		RandomDelay: time.Duration(SteamConfig.RandomDelay) * time.Second,
 	})

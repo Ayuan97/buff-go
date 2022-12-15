@@ -91,7 +91,7 @@ func GetGooDsListV2() {
 
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*buff.163.com*",
-		Delay:       time.Duration(BuffConfig.Delay),
+		Delay:       time.Duration(BuffConfig.Delay) * time.Second,
 		Parallelism: BuffConfig.Parallelism,
 		RandomDelay: time.Duration(BuffConfig.RandomDelay) * time.Second,
 	})
