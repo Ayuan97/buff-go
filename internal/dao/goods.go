@@ -9,6 +9,12 @@ type JuhePhoneCaptchaRsp struct {
 	Reason    string `json:"reason"`
 }
 
+// 获取所有商品
+func (d *Dao) GetAll() ([]*model.Goods, error) {
+	var goods model.Goods
+	return goods.GetAll(d.engine)
+}
+
 func (d *Dao) BatchCreateGoods(goodsList []*model.Goods) bool {
 	var goods model.Goods
 	return goods.Create(d.engine, goodsList)
@@ -46,4 +52,9 @@ func (d *Dao) GetGoodsByGoodsId(goodsId int64) (*model.Goods, error) {
 // 更新比例
 func (d *Dao) UpdateGoodsRatio(goods *model.Goods, Ratio float64) error {
 	return goods.UpdateRatio(d.engine, Ratio)
+}
+
+// 更新求购价格
+func (d *Dao) UpdateGoodsBuyPrice(goods *model.Goods, HighestBuyOrder float64, LowestSellOrder float64) error {
+	return goods.UpdateBuyPrice(d.engine, HighestBuyOrder, LowestSellOrder)
 }

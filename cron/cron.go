@@ -6,17 +6,15 @@ import (
 	"buff-go/pkg/rediskey"
 	"fmt"
 	"github.com/robfig/cron/v3"
-
 	"time"
 )
 
 func main() {
-	//GetTest()
 
-	//爬虫抓取
-	GetProxy()
-	//抓取buff和steamc的信息
-	//GetList()
+	//GetTest()
+	go StartProxy()
+	//抓取buff和steam的信息
+	GetList()
 
 }
 
@@ -93,11 +91,11 @@ func GetList() {
 		}
 	}
 }
-
-func GetTest() {
-}
-
-func GetProxy() {
+func StartProxy() {
+	service.GoodsChan()
+	service.GetSteamBuyPrice()
 	service.StartGetProxy()
-	//service.Test()
+
+}
+func GetTest() {
 }

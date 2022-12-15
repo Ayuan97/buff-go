@@ -69,7 +69,7 @@ func StartGetProxy() {
 }
 
 func CheckProxyDB() {
-	ips, err := myDao.GetIpCount()
+	ips, err := myDao.GetAllIp()
 	if err != nil {
 		return
 	}
@@ -122,12 +122,13 @@ func CheckIP(ip *model.Ip) bool {
 	var pollURL string
 	var testIP string
 	port := strconv.Itoa(ip.Port)
+	info := <-GoodChan
 	if ip.IsHttps == "1" {
 		testIP = "https://" + ip.Ip + ":" + port
-		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=176288647"
+		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=" + info.SteamItemNameId
 	} else {
 		testIP = "http://" + ip.Ip + ":" + port
-		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=176288647"
+		pollURL = "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=" + info.SteamItemNameId
 	}
 	proxy, _ := url.Parse(testIP)
 
@@ -150,7 +151,8 @@ func CheckIP(ip *model.Ip) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		//fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		GoodChan <- info
 		return false
 	}
 
@@ -162,17 +164,25 @@ func CheckIP(ip *model.Ip) bool {
 		bodyByte, _ := io.ReadAll(body)
 		err := json.Unmarshal(bodyByte, &t)
 		if err != nil {
-			fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+			//fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+			GoodChan <- info
 			return false
 		}
 		if t.Success == 1 {
-			fmt.Printf("[CheckIP] testIP = %s, good good! 代理可用 \n", testIP)
+			fmt.Printf("[CheckIP] testIP = %s, good good! 代理可用   name:%s \n", testIP, info.Name)
+			//string转float64
+			f, _ := strconv.ParseFloat(t.HighestBuyOrder, 64)
+			d, _ := strconv.ParseFloat(t.LowestSellOrder, 64)
+			//更新求购价格
+			myDao.UpdateGoodsBuyPrice(info, f/100, d/100)
 			return true
 		}
-		fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		//fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		GoodChan <- info
 		return false
 	} else {
-		fmt.Printf("[CheckIP] testIP = %s, 代理不可用\n", testIP)
+		//fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		GoodChan <- info
 		return false
 	}
 }

@@ -28,6 +28,8 @@ type Goods struct {
 	TransactedNum      int     `json:"transacted_num"`
 	SteamItemNameId    string  `json:"steam_item_name_id"`
 	SteamSellPrice     float64 `json:"steam_sell_price"`
+	HighestBuyOrder    float64 `json:"highest_buy_order"`
+	LowestSellOrder    float64 `json:"lowest_sell_order"`
 	Proportion         float64
 }
 
@@ -74,6 +76,17 @@ func (g *Goods) CreateOn(db *gorm.DB, goods *Goods) bool {
 	}
 
 	return false
+}
+
+// 获取所有商品
+func (g *Goods) GetAll(db *gorm.DB) ([]*Goods, error) {
+	var goods []*Goods
+	err := db.Where("steam_item_name_id != ''").Order("id desc").Find(&goods).Error
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	return goods, nil
 }
 
 func (g *Goods) Get(db *gorm.DB) ([]*Goods, error) {
@@ -149,6 +162,19 @@ func (g *Goods) UpdateRatio(db *gorm.DB, Ratio float64) error {
 	}).Error
 	if err != nil {
 		fmt.Println("UpdateRatio err :", err)
+	}
+	return err
+}
+
+// 更新求购价格
+func (g *Goods) UpdateBuyPrice(db *gorm.DB, HighestBuyOrder float64, LowestSellOrder float64) error {
+	//更新
+	err := db.Model(g).Where("id = ?", g.ID).Updates(Goods{
+		HighestBuyOrder: HighestBuyOrder,
+		LowestSellOrder: LowestSellOrder,
+	}).Error
+	if err != nil {
+		fmt.Println("UpdateQuickPrice err :", err)
 	}
 	return err
 }

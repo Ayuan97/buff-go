@@ -115,6 +115,7 @@ func GetGooDsListV2() {
 		r.Request.ProxyURL = ""
 		r.Request.Retry()
 	})
+	fmt.Println("")
 	for i := 1; i <= BuffConfig.PageNum; i++ {
 		Url := PrimitiveUrl + "game=" + urlParam.Game +
 			"&page_num=" + fmt.Sprintf("%d", i) +
