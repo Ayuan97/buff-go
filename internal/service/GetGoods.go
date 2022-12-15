@@ -138,6 +138,7 @@ func GetGooDsListV2() {
 func BindData(data []byte) (Response, error) {
 	var GoodList Response
 	str := string(data)
+	fmt.Println("str:", str)
 	result, _ := url.QueryUnescape(str)
 	err := json.Unmarshal([]byte(result), &GoodList)
 	if err != nil {
@@ -146,6 +147,10 @@ func BindData(data []byte) (Response, error) {
 	}
 	if GoodList.Code == "Login Required" {
 		fmt.Println("登录超时:", GoodList.Code)
+		myDao.UpdateBuffCookie(1, 0)
+	}
+	if GoodList.Code == "Action Forbidden" {
+		fmt.Println("账号被封禁:", GoodList.Code)
 		myDao.UpdateBuffCookie(1, 0)
 	}
 	return GoodList, err
