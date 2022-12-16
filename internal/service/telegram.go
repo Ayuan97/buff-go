@@ -21,16 +21,20 @@ func sendTelegram(info *model.Goods) {
 	//创建html消息模板
 	str := "%s" + "\n\r" +
 		"<b>%s</b>" + "\n\r" +
-		"<u>buff求购:%s</u>" + "\n\r" +
-		"<u>steam出售:%s</u>" + "\n\r" +
+		"<u>buff求购:%s</u>" + "                " + "<u>buff出售:%s</u>" + "\n\r" +
+		"<u>steam出售:%s</u>" + "                " + "<u>steam求购:%s</u>" + "\n\r" +
 		"<strong>比例:%s</strong>" + "\n\r" +
 		"<a>%s</a>" + "\n\r" +
 		"<a>%s</a>" + "\n\r"
+
 	//所有变量转换为string
 	upTime := time.Unix(info.UpdatedAt, 0).Format("2006-01-02 15:04:05")
 	buffPrice := strconv.FormatFloat(info.BuyMaxPrice, 'f', 2, 64)
+	buffSellPrice := strconv.FormatFloat(info.SellMinPrice, 'f', 2, 64)
 	steamPrice := strconv.FormatFloat(info.SteamSellPrice, 'f', 2, 64)
+	steamBuyPrice := strconv.FormatFloat(info.HighestBuyOrder, 'f', 2, 64)
 	Proportion := strconv.FormatFloat(info.Proportion, 'f', 2, 64)
+
 	//url 编码
 	buffUrl := "https://buff.163.com/goods/" + strconv.Itoa(info.GoodsId) + "?from=market#tab=buying"
 	steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(info.MarketHashName)
@@ -40,7 +44,9 @@ func sendTelegram(info *model.Goods) {
 		upTime,
 		info.Name,
 		buffPrice,
+		buffSellPrice,
 		steamPrice,
+		steamBuyPrice,
 		Proportion,
 		buffUrl,
 		steamUrl,
