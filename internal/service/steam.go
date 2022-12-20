@@ -124,6 +124,7 @@ type T4 struct {
 
 var ProxyString string
 var GoodChan = make(chan *model.Goods, 16000)
+var ItemChan = make(chan *model.Goods, 16000)
 
 func GoodsChan() {
 	//判断chan中的数据是否为空
@@ -255,104 +256,105 @@ func ChangeProxy() {
 	//fmt.Println("代理失效 切换代理", ProxyString)
 }
 
+func GetItemChan() {
+	//判断chan中的数据是否为空
+	go func() {
+		for {
+			if len(ItemChan) <= 200 {
+				//读取所有商品 写入channel
+				runtime.GOMAXPROCS(runtime.NumCPU())
+				result, _ := myDao.BatchGetGoods()
+				for _, v := range result {
+					ItemChan <- v
+				}
+			}
+			time.Sleep(time.Second * 1)
+		}
+	}()
+}
+func GetItemId() {
+
+	//开启协程 2
+	for i := 0; i < 1; i++ {
+		go func() {
+			for {
+				select {
+				case info := <-ItemChan:
+					fmt.Println("开始获取steam商品id", info.Name)
+					//查询代理数量
+					proxyCount := myDao.CountIps()
+					if proxyCount > 0 {
+						time.Sleep(time.Second * 3)
+						fmt.Println("代理数量充足 开始获取steam商品id", info.Name)
+						go func() {
+							GetItemNameId(info)
+						}()
+					} else {
+						fmt.Println("代理数量不足 等待抓取代理 目前代理数量:", proxyCount)
+						time.Sleep(time.Second * 60)
+					}
+
+				}
+			}
+		}()
+	}
+
+}
+
 // 获取游戏商品的itemid
-func GetItemNameId() {
-	key := rediskey.GetSteamItemId()
-	err := gredis.Set(key, "1", time.Minute*100)
+func GetItemNameId(info *model.Goods) {
+	if ProxyString == "" {
+		value, _ := myDao.GetIps()
+		if value.IsHttps == "1" {
+			ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
+		} else {
+			ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
+		}
+	}
+	pollURL := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(info.MarketHashName)
+	proxy, _ := url.Parse(ProxyString)
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+	netTransport := &http.Transport{
+		Proxy:               http.ProxyURL(proxy),
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: 50,
+	}
+	httpClient := &http.Client{
+		Timeout:   time.Second * 20,
+		Transport: netTransport,
+	}
+
+	request, _ := http.NewRequest("GET", pollURL, nil)
+	//设置一个header
+	request.Header.Add("accept", "text/plain")
+
+	resp, err := httpClient.Do(request)
 	if err != nil {
+		fmt.Println("获取steam商品id 发出请求失败")
+		ChangeProxy()
 		return
 	}
-	SteamConfig := myDao.GetOneSteamConfig(1)
-	//SystemConfig := myDao.GetOneSystemConfig(1)
-	c := colly.NewCollector(
-		colly.Async(true), //设置为异步请求
-	)
-	////设置代理
-	//if p, proxyerr := proxy.RoundRobinProxySwitcher(
-	//
-	//	"http://185.199.231.45:8382",
-	//	//"http://188.74.210.207:6286",
-	//	//"http://188.74.183.10:8279",
-	//	//"http://188.74.210.21:6100",
-	//	"http://45.155.68.129:8133",
-	//	"http://154.95.36.199:6893",
-	//	//"http://45.94.47.66:8110",
-	//	"http://144.168.217.88:8780",
-	//); proxyerr == nil {
-	//	c.SetProxyFunc(p)
-	//}
-	PrimitiveUrl := "https://steamcommunity.com/market/listings/"
-	cookie := []*http.Cookie{
-		{
-			Name:  "sessionid",
-			Value: SteamConfig.Sessionid,
-		},
-		{
-			Name:  "steamLoginSecure",
-			Value: SteamConfig.SteamLoginSecure,
-		},
-		{
-			Name:  "Steam_Language",
-			Value: SteamConfig.SteamLanguage,
-		},
-		{
-			Name:  "browserid",
-			Value: SteamConfig.Browserid,
-		},
-		{
-			Name:  "steamCountry",
-			Value: SteamConfig.SteamCountry,
-		},
-	} //设置cookie
-
-	c.SetCookies("https://steamcommunity.com", cookie)
-
-	goods, _ := myDao.BatchGetGoods()
-
-	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*steamcommunity.com*",
-		Parallelism: 1,
-		Delay:       30 * time.Second,
-		RandomDelay: 5 * time.Second,
-	})
-	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/105.0.0.0 Safari/537.36"
-
-	c.OnResponse(func(response *colly.Response) {
-		str := string(response.Body)
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		body, _ := io.ReadAll(resp.Body)
+		str := string(body)
 		re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
 		match := re1.FindString(str)
 		re2 := regexp.MustCompile("[0-9]+")
 		match2 := re2.FindAllString(match, -1)
-		//获取?后的参数
-		query := response.Request.URL.Query()
-		//获取id
-		id := query.Get("id")
-		//string 转int64
-		tableId, _ := strconv.ParseInt(id, 10, 64)
 		//更新itemid
 		if len(match2) > 0 {
-			fmt.Println("itemid", match2[0], "id:", tableId)
-			myDao.UpdateItemId(tableId, match2[0])
+			fmt.Println("itemid", match2[0], "id:", info.ID)
+			myDao.UpdateItemId(info.ID, match2[0])
 		} else {
-			fmt.Println("itemid", match2, "id:", tableId)
+			fmt.Println("itemid", match2, "id:", info.ID)
 		}
-
-	})
-
-	//发送错误
-	c.OnError(func(response *colly.Response, err error) {
-		fmt.Println("抓取 itemId 错误", "error:", err)
-		return
-	})
-	for _, v := range goods {
-		url := PrimitiveUrl + fmt.Sprintf("%d", v.Appid) + "/" + v.MarketHashName + "?id=" + fmt.Sprintf("%d", v.ID)
-		c.Visit(url)
+	} else {
+		ChangeProxy()
+		fmt.Println("获取steam商品id 发出请求失败2")
 	}
-	c.Visit(PrimitiveUrl)
-
-	c.Wait()
-	fmt.Println("抓取结束")
-	gredis.Del(key)
 
 }
 
