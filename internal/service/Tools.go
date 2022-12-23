@@ -2,6 +2,7 @@ package service
 
 import (
 	"buff-go/internal/model"
+	"buff-go/pkg/util"
 	"context"
 	"fmt"
 	"github.com/chromedp/chromedp"
@@ -31,7 +32,10 @@ func UpdateGoodsProportion(goodsId int, cat_type int) {
 		}
 		config := myDao.GetOneSystemConfig(1)
 		if cat_type == 2 && goodsInfo.Proportion >= config.BotProportion && goodsInfo.SteamSellPrice >= config.BotPrice {
-			sendTelegram(goodsInfo)
+			//商品名称是否包含 印花
+			if !util.Contains(goodsInfo.Name, "印花") {
+				sendTelegram(goodsInfo)
+			}
 		}
 	}
 

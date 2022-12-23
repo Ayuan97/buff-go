@@ -2,6 +2,7 @@ package util
 
 import (
 	"math/rand"
+	"strings"
 	"time"
 )
 
@@ -36,4 +37,9 @@ func RandStr(size int, kind StrType) []byte {
 		}
 	}
 	return result
+}
+
+// 字符串是否包含 xxx
+func Contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
