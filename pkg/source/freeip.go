@@ -44,6 +44,7 @@ func FreeProxy() []*model.Ip {
 				IsHttps: strconv.Itoa(IsHttps),
 				Type:    1,
 				Source:  "free-proxy-list.net",
+				Country: 2,
 			})
 		})
 

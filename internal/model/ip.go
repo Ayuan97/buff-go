@@ -9,6 +9,7 @@ type Ip struct {
 	*Model
 	Ip      string `json:"data"`
 	Type    int    `json:"type"`
+	Country int    `json:"country"`
 	IsHttps string `json:"is_https"`
 	Speed   int    `json:"speed"`
 	Source  string `json:"source"`

@@ -38,6 +38,7 @@ func Hidemy() []*model.Ip {
 				IsHttps: strconv.Itoa(IsHttps),
 				Type:    1,
 				Source:  "hidemy",
+				Country: 2,
 			})
 		})
 
