@@ -1,10 +1,3 @@
-App: # APP基础设置项
-  BarkToken: 
-  AttachmentIncomeRate: 0.8
-  MaxCommentCount: 10
-  DefaultContextTimeout: 60
-  DefaultPageSize: 10
-  MaxPageSize: 100
 Server: # 服务设置
   RunMode: release
   HttpIp: 127.0.0.1
@@ -12,7 +5,7 @@ Server: # 服务设置
   ReadTimeout: 60
   WriteTimeout: 60
 Log: # 日志
-  LogType: file # 可选file或zinc
+  LogType: file
   LogFileSavePath: storage/logs
   LogFileName: app
   LogFileExt: .log

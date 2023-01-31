@@ -63,7 +63,6 @@ func setupLogger() error {
 		return err
 	}
 	global.Logger = logger
-
 	return nil
 }
 
