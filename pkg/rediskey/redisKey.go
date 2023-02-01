@@ -11,6 +11,18 @@ const CronBuffKey = "cron:buff:key"
 const CronSteamSellPriceKey = "cron:steam:sell:price:key"
 const GoodsNameKey = "goods:name:key:%d"
 
+const BuffLocalKey = "buff:local:key"
+
+// 查询本地代理是否在使用中
+func GetBuffLocalKey() string {
+	return BuffLocalKey
+}
+
+// 查询buff账号是否在使用中
+func GetBuffAccountKey(id int) string {
+	return fmt.Sprintf("buff:account:key:%d", id)
+}
+
 func GetConfigKey() string {
 	return ConfigKey
 }
