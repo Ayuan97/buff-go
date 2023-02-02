@@ -33,9 +33,10 @@ type Proxy struct {
 	PriceSuffix      string          `json:"price_suffix"`
 }
 
-func Test() {
-	source.Hidemy()
-}
+var ProxyString string
+var GoodChan = make(chan *model.Goods, 16000)
+
+// 代理池
 
 func StartGetProxy() {
 
@@ -117,7 +118,6 @@ func run(ipChan chan<- *model.Ip) {
 	log.Println("所有代理抓取完成")
 }
 
-// CheckIP is to check the ip work or not
 func CheckIP(ip *model.Ip) bool {
 	var pollURL string
 	var testIP string
@@ -185,4 +185,137 @@ func CheckIP(ip *model.Ip) bool {
 		GoodChan <- info
 		return false
 	}
+}
+
+// 通过代理获取steam求购价格
+
+func GoodsChan() {
+	//判断chan中的数据是否为空
+	go func() {
+		for {
+			if len(GoodChan) <= 50 {
+				//读取所有商品 写入channel
+				runtime.GOMAXPROCS(runtime.NumCPU())
+				result, _ := myDao.GetAll()
+				for _, v := range result {
+					GoodChan <- v
+				}
+			}
+			time.Sleep(time.Second * 5)
+		}
+	}()
+}
+
+// 获取steam求购价格
+func GetSteamBuyPrice() {
+
+	//开启协程 2
+	for i := 0; i < 1; i++ {
+		go func() {
+			for {
+				select {
+				case info := <-GoodChan:
+					//查询代理数量
+					proxyCount := myDao.CountIps()
+					if proxyCount > 0 {
+						//获取steam价格
+						time.Sleep(time.Second * 1)
+						go func() {
+							//fmt.Println("开始获取steam求购价格", info.Name)
+							value := GetSteamPrice(info)
+							if !value {
+								//重新进入队列
+								//fmt.Println("获取steam求购价格失败 重新进入队列", info.Name)
+								GoodChan <- info
+							} else {
+								fmt.Println("获取steam求购价格成功", info.Name)
+							}
+						}()
+					} else {
+						fmt.Println("代理数量不足 等待抓取代理 目前代理数量:", proxyCount)
+						time.Sleep(time.Second * 60)
+					}
+
+				}
+			}
+		}()
+	}
+
+}
+
+func GetSteamPrice(info *model.Goods) bool {
+	if ProxyString == "" {
+		value, _ := myDao.GetIps()
+		if value.IsHttps == "1" {
+			ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
+		} else {
+			ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
+		}
+	}
+	pollURL := "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=" + info.SteamItemNameId
+
+	proxy, _ := url.Parse(ProxyString)
+
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+	netTransport := &http.Transport{
+		Proxy:               http.ProxyURL(proxy),
+		TLSClientConfig:     tlsConfig,
+		MaxIdleConnsPerHost: 50,
+	}
+	httpClient := &http.Client{
+		Timeout:   time.Second * 20,
+		Transport: netTransport,
+	}
+
+	request, _ := http.NewRequest("GET", pollURL, nil)
+	//设置一个header
+	request.Header.Add("accept", "text/plain")
+
+	resp, err := httpClient.Do(request)
+
+	if err != nil {
+		//fmt.Println("获取求购价格 发出请求失败", err)
+		ChangeProxy()
+		return false
+	}
+
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		var t Proxy
+		//判读内容是否正确
+		body := resp.Body
+		bodyByte, _ := io.ReadAll(body)
+		err := json.Unmarshal(bodyByte, &t)
+		if err != nil {
+			//fmt.Println("获取求购价格 发出请求失败", err)
+			ChangeProxy()
+			return false
+		}
+		if t.Success == 1 {
+			//string转float64
+			f, _ := strconv.ParseFloat(t.HighestBuyOrder, 64)
+			d, _ := strconv.ParseFloat(t.LowestSellOrder, 64)
+			//更新求购价格
+			myDao.UpdateGoodsBuyPrice(info, f/100, d/100)
+			return true
+		}
+		ChangeProxy()
+		return false
+	} else {
+		ChangeProxy()
+		return false
+	}
+}
+
+// 切换代理
+func ChangeProxy() {
+	//代理失效 切换代理
+	value, _ := myDao.GetRandomIps()
+	if value.IsHttps == "1" {
+		ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
+	} else {
+		ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
+	}
+	//fmt.Println("代理失效 切换代理", ProxyString)
 }

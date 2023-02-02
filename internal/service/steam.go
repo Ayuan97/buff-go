@@ -1,66 +1,13 @@
 package service
 
 import (
-	"buff-go/internal/model"
-	"crypto/tls"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"regexp"
-	"runtime"
-	"strconv"
-	"strings"
-	"time"
-
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
-	"github.com/gocolly/colly"
+	"fmt"
+	"time"
 )
 
-type T3 struct {
-	Success        int         `json:"success"`
-	SellOrderCount interface{} `json:"sell_order_count"`
-	SellOrderPrice string      `json:"sell_order_price"`
-	SellOrderTable []struct {
-		Price        string `json:"price"`
-		PriceWithFee string `json:"price_with_fee"`
-		Quantity     string `json:"quantity"`
-	} `json:"sell_order_table"`
-	BuyOrderCount string `json:"buy_order_count"`
-	BuyOrderPrice string `json:"buy_order_price"`
-	BuyOrderTable []struct {
-		Price    string `json:"price"`
-		Quantity string `json:"quantity"`
-	} `json:"buy_order_table"`
-	HighestBuyOrder string          `json:"highest_buy_order"`
-	LowestSellOrder string          `json:"lowest_sell_order"`
-	BuyOrderGraph   [][]interface{} `json:"buy_order_graph"`
-	SellOrderGraph  [][]interface{} `json:"sell_order_graph"`
-	GraphMaxY       int             `json:"graph_max_y"`
-	GraphMinX       float64         `json:"graph_min_x"`
-	GraphMaxX       float64         `json:"graph_max_x"`
-	PricePrefix     string          `json:"price_prefix"`
-	PriceSuffix     string          `json:"price_suffix"`
-}
-type T2 struct {
-	Success          int             `json:"success"`
-	SellOrderTable   string          `json:"sell_order_table"`
-	SellOrderSummary string          `json:"sell_order_summary"`
-	BuyOrderTable    string          `json:"buy_order_table"`
-	BuyOrderSummary  string          `json:"buy_order_summary"`
-	HighestBuyOrder  string          `json:"highest_buy_order"`
-	LowestSellOrder  string          `json:"lowest_sell_order"`
-	BuyOrderGraph    [][]interface{} `json:"buy_order_graph"`
-	SellOrderGraph   [][]interface{} `json:"sell_order_graph"`
-	GraphMaxY        int             `json:"graph_max_y"`
-	GraphMinX        float64         `json:"graph_min_x"`
-	GraphMaxX        float64         `json:"graph_max_x"`
-	PricePrefix      string          `json:"price_prefix"`
-	PriceSuffix      string          `json:"price_suffix"`
-}
-type T4 struct {
+type SteamGoodsInfo struct {
 	Success    bool `json:"success"`
 	Start      int  `json:"start"`
 	Pagesize   int  `json:"pagesize"`
@@ -122,394 +69,178 @@ type T4 struct {
 	} `json:"results"`
 }
 
-var ProxyString string
-var GoodChan = make(chan *model.Goods, 16000)
-var ItemChan = make(chan *model.Goods, 16000)
+// CheckSteamStatus 检测steam 状态是否开启
+func CheckSteamStatus() bool {
+	return true
+	config := myDao.GetOneSystemConfig(1)
+	if config.SteamCookie == 1 && config.StartSteamSell == 1 {
+		return true
+	} else {
+		return false
+	}
+}
 
-func GoodsChan() {
-	//判断chan中的数据是否为空
+// Buff 获取buff数据
+func Steam() {
+	if CheckSteamStatus() {
+		getSteam()
+	}
+}
+func getSteam() {
+
+	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
-			if len(GoodChan) <= 50 {
-				//读取所有商品 写入channel
-				runtime.GOMAXPROCS(runtime.NumCPU())
-				result, _ := myDao.GetAll()
-				for _, v := range result {
-					GoodChan <- v
-				}
+			//查询steam抓取是否开启
+			config := myDao.GetOneSystemConfig(1)
+			if config.StartSteamSell == 0 {
+				fmt.Println("steam出售抓取未开启")
+				time.Sleep(10 * time.Second)
+				continue
 			}
-			time.Sleep(time.Second * 5)
+			//查询本地代理和账号是否可用 可用则启动一个本地协程
+			//查询本地代理是否可用
+			steamLocalKey := rediskey.GetBuffLocalKey()
+			steamLocalResult := gredis.Get(steamLocalKey)
+			//查询账号是否可用
+			buffUser, err := myDao.GetOneBuffUser()
+			if err != nil {
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
+			buffAccountResult := gredis.Get(buffAccountKey)
+			if steamLocalResult == "" && buffAccountResult == "" {
+				//开启本地代理
+				go GetBuffData(0, "", buffUser)
+				time.Sleep(2 * time.Second)
+			} else {
+				fmt.Println("buff本地代理正在抓取中...")
+			}
+
+			////查询是否有可用代理
+			//proxy := myDao.GetOneProxy(1)
+			////查询是否有可用账号
+			//account := myDao.GetOneAccount(1)
+			//if proxy != nil && account != nil {
+			//	//启动一个协程 使用代理
+			//	go GetBuffData(1, proxy.Ip)
+			//}
+			time.Sleep(10 * time.Second)
 		}
 	}()
 }
 
-// 获取steam求购价格
-func GetSteamBuyPrice() {
-
-	//开启协程 2
-	for i := 0; i < 1; i++ {
-		go func() {
-			for {
-				select {
-				case info := <-GoodChan:
-					//查询代理数量
-					proxyCount := myDao.CountIps()
-					if proxyCount > 0 {
-						//获取steam价格
-						time.Sleep(time.Second * 1)
-						go func() {
-							//fmt.Println("开始获取steam求购价格", info.Name)
-							value := GetSteamPrice(info)
-							if !value {
-								//重新进入队列
-								//fmt.Println("获取steam求购价格失败 重新进入队列", info.Name)
-								GoodChan <- info
-							} else {
-								fmt.Println("获取steam求购价格成功", info.Name)
-							}
-						}()
-					} else {
-						fmt.Println("代理数量不足 等待抓取代理 目前代理数量:", proxyCount)
-						time.Sleep(time.Second * 60)
-					}
-
-				}
-			}
-		}()
-	}
-
-}
-func GetSteamPrice(info *model.Goods) bool {
-	if ProxyString == "" {
-		value, _ := myDao.GetIps()
-		if value.IsHttps == "1" {
-			ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
-		} else {
-			ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
-		}
-	}
-	pollURL := "https://steamcommunity.com/market/itemordershistogram?language=english&currency=23&item_nameid=" + info.SteamItemNameId
-
-	proxy, _ := url.Parse(ProxyString)
-
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-
-	netTransport := &http.Transport{
-		Proxy:               http.ProxyURL(proxy),
-		TLSClientConfig:     tlsConfig,
-		MaxIdleConnsPerHost: 50,
-	}
-	httpClient := &http.Client{
-		Timeout:   time.Second * 20,
-		Transport: netTransport,
-	}
-
-	request, _ := http.NewRequest("GET", pollURL, nil)
-	//设置一个header
-	request.Header.Add("accept", "text/plain")
-
-	resp, err := httpClient.Do(request)
-
-	if err != nil {
-		//fmt.Println("获取求购价格 发出请求失败", err)
-		ChangeProxy()
-		return false
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
-		var t Proxy
-		//判读内容是否正确
-		body := resp.Body
-		bodyByte, _ := io.ReadAll(body)
-		err := json.Unmarshal(bodyByte, &t)
-		if err != nil {
-			//fmt.Println("获取求购价格 发出请求失败", err)
-			ChangeProxy()
-			return false
-		}
-		if t.Success == 1 {
-			//string转float64
-			f, _ := strconv.ParseFloat(t.HighestBuyOrder, 64)
-			d, _ := strconv.ParseFloat(t.LowestSellOrder, 64)
-			//更新求购价格
-			myDao.UpdateGoodsBuyPrice(info, f/100, d/100)
-			return true
-		}
-		ChangeProxy()
-		return false
-	} else {
-		ChangeProxy()
-		return false
-	}
-}
-
-// 切换代理
-func ChangeProxy() {
-	//代理失效 切换代理
-	value, _ := myDao.GetRandomIps()
-	if value.IsHttps == "1" {
-		ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
-	} else {
-		ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
-	}
-	//fmt.Println("代理失效 切换代理", ProxyString)
-}
-
-func GetItemChan() {
-	//判断chan中的数据是否为空
-	go func() {
-		for {
-			if len(ItemChan) <= 200 {
-				//读取所有商品 写入channel
-				runtime.GOMAXPROCS(runtime.NumCPU())
-				result, _ := myDao.BatchGetGoods()
-				for _, v := range result {
-					ItemChan <- v
-				}
-			}
-			time.Sleep(time.Second * 1)
-		}
-	}()
-}
-func GetItemId() {
-
-	//开启协程 2
-	for i := 0; i < 1; i++ {
-		go func() {
-			for {
-				select {
-				case info := <-ItemChan:
-					fmt.Println("开始获取steam商品id", info.Name)
-					//查询代理数量
-					proxyCount := myDao.CountIps()
-					if proxyCount > 0 {
-						time.Sleep(time.Second * 3)
-						fmt.Println("代理数量充足 开始获取steam商品id", info.Name)
-						go func() {
-							GetItemNameId(info)
-						}()
-					} else {
-						fmt.Println("代理数量不足 等待抓取代理 目前代理数量:", proxyCount)
-						time.Sleep(time.Second * 60)
-					}
-
-				}
-			}
-		}()
-	}
-
-}
-
-// 获取游戏商品的itemid
-func GetItemNameId(info *model.Goods) {
-	if ProxyString == "" {
-		value, _ := myDao.GetIps()
-		if value.IsHttps == "1" {
-			ProxyString = "https://" + value.Ip + ":" + strconv.Itoa(value.Port)
-		} else {
-			ProxyString = "http://" + value.Ip + ":" + strconv.Itoa(value.Port)
-		}
-	}
-	pollURL := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(info.MarketHashName)
-	proxy, _ := url.Parse(ProxyString)
-
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-
-	netTransport := &http.Transport{
-		Proxy:               http.ProxyURL(proxy),
-		TLSClientConfig:     tlsConfig,
-		MaxIdleConnsPerHost: 50,
-	}
-	httpClient := &http.Client{
-		Timeout:   time.Second * 20,
-		Transport: netTransport,
-	}
-
-	request, _ := http.NewRequest("GET", pollURL, nil)
-	//设置一个header
-	request.Header.Add("accept", "text/plain")
-
-	resp, err := httpClient.Do(request)
-	if err != nil {
-		fmt.Println("获取steam商品id 发出请求失败")
-		ChangeProxy()
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
-		body, _ := io.ReadAll(resp.Body)
-		str := string(body)
-		re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
-		match := re1.FindString(str)
-		re2 := regexp.MustCompile("[0-9]+")
-		match2 := re2.FindAllString(match, -1)
-		//更新itemid
-		if len(match2) > 0 {
-			fmt.Println("itemid", match2[0], "id:", info.ID)
-			myDao.UpdateItemId(info.ID, match2[0])
-		} else {
-			fmt.Println("itemid", match2, "id:", info.ID)
-		}
-	} else {
-		ChangeProxy()
-		fmt.Println("获取steam商品id 发出请求失败2")
-	}
-
-}
-
-// 获取steam出售价格
-func GetSellingPrice() {
-	//https://steamcommunity.com/market/search/render/?query=&start=1&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23
-	key := rediskey.GetSteamSePriceKey()
-	CronSteamErrNum := rediskey.GetCronSteamSellPriceKey()
-	gredis.Set(CronSteamErrNum, 0, 0)
-
-	err := gredis.Set(key, "1", time.Hour*12)
-	if err != nil {
-		return
-	}
-	SteamConfig := myDao.GetOneSteamConfig(1)
-	PrimitiveUrl := "https://steamcommunity.com/market/search/render/?query=&"
-	c := colly.NewCollector(
-		//colly.Debugger(&debug.LogDebugger{}),
-		colly.Async(true), //设置为异步请求
-	)
-	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*steamcommunity.com*",
-		Delay:       time.Duration(SteamConfig.Delay) * time.Second,
-		Parallelism: SteamConfig.Parallelism,
-		RandomDelay: time.Duration(SteamConfig.RandomDelay) * time.Second,
-	})
-
-	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
-
-	cookie := []*http.Cookie{
-		{
-			Name:  "sessionid",
-			Value: SteamConfig.Sessionid,
-		},
-		{
-			Name:  "steamLoginSecure",
-			Value: SteamConfig.SteamLoginSecure,
-		},
-		{
-			Name:  "Steam_Language",
-			Value: SteamConfig.SteamLanguage,
-		},
-		{
-			Name:  "browserid",
-			Value: SteamConfig.Browserid,
-		},
-		{
-			Name:  "steamCountry",
-			Value: SteamConfig.SteamCountry,
-		},
-	} //设置cookie
-
-	c.SetCookies("https://steamcommunity.com", cookie)
-
-	c.OnResponse(func(r *colly.Response) {
-		data, _ := BindT4(r.Body)
-		isUpdateCookie := InsertSteamGoods(data)
-		if isUpdateCookie {
-			//cookie 失效 更新系统配置
-			myDao.UpdateSteamCookie(1, 0)
-		}
-	})
-	//发送错误
-	c.OnError(func(r *colly.Response, err error) {
-		errNum := gredis.Get(CronSteamErrNum)
-		//string 转 int
-		errNumInt, _ := strconv.Atoi(errNum)
-		if errNumInt >= 20 {
-			fmt.Println("本次任务失败过多，停止任务")
-			myDao.UpdateStartSteamSellPrice(1, 0)
-		} else {
-			if r.StatusCode == 0 {
-				//自增加1
-				gredis.Incr(CronSteamErrNum)
-			}
-		}
-		fmt.Println("抓取steam错误:", r.StatusCode, "当前代理", r.Request.ProxyURL, "err:", err, "string:", string(r.Body))
-		//r.Request.Retry()
-	})
-	var start = 0
-	for i := 1; i <= 60; i++ {
-		Url := PrimitiveUrl + "start=" + fmt.Sprintf("%d", start) +
-			"&count=" + fmt.Sprintf("%d", 100) +
-			"&search_descriptions=" + fmt.Sprintf("%d", 0) +
-			"&sort_column=price" +
-			"&sort_dir=desc" +
-			"&appid=730" +
-			"&norender=1" +
-			"&currency=23"
-		fmt.Println("url:", Url)
-		c.Visit(Url)
-		start = start + 100
-	}
-	c.Visit(PrimitiveUrl)
-
-	c.Wait()
-	fmt.Println("抓取结束")
-	gredis.Del(key)
-	gredis.Del(CronSteamErrNum)
-}
-
-func InsertSteamGoods(list T4) bool {
-	isUpdateCookie := false
-	for _, v := range list.Results {
-		fmt.Println("商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
-		//检查是否有 ¥ 符号
-		if strings.Contains(v.SellPriceText, "¥") {
-			//查找是否存在 存在更新steam出售价格
-			goods, err := myDao.GetGoodsBySteamItemNameId(v.HashName)
-			if err != nil {
-				fmt.Println("查询商品错误:", err)
-				continue
-			}
-			if goods.MarketHashName == "" {
-				fmt.Println("商品不存在")
-				continue
-			}
-			//更新商品价格
-			err = myDao.UpdateGoodsPrice(goods, v.SellPrice)
-			if err != nil {
-				fmt.Println("更新商品价格错误:", err)
-				continue
-			}
-			//更新比例
-			go UpdateGoodsProportion(goods.GoodsId, 2)
-		} else {
-			fmt.Println("不是人民币 需要重新获取cookie")
-			isUpdateCookie = true
-			//
-		}
-	}
-	return isUpdateCookie
-
-}
-
-// 绑定数据 T4
-func BindT4(data []byte) (T4, error) {
-	var Steam T4
-	str := string(data)
-	err := json.Unmarshal([]byte(str), &Steam)
-	if err != nil {
-		fmt.Println("json err :", err)
-		return Steam, err
-	}
-	return Steam, err
-}
-
-// 绑定数据
-func BindT3(data []byte) (T3, error) {
-	var SteamInfo T3
-	str := string(data)
-	err := json.Unmarshal([]byte(str), &SteamInfo)
-	if err != nil {
-		fmt.Println("json err :", err)
-		return SteamInfo, err
-	}
-	return SteamInfo, err
-}
+//func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
+//	//设置本地代理正在抓取中
+//	buffLocalKey := rediskey.GetBuffLocalKey()
+//	gredis.Set(buffLocalKey, "1", 0)
+//	//设置账号正在抓取中
+//	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
+//	gredis.Set(buffAccountKey, "1", 0)
+//	//修改状态
+//	myDao.UpdateBuffUserStatus(int(account.ID), 1)
+//	for {
+//		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"))
+//		BuffConfig := myDao.GetOneBuffConfig(1)
+//		//循环N次 获取buff数据
+//		for i := 1; i <= BuffConfig.PageNum; i++ {
+//			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.asc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
+//			client := &http.Client{}
+//			//isProxy 设置代理
+//			if isProxy == 1 {
+//				proxyURL, _ := url.Parse(proxy)
+//				client.Transport = &http.Transport{
+//					Proxy: http.ProxyURL(proxyURL),
+//				}
+//			}
+//			req, err := http.NewRequest("GET", geturl, nil)
+//			if err != nil {
+//				fmt.Println("buff err: 发起请求失败", err)
+//				//结束协程
+//				fmt.Println("结束协程")
+//				//设置本地代理抓取结束
+//				gredis.Del(buffLocalKey)
+//				//设置账号抓取结束
+//				gredis.Del(buffAccountKey)
+//				myDao.UpdateBuffUserStatus(int(account.ID), 0)
+//				runtime.Goexit()
+//				return
+//			}
+//			req.AddCookie(&http.Cookie{Name: "Device-Id", Value: account.DeviceId})
+//			req.AddCookie(&http.Cookie{Name: "Locale-Supported", Value: "zh-Hans"})
+//			req.AddCookie(&http.Cookie{Name: "csrf_token", Value: account.CsrfToken})
+//			req.AddCookie(&http.Cookie{Name: "game", Value: "csgo"})
+//			req.AddCookie(&http.Cookie{Name: "remember_me", Value: account.RememberMe})
+//			req.AddCookie(&http.Cookie{Name: "session", Value: account.Sessionid})
+//			resp, err := client.Do(req)
+//			if err != nil {
+//				fmt.Println("buff err2:", err)
+//				endTask(resp, account, 0, 1)
+//				return
+//			}
+//			body, err := ioutil.ReadAll(resp.Body)
+//			if err != nil {
+//				fmt.Println("buff err3:", err)
+//				//结束协程
+//				endTask(resp, account, 0, 1)
+//				return
+//			}
+//			var buffData BuffData
+//			err = json.Unmarshal(body, &buffData)
+//			if err != nil {
+//				fmt.Println("buff err4:", err)
+//				endTask(resp, account, 0, 1)
+//				return
+//			}
+//			if buffData.Code == "Action Forbidden" {
+//				fmt.Println("buff err6:", buffData.Code)
+//				endTask(resp, account, 3, 1)
+//			}
+//			if buffData.Code == "Login Required" {
+//				fmt.Println("buff err7:", buffData.Code)
+//				endTask(resp, account, 2, 1)
+//			}
+//			if buffData.Code == "OK" {
+//				go handleBuffData(buffData)
+//			} else {
+//				fmt.Println("buff err6:", buffData)
+//				//结束协程
+//				fmt.Println("结束协程")
+//				endTask(resp, account, 0, 1)
+//			}
+//			//每次请求间隔
+//			delay := time.Duration(BuffConfig.Delay)
+//			time.Sleep(time.Second * delay)
+//		}
+//	}
+//
+//}
+//
+//// 处理buff数据
+//func handleBuffData(buffData BuffData) {
+//	//批量更新buff数据 不存在的话就插入
+//
+//	//批量插入数据库
+//	for _, v := range buffData.Result.Items {
+//		var goodsInfo model.Goods
+//		goodsInfo.Appid = v.Appid
+//		goodsInfo.BuyMaxPrice = util.StringToFloat64(v.BuyMaxPrice)
+//		goodsInfo.BuyNum = v.BuyNum
+//		goodsInfo.Game = v.Game
+//		goodsInfo.Name = v.Name
+//		goodsInfo.MarketHashName = v.MarketHashName
+//		goodsInfo.ShortName = v.ShortName
+//		goodsInfo.GoodsId = v.Id
+//		goodsInfo.IconUrl = v.GoodsInfo.IconUrl
+//		goodsInfo.SteamPrice = util.StringToFloat64(v.GoodsInfo.SteamPrice)
+//		goodsInfo.SteamPriceCny = util.StringToFloat64(v.GoodsInfo.SteamPriceCny)
+//		goodsInfo.QuickPrice = util.StringToFloat64(v.QuickPrice)
+//		goodsInfo.SellMinPrice = util.StringToFloat64(v.SellMinPrice)
+//		goodsInfo.SellNum = v.SellNum
+//		goodsInfo.SellReferencePrice = util.StringToFloat64(v.SellReferencePrice)
+//		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
+//		myDao.CreateGoods(&goodsInfo)
+//		isNeedUpdateBuffData(goodsInfo)
+//	}
+//}
