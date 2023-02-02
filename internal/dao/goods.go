@@ -58,3 +58,9 @@ func (d *Dao) UpdateGoodsRatio(goods *model.Goods, Ratio float64) error {
 func (d *Dao) UpdateGoodsBuyPrice(goods *model.Goods, HighestBuyOrder float64, LowestSellOrder float64) error {
 	return goods.UpdateBuyPrice(d.engine, HighestBuyOrder, LowestSellOrder)
 }
+
+// 根据商品id更新商品比例
+func (d *Dao) UpdateGoodsRatioByGoodsId(goodsId int, Ratio float64) error {
+	var goods model.Goods
+	return goods.UpdateRatioByGoodsId(d.engine, goodsId, Ratio)
+}

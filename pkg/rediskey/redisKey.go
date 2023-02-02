@@ -13,6 +13,11 @@ const GoodsNameKey = "goods:name:key:%d"
 
 const BuffLocalKey = "buff:local:key"
 
+// 商品缓存
+func GetBuffCacheKey(id int) string {
+	return fmt.Sprintf("buff:cache:key:%d", id)
+}
+
 // 查询本地代理是否在使用中
 func GetBuffLocalKey() string {
 	return BuffLocalKey

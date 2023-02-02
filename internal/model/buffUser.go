@@ -14,10 +14,13 @@ type BuffUser struct {
 }
 
 // 查询状态为 0 的账号 只取一个
-func (a BuffUser) GetOneBuffUser(db *gorm.DB) BuffUser {
+func (a BuffUser) GetOneBuffUser(db *gorm.DB) (BuffUser, error) {
 	var buffUser BuffUser
-	db.Where("status = ?", 0).First(&buffUser)
-	return buffUser
+	err := db.Where("status = ?", 0).First(&buffUser).Error
+	if err != nil {
+		return buffUser, err
+	}
+	return buffUser, err
 }
 
 // 更改账号的状态

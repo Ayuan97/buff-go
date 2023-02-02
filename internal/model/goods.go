@@ -178,3 +178,15 @@ func (g *Goods) UpdateBuyPrice(db *gorm.DB, HighestBuyOrder float64, LowestSellO
 	}
 	return err
 }
+
+// 更新商品比例
+func (g *Goods) UpdateRatioByGoodsId(db *gorm.DB, goodsId int, Proportion float64) error {
+	//更新
+	err := db.Model(g).Where("goods_id = ?", goodsId).Updates(Goods{
+		Proportion: Proportion,
+	}).Error
+	if err != nil {
+		fmt.Println("UpdateRatio err :", err)
+	}
+	return err
+}

@@ -4,6 +4,7 @@ import (
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
+	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -93,13 +94,17 @@ func get() {
 			buffLocalKey := rediskey.GetBuffLocalKey()
 			buffLocalResult := gredis.Get(buffLocalKey)
 			//查询账号是否可用
-			buffUser, _ := myDao.GetOneBuffUser()
-
+			buffUser, err := myDao.GetOneBuffUser()
+			if err != nil {
+				time.Sleep(10 * time.Second)
+				continue
+			}
 			buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
 			buffAccountResult := gredis.Get(buffAccountKey)
 			if buffLocalResult == "" && buffAccountResult == "" {
 				//开启本地代理
 				go GetBuffData(0, "", buffUser)
+				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("buff本地代理正在抓取中...")
 			}
@@ -112,7 +117,7 @@ func get() {
 			//	//启动一个协程 使用代理
 			//	go GetBuffData(1, proxy.Ip)
 			//}
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 		}
 	}()
 }
@@ -120,16 +125,18 @@ func get() {
 func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 	//设置本地代理正在抓取中
 	buffLocalKey := rediskey.GetBuffLocalKey()
-	gredis.Set(buffLocalKey, "1", 60*60*24)
+	gredis.Set(buffLocalKey, "1", 0)
 	//设置账号正在抓取中
 	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
-	gredis.Set(buffAccountKey, "1", 60*60*24)
+	gredis.Set(buffAccountKey, "1", 0)
+	//修改状态
+	myDao.UpdateBuffUserStatus(int(account.ID), 1)
 	for {
 		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"))
 		BuffConfig := myDao.GetOneBuffConfig(1)
 		//循环N次 获取buff数据
 		for i := 1; i <= BuffConfig.PageNum; i++ {
-			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.asc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
+			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.asc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
 			if isProxy == 1 {
@@ -147,6 +154,7 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 				gredis.Del(buffLocalKey)
 				//设置账号抓取结束
 				gredis.Del(buffAccountKey)
+				myDao.UpdateBuffUserStatus(int(account.ID), 0)
 				runtime.Goexit()
 				return
 			}
@@ -159,92 +167,119 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("buff err2:", err)
-				//结束协程
-				fmt.Println("结束协程")
-				resp.Body.Close()
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
-				runtime.Goexit()
+				endTask(resp, account, 0, 1)
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				fmt.Println("buff err3:", err)
 				//结束协程
-				fmt.Println("结束协程")
-				resp.Body.Close()
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
-				runtime.Goexit()
+				endTask(resp, account, 0, 1)
 				return
 			}
 			var buffData BuffData
 			err = json.Unmarshal(body, &buffData)
 			if err != nil {
 				fmt.Println("buff err4:", err)
-				//结束协程
-				fmt.Println("结束协程")
-				resp.Body.Close()
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
-				runtime.Goexit()
+				endTask(resp, account, 0, 1)
 				return
 			}
 			if buffData.Code == "Action Forbidden" {
 				fmt.Println("buff err6:", buffData.Code)
-				//结束协程
-				fmt.Println("账号被封 结束协程")
-				resp.Body.Close()
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
-				//设置账号被封
-				myDao.UpdateBuffUserStatus(int(account.ID), 3)
-
-				runtime.Goexit()
+				endTask(resp, account, 3, 1)
 			}
 			if buffData.Code == "Login Required" {
-				fmt.Println("buff err6:", buffData.Code)
-				//结束协程
-				fmt.Println("登录超时 结束协程")
-				resp.Body.Close()
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
-				//设置账号被封
-				myDao.UpdateBuffUserStatus(int(account.ID), 2)
-				runtime.Goexit()
+				fmt.Println("buff err7:", buffData.Code)
+				endTask(resp, account, 2, 1)
 			}
 			if buffData.Code == "OK" {
-				for _, v := range buffData.Result.Items {
-					if v.QuickPrice != "" {
-						_, err := myDao.GetGoodsByGoodsId(int64(v.Id))
-						if err != nil {
-							fmt.Println("buff err5:", err)
-							return
-						}
-					}
-				}
-				fmt.Println("第", buffData.Result.PageNum, "页", "date:", time.Now().Format("2006-01-02 15:04:05"))
+				go handleBuffData(buffData)
 			} else {
 				fmt.Println("buff err6:", buffData)
 				//结束协程
 				fmt.Println("结束协程")
-				resp.Body.Close()
-				runtime.Goexit()
+				endTask(resp, account, 0, 1)
 			}
-			//每次请求间隔25秒
-			delay := time.Duration(BuffConfig.Delay) * time.Second
+			//每次请求间隔
+			delay := time.Duration(BuffConfig.Delay)
 			time.Sleep(time.Second * delay)
 		}
 	}
 
+}
+
+// 处理buff数据
+func handleBuffData(buffData BuffData) {
+	//批量更新buff数据 不存在的话就插入
+
+	//批量插入数据库
+	for _, v := range buffData.Result.Items {
+		var goodsInfo model.Goods
+		goodsInfo.Appid = v.Appid
+		goodsInfo.BuyMaxPrice = util.StringToFloat64(v.BuyMaxPrice)
+		goodsInfo.BuyNum = v.BuyNum
+		goodsInfo.Game = v.Game
+		goodsInfo.Name = v.Name
+		goodsInfo.MarketHashName = v.MarketHashName
+		goodsInfo.ShortName = v.ShortName
+		goodsInfo.GoodsId = v.Id
+		goodsInfo.IconUrl = v.GoodsInfo.IconUrl
+		goodsInfo.SteamPrice = util.StringToFloat64(v.GoodsInfo.SteamPrice)
+		goodsInfo.SteamPriceCny = util.StringToFloat64(v.GoodsInfo.SteamPriceCny)
+		goodsInfo.QuickPrice = util.StringToFloat64(v.QuickPrice)
+		goodsInfo.SellMinPrice = util.StringToFloat64(v.SellMinPrice)
+		goodsInfo.SellNum = v.SellNum
+		goodsInfo.SellReferencePrice = util.StringToFloat64(v.SellReferencePrice)
+		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
+		myDao.CreateGoods(&goodsInfo)
+		isNeedUpdateBuffData(goodsInfo)
+	}
+}
+
+// 是否需要更新buff数据 通知 更新比例
+func isNeedUpdateBuffData(info model.Goods) {
+	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
+	//查询缓存中的buff数据
+	buffCacheKey := rediskey.GetBuffCacheKey(int(info.ID))
+	buyMaxPrice := gredis.Hget(buffCacheKey, "buy_max_price")
+	SteamSellPrice := gredis.Hget(buffCacheKey, "steam_sell_price")
+	if buyMaxPrice == "" {
+		//缓存中没有数据
+		//更新缓存
+		gredis.Hset(buffCacheKey, "buy_max_price", info.BuyMaxPrice)
+
+	} else {
+		//缓存中有数据
+		//比较价格
+		if util.StringToFloat64(buyMaxPrice) != info.BuyMaxPrice {
+			//价格变化
+			//更新缓存
+			gredis.Hset(buffCacheKey, "buy_max_price", info.BuyMaxPrice)
+			//更新比例
+			P := info.BuyMaxPrice / util.StringToFloat64(SteamSellPrice)
+			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)
+			if err != nil {
+				return
+			}
+			//发送telegram消息
+			sendTelegram(&info)
+		}
+	}
+
+}
+
+// 结束任务
+func endTask(resp *http.Response, account model.BuffUser, status int, taskType int) {
+	buffLocalKey := rediskey.GetBuffLocalKey()
+	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
+	resp.Body.Close()
+	//设置本地代理抓取结束
+	gredis.Del(buffLocalKey)
+	//设置账号抓取结束
+	gredis.Del(buffAccountKey)
+	//设置账号状态
+	myDao.UpdateBuffUserStatus(int(account.ID), status)
+	if taskType == 1 {
+		runtime.Goexit()
+	}
 }

@@ -10,6 +10,28 @@ import (
 
 var ctx = context.Background()
 
+// set hash
+func Hset(key string, field string, value interface{}) error {
+	key = global.RedisSetting.Prefix + key
+	err := global.Redis.HSet(ctx, key, field, value).Err()
+	if err != nil {
+		global.Logger.Errorf("redis hset failed %v", err)
+		return err
+	}
+	return nil
+}
+
+// get hash
+func Hget(key string, field string) string {
+	key = global.RedisSetting.Prefix + key
+	val, err := global.Redis.HGet(ctx, key, field).Result()
+	if err != nil {
+		//global.Logger.Errorf("redis hget failed %v", err)
+		return ""
+	}
+	return val
+}
+
 // Set a key/value
 func Set(key string, data interface{}, expiration time.Duration) error {
 	key = global.RedisSetting.Prefix + key
