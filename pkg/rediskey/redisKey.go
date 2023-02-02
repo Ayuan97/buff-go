@@ -19,7 +19,7 @@ func GetBuffCacheKey(id int) string {
 	return fmt.Sprintf("buff:cache:key:%d", id)
 }
 
-// 查询本地代理是否在使用中
+// 查询本地代理是否在使用中 - buff
 func GetBuffLocalKey() string {
 	return BuffLocalKey
 }
