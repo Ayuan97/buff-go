@@ -136,7 +136,7 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 		BuffConfig := myDao.GetOneBuffConfig(1)
 		//循环N次 获取buff数据
 		for i := 1; i <= BuffConfig.PageNum; i++ {
-			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.asc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
+			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
 			if isProxy == 1 {
@@ -242,10 +242,11 @@ func handleBuffData(buffData BuffData) {
 func isNeedUpdateBuffData(info model.Goods) {
 	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的buff数据
-	goodsCacheKey := rediskey.GetCacheKey(info.GoodsId)
+	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
 	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	if SteamSellPrice == "" {
+		fmt.Println("steam_sell_price 为空", info.GoodsId, "cacheKey:", goodsCacheKey)
 		return
 	}
 	if buyMaxPrice == "" {
@@ -267,7 +268,7 @@ func isNeedUpdateBuffData(info model.Goods) {
 			}
 			//发送telegram消息
 			info.Proportion = P
-			if P >= 0.7 {
+			if P >= 0.0 {
 				sendTelegram(&info, 1)
 			}
 		}

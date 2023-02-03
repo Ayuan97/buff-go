@@ -12,7 +12,7 @@ func main() {
 	service.ClearAllAccountCache()
 	//gredis.DelAll() //清除所有缓存 慎用
 	service.Buff()
-	service.Steam()
+	//service.Steam()
 	for {
 		select {}
 	}

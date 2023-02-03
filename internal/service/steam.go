@@ -268,7 +268,7 @@ func handleSteamData(steamData SteamGoodsInfo) bool {
 func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
 	//查询缓存中的steam数据 与数据库中的steam数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的steam数据
-	goodsCacheKey := rediskey.GetCacheKey(info.GoodsId)
+	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	if SteamSellPrice == "" {
 		//缓存中没有数据
