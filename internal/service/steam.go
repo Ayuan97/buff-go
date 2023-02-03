@@ -4,12 +4,14 @@ import (
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
+	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -86,7 +88,7 @@ func CheckSteamStatus() bool {
 	}
 }
 
-// Buff 获取buff数据
+// Steam 获取steam数据
 func Steam() {
 	if CheckSteamStatus() {
 		getSteam()
@@ -114,7 +116,7 @@ func getSteam() {
 				time.Sleep(10 * time.Second)
 				continue
 			}
-			steamAccountKey := rediskey.GetBuffAccountKey(int(steamUser.ID))
+			steamAccountKey := rediskey.GetSteamAccountKey(int(steamUser.ID))
 			steamAccountResult := gredis.Get(steamAccountKey)
 			if steamLocalResult == "" && steamAccountResult == "" {
 				//开启本地代理
@@ -130,7 +132,7 @@ func getSteam() {
 			//account := myDao.GetOneAccount(1)
 			//if proxy != nil && account != nil {
 			//	//启动一个协程 使用代理
-			//	go GetBuffData(1, proxy.Ip)
+			//	go GetSteamData(1, proxy.Ip)
 			//}
 			time.Sleep(10 * time.Second)
 		}
@@ -149,7 +151,7 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 	for {
 		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"))
 		SteamConfig := myDao.GetOneSteamConfig(1)
-		//循环N次 获取buff数据
+		//循环N次 获取steam数据
 		var start = 0
 		for i := 1; i <= 80; i++ {
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23", start)
@@ -175,12 +177,12 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 				runtime.Goexit()
 				return
 			}
-			//req.AddCookie(&http.Cookie{Name: "Device-Id", Value: account.DeviceId})
-			//req.AddCookie(&http.Cookie{Name: "Locale-Supported", Value: "zh-Hans"})
-			//req.AddCookie(&http.Cookie{Name: "csrf_token", Value: account.CsrfToken})
-			//req.AddCookie(&http.Cookie{Name: "game", Value: "csgo"})
-			//req.AddCookie(&http.Cookie{Name: "remember_me", Value: account.RememberMe})
-			req.AddCookie(&http.Cookie{Name: "session", Value: account.Sessionid})
+			req.AddCookie(&http.Cookie{Name: "steamCountry", Value: account.SteamCountry})
+			req.AddCookie(&http.Cookie{Name: "timezoneOffset", Value: "28800,0"})
+			req.AddCookie(&http.Cookie{Name: "browserid", Value: account.BrowserId})
+			req.AddCookie(&http.Cookie{Name: "Steam_Language", Value: "schinese"})
+			req.AddCookie(&http.Cookie{Name: "steamLoginSecure", Value: account.SteamLoginSecure})
+			req.AddCookie(&http.Cookie{Name: "sessionid", Value: account.SessionId})
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("steam err2:", err)
@@ -202,14 +204,20 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 				return
 			}
 			if SteamData.Success {
-				fmt.Println("buff err6:", SteamData)
+				fmt.Println("steam err6:", SteamData)
 				endSteamTask(resp, account, 3, 1)
 			}
 
 			if SteamData.Success {
-				go handleSteamData(SteamData)
+				go func() {
+					p := handleSteamData(SteamData)
+					if p {
+						//结束协程
+						endSteamTask(resp, account, 2, 1)
+					}
+				}()
 			} else {
-				fmt.Println("buff err6:", SteamData)
+				fmt.Println("steam err6:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1)
@@ -219,26 +227,85 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 			time.Sleep(time.Second * delay)
 		}
 	}
-
 }
 
-// 处理buff数据
-func handleSteamData(steamData SteamGoodsInfo) {
+// 处理steam数据
+func handleSteamData(steamData SteamGoodsInfo) bool {
 	//批量更新steam数据 不存在的话就插入
+	isUpdateCookie := false
+	for _, v := range steamData.Results {
+		fmt.Println("商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
+		//检查是否有 ¥ 符号
+		if strings.Contains(v.SellPriceText, "¥") {
+			//查找是否存在 存在更新steam出售价格
+			goods, err := myDao.GetGoodsBySteamItemNameId(v.HashName)
+			if err != nil {
+				fmt.Println("查询商品错误:", err)
+				continue
+			}
+			if goods.MarketHashName == "" {
+				fmt.Println("商品不存在")
+				continue
+			}
+			//更新商品价格
+			err = myDao.UpdateGoodsPrice(goods, v.SellPrice)
+			if err != nil {
+				fmt.Println("更新商品价格错误:", err)
+				continue
+			}
+			//判断商品价格是否变动 如果变动就通知telegram
+			isNeedUpdateSteamData(goods, v.SellPrice)
+		} else {
+			fmt.Println("不是人民币 需要重新获取cookie")
+			isUpdateCookie = true
+
+		}
+	}
+	return isUpdateCookie
+}
+
+// 是否需要更新steam数据 通知 更新比例
+func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
+	//查询缓存中的steam数据 与数据库中的steam数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
+	//查询缓存中的steam数据
+	goodsCacheKey := rediskey.GetCacheKey(int(info.ID))
+	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
+	if SteamSellPrice == "" {
+		//缓存中没有数据
+		//更新缓存
+		gredis.Hset(goodsCacheKey, "steam_sell_price", steamSellPrice)
+	} else {
+		//缓存中有数据
+		//比较价格
+		if util.StringToFloat64(SteamSellPrice) != util.IntToFloat64(steamSellPrice) {
+			//价格变化
+			//更新缓存
+			gredis.Hset(goodsCacheKey, "steam_sell_price", steamSellPrice)
+			//更新比例
+			P := info.BuyMaxPrice / util.IntToFloat64(steamSellPrice)
+			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)
+			if err != nil {
+				return
+			}
+			//发送telegram消息
+			info.SteamSellPrice = float64(steamSellPrice)
+			sendTelegram(info)
+		}
+	}
 
 }
 
 // 结束steam任务
 func endSteamTask(resp *http.Response, account model.SteamUser, status int, taskType int) {
-	buffLocalKey := rediskey.GetBuffLocalKey()
-	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
+	steamLocalKey := rediskey.GetSteamLocalKey()
+	steamAccountKey := rediskey.GetSteamAccountKey(int(account.ID))
 	resp.Body.Close()
 	//设置本地代理抓取结束
-	gredis.Del(buffLocalKey)
+	gredis.Del(steamLocalKey)
 	//设置账号抓取结束
-	gredis.Del(buffAccountKey)
+	gredis.Del(steamAccountKey)
 	//设置账号状态
-	myDao.UpdateBuffUserStatus(int(account.ID), status)
+	myDao.UpdateSteamUserStatus(int(account.ID), status)
 	if taskType == 1 {
 		runtime.Goexit()
 	}

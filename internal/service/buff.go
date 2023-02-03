@@ -240,21 +240,20 @@ func handleBuffData(buffData BuffData) {
 func isNeedUpdateBuffData(info model.Goods) {
 	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的buff数据
-	buffCacheKey := rediskey.GetBuffCacheKey(int(info.ID))
-	buyMaxPrice := gredis.Hget(buffCacheKey, "buy_max_price")
-	SteamSellPrice := gredis.Hget(buffCacheKey, "steam_sell_price")
+	goodsCacheKey := rediskey.GetCacheKey(int(info.ID))
+	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
+	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	if buyMaxPrice == "" {
 		//缓存中没有数据
 		//更新缓存
-		gredis.Hset(buffCacheKey, "buy_max_price", info.BuyMaxPrice)
-
+		gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
 	} else {
 		//缓存中有数据
 		//比较价格
 		if util.StringToFloat64(buyMaxPrice) != info.BuyMaxPrice {
 			//价格变化
 			//更新缓存
-			gredis.Hset(buffCacheKey, "buy_max_price", info.BuyMaxPrice)
+			gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
 			//更新比例
 			P := info.BuyMaxPrice / util.StringToFloat64(SteamSellPrice)
 			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)

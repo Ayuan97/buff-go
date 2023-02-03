@@ -4,10 +4,13 @@ import "gorm.io/gorm"
 
 type SteamUser struct {
 	*Model
-	Sessionid string `json:"sessionid"`
-	Account   string `json:"account"`
-	Password  string `json:"password"`
-	Status    int    `json:"status"`
+	SessionId        string `json:"sessionid"`
+	Account          string `json:"account"`
+	Password         string `json:"password"`
+	Status           int    `json:"status"`
+	SteamCountry     string `json:"steam_country"`
+	BrowserId        string `json:"browser_id"`
+	SteamLoginSecure string `json:"steam_login_secure"`
 }
 
 // 查询状态为 0 的账号 只取一个
