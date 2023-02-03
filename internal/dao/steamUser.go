@@ -11,3 +11,9 @@ func (d *Dao) GetOneSteamUser() (steamUser model.SteamUser, err error) {
 func (d *Dao) UpdateSteamUserStatus(id int, status int) (err error) {
 	return model.UpdateSteamUserStatus(d.engine, id, status)
 }
+
+// 查询所有账号
+func (d *Dao) GetSteamUserList() (steamUserList []*model.SteamUser, err error) {
+	var steamUser model.SteamUser
+	return steamUser.GetSteamUserList(d.engine)
+}

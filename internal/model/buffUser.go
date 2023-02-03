@@ -13,6 +13,16 @@ type BuffUser struct {
 	Status     int    `json:"status"`
 }
 
+// 查询所有账号
+func (a BuffUser) GetBuffUserList(db *gorm.DB) ([]*BuffUser, error) {
+	var buffUserList []*BuffUser
+	err := db.Find(&buffUserList).Error
+	if err != nil {
+		return buffUserList, err
+	}
+	return buffUserList, err
+}
+
 // 查询状态为 0 的账号 只取一个
 func (a BuffUser) GetOneBuffUser(db *gorm.DB) (BuffUser, error) {
 	var buffUser BuffUser

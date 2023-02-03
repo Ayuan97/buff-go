@@ -2,6 +2,8 @@ package service
 
 import (
 	"buff-go/internal/model"
+	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 	"buff-go/pkg/util"
 	"context"
 	"fmt"
@@ -34,7 +36,7 @@ func UpdateGoodsProportion(goodsId int, cat_type int) {
 		if cat_type == 2 && goodsInfo.Proportion >= config.BotProportion && goodsInfo.SteamSellPrice >= config.BotPrice {
 			//商品名称是否包含 印花
 			if !util.Contains(goodsInfo.MarketHashName, "Sticker") {
-				sendTelegram(goodsInfo)
+				//sendTelegram(goodsInfo)
 			}
 		}
 	}
@@ -84,4 +86,33 @@ func LoginSteam() {
 		log.Fatal(err)
 	}
 	log.Printf("Go's time.After example:\n%s", example)
+}
+
+// 清楚所有账号缓存
+func ClearAllAccountCache() {
+
+	buffLocalKey := rediskey.GetBuffLocalKey()
+	gredis.Del(buffLocalKey)
+	buffUserList, err := myDao.GetBuffUserList()
+	if err != nil {
+		fmt.Println("获取buff用户列表失败", err)
+		return
+	}
+	for _, buffUser := range buffUserList {
+		buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
+		gredis.Del(buffAccountKey)
+		myDao.UpdateBuffUserStatus(int(buffUser.ID), 0)
+		fmt.Sprintf("清除buff用户缓存成功,用户id:%d", buffUser.ID)
+	}
+
+	steamLocalKey := rediskey.GetSteamLocalKey()
+	gredis.Del(steamLocalKey)
+	steamUserList, err := myDao.GetSteamUserList()
+	for _, steamUser := range steamUserList {
+		steamAccountKey := rediskey.GetSteamAccountKey(int(steamUser.ID))
+		gredis.Del(steamAccountKey)
+		myDao.UpdateSteamUserStatus(int(steamUser.ID), 0)
+		fmt.Sprintf("清除steam用户缓存成功,用户id:%d", steamUser.ID)
+	}
+
 }

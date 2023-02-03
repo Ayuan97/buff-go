@@ -10,6 +10,14 @@ import (
 
 var ctx = context.Background()
 
+// 删除所有key
+func DelAll() {
+	keys := global.Redis.Keys(ctx, "*").Val()
+	for _, key := range keys {
+		global.Redis.Del(ctx, key)
+	}
+}
+
 // set hash
 func Hset(key string, field string, value interface{}) error {
 	key = global.RedisSetting.Prefix + key

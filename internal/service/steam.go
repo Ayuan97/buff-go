@@ -203,7 +203,7 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 				endSteamTask(resp, account, 0, 1)
 				return
 			}
-			if SteamData.Success {
+			if SteamData.Success == false {
 				fmt.Println("steam err6:", SteamData)
 				endSteamTask(resp, account, 3, 1)
 			}
@@ -234,7 +234,7 @@ func handleSteamData(steamData SteamGoodsInfo) bool {
 	//批量更新steam数据 不存在的话就插入
 	isUpdateCookie := false
 	for _, v := range steamData.Results {
-		fmt.Println("商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
+		fmt.Println("steam - 商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
 		//检查是否有 ¥ 符号
 		if strings.Contains(v.SellPriceText, "¥") {
 			//查找是否存在 存在更新steam出售价格
@@ -258,7 +258,7 @@ func handleSteamData(steamData SteamGoodsInfo) bool {
 		} else {
 			fmt.Println("不是人民币 需要重新获取cookie")
 			isUpdateCookie = true
-
+			return true
 		}
 	}
 	return isUpdateCookie
@@ -268,28 +268,31 @@ func handleSteamData(steamData SteamGoodsInfo) bool {
 func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
 	//查询缓存中的steam数据 与数据库中的steam数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的steam数据
-	goodsCacheKey := rediskey.GetCacheKey(int(info.ID))
+	goodsCacheKey := rediskey.GetCacheKey(info.GoodsId)
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	if SteamSellPrice == "" {
 		//缓存中没有数据
 		//更新缓存
-		gredis.Hset(goodsCacheKey, "steam_sell_price", steamSellPrice)
+		gredis.Hset(goodsCacheKey, "steam_sell_price", util.IntToFloat64(steamSellPrice)/100)
 	} else {
 		//缓存中有数据
 		//比较价格
-		if util.StringToFloat64(SteamSellPrice) != util.IntToFloat64(steamSellPrice) {
+		if util.StringToFloat64(SteamSellPrice) != util.IntToFloat64(steamSellPrice)/100 {
 			//价格变化
 			//更新缓存
-			gredis.Hset(goodsCacheKey, "steam_sell_price", steamSellPrice)
+			gredis.Hset(goodsCacheKey, "steam_sell_price", util.IntToFloat64(steamSellPrice)/100)
 			//更新比例
-			P := info.BuyMaxPrice / util.IntToFloat64(steamSellPrice)
+			P := info.BuyMaxPrice / (util.IntToFloat64(steamSellPrice) / 100)
 			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)
 			if err != nil {
 				return
 			}
 			//发送telegram消息
-			info.SteamSellPrice = float64(steamSellPrice)
-			sendTelegram(info)
+			info.Proportion = P
+			if info.Proportion >= 0.7 {
+				info.SteamSellPrice = float64(steamSellPrice) / 100
+				sendTelegram(info, 2)
+			}
 		}
 	}
 

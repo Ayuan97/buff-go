@@ -231,8 +231,10 @@ func handleBuffData(buffData BuffData) {
 		goodsInfo.SellNum = v.SellNum
 		goodsInfo.SellReferencePrice = util.StringToFloat64(v.SellReferencePrice)
 		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
+		goodsInfo.BuffUpdate = time.Now().Unix()
 		myDao.CreateGoods(&goodsInfo)
 		isNeedUpdateBuffData(goodsInfo)
+		fmt.Println("buff 商品名称:", v.MarketHashName, "价格:", util.StringToFloat64(v.BuyMaxPrice))
 	}
 }
 
@@ -240,9 +242,12 @@ func handleBuffData(buffData BuffData) {
 func isNeedUpdateBuffData(info model.Goods) {
 	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的buff数据
-	goodsCacheKey := rediskey.GetCacheKey(int(info.ID))
+	goodsCacheKey := rediskey.GetCacheKey(info.GoodsId)
 	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
+	if SteamSellPrice == "" {
+		return
+	}
 	if buyMaxPrice == "" {
 		//缓存中没有数据
 		//更新缓存
@@ -261,7 +266,10 @@ func isNeedUpdateBuffData(info model.Goods) {
 				return
 			}
 			//发送telegram消息
-			sendTelegram(&info)
+			info.Proportion = P
+			if P >= 0.7 {
+				sendTelegram(&info, 1)
+			}
 		}
 	}
 

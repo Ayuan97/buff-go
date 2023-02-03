@@ -13,6 +13,16 @@ type SteamUser struct {
 	SteamLoginSecure string `json:"steam_login_secure"`
 }
 
+// 查询所有账号
+func (a SteamUser) GetSteamUserList(db *gorm.DB) ([]*SteamUser, error) {
+	var steamUserList []*SteamUser
+	err := db.Find(&steamUserList).Error
+	if err != nil {
+		return steamUserList, err
+	}
+	return steamUserList, err
+}
+
 // 查询状态为 0 的账号 只取一个
 func (a SteamUser) GetOneSteamUser(db *gorm.DB) (SteamUser, error) {
 	var steamUser SteamUser

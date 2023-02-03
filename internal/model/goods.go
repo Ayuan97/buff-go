@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"time"
 )
 
 type Goods struct {
@@ -30,7 +31,9 @@ type Goods struct {
 	SteamSellPrice     float64 `json:"steam_sell_price"`
 	HighestBuyOrder    float64 `json:"highest_buy_order"`
 	LowestSellOrder    float64 `json:"lowest_sell_order"`
-	Proportion         float64
+	Proportion         float64 `json:"proportion"`
+	SteamUpdate        int64   `json:"steam_update"`
+	BuffUpdate         int64   `json:"buff_update"`
 }
 
 func (g *Goods) Create(db *gorm.DB, goods []*Goods) bool {
@@ -136,6 +139,7 @@ func (g *Goods) UpdateSteamSellPrice(db *gorm.DB) error {
 	//更新
 	err := db.Model(g).Where("id = ?", g.ID).Updates(Goods{
 		SteamSellPrice: g.SteamSellPrice,
+		SteamUpdate:    time.Now().Unix(),
 	}).Error
 	if err != nil {
 		fmt.Println("UpdateSteamSellPrice err :", err)
