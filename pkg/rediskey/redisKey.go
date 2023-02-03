@@ -29,9 +29,14 @@ func GetSteamLocalKey() string {
 	return SteamLocalKey
 }
 
-// 查询buff账号是否在使用中
+// 查询buff账号是否在使用中 - buff
 func GetBuffAccountKey(id int) string {
 	return fmt.Sprintf("buff:account:key:%d", id)
+}
+
+//查询steam账号是否在使用中 - steam
+func GetSteamAccountKey(id int) string {
+	return fmt.Sprintf("steam:account:key:%d", id)
 }
 
 func GetConfigKey() string {
