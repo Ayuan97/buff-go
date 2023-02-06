@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/chromedp/chromedp"
+	"io/ioutil"
 	"log"
+	"os"
 	"time"
 )
 
@@ -115,4 +117,21 @@ func ClearAllAccountCache() {
 		fmt.Sprintf("清除steam用户缓存成功,用户id:%d", steamUser.ID)
 	}
 
+}
+
+// 检测文件大小 超过1M则清空
+func CheckLogFileSize() {
+	fileInfo, err := os.Stat("log.txt")
+	if err != nil {
+		fmt.Println("获取文件信息失败", err)
+		return
+	}
+	if fileInfo.Size() > 1024*1024*1 {
+		//输出 "" 到文件
+		err := ioutil.WriteFile("log.txt", []byte(""), 0777)
+		if err != nil {
+			fmt.Println("清空文件失败", err)
+			return
+		}
+	}
 }

@@ -3,18 +3,30 @@ package main
 import (
 	"buff-go/global"
 	"buff-go/internal/service"
-	"buff-go/pkg/gredis"
 	"github.com/gin-gonic/gin"
+	"time"
 )
 
 func main() {
+	//test()
+
 	gin.SetMode(global.ServerSetting.RunMode)
 	//清楚所有账号缓存 和本地代理缓存
 	service.ClearAllAccountCache()
-	gredis.DelAll() //清除所有缓存 慎用
+	//gredis.DelAll() //清除所有缓存 慎用
 	service.Buff()
 	service.Steam()
 	for {
 		select {}
+
+		//等待10秒
+		time.Sleep(10 * time.Second)
+
+		//检测文件大小
+		service.CheckLogFileSize()
+
 	}
+}
+func test() {
+	service.Test()
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"buff-go/global"
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
@@ -59,26 +60,19 @@ type BuffGoods struct {
 	SteamMarketUrl        string      `json:"steam_market_url"`
 	TransactedNum         int         `json:"transacted_num"`
 }
-
-// CheckBuffStatus 检测buff 状态是否开启
-func CheckBuffStatus() bool {
-	return true
-	config := myDao.GetOneSystemConfig(1)
-	if config.BuffCookie == 1 && config.StartBuff == 1 {
-		return true
-	} else {
-		return false
-	}
+type GoodsInfo struct {
+	IconUrl         string      `json:"icon_url"`
+	ItemId          interface{} `json:"item_id"`
+	OriginalIconUrl string      `json:"original_icon_url"`
+	SteamPrice      string      `json:"steam_price"`
+	SteamPriceCny   string      `json:"steam_price_cny"`
 }
 
 // Buff 获取buff数据
 func Buff() {
-	if CheckBuffStatus() {
-		get()
-	}
+	get()
 }
 func get() {
-
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
@@ -133,10 +127,10 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 	myDao.UpdateBuffUserStatus(int(account.ID), 1)
 	for {
 		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"))
-		BuffConfig := myDao.GetOneBuffConfig(1)
 		//循环N次 获取buff数据
-		for i := 1; i <= BuffConfig.PageNum; i++ {
-			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&use_suggestion=0&_=%v", i, BuffConfig.MinPrice, BuffConfig.MaxPrice, time.Now().UnixNano()/1e6)
+		config := myDao.GetOneSystemConfig(1) //系统配置
+		for i := 1; i <= config.BuffPageNum; i++ {
+			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&use_suggestion=0&_=%v", i, config.BuffMinPrice, config.BuffMaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
 			if isProxy == 1 {
@@ -200,8 +194,13 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 				fmt.Println("结束协程")
 				endTask(resp, account, 0, 1)
 			}
+			config = myDao.GetOneSystemConfig(1) //系统配置
+			if config.StartBuff == 0 {
+				endTask(resp, account, 0, 1)
+				return
+			}
 			//每次请求间隔
-			delay := time.Duration(BuffConfig.Delay)
+			delay := time.Duration(config.BuffDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
@@ -235,6 +234,7 @@ func handleBuffData(buffData BuffData) {
 		myDao.CreateGoods(&goodsInfo)
 		isNeedUpdateBuffData(goodsInfo)
 		fmt.Println("buff 商品名称:", v.MarketHashName, "价格:", util.StringToFloat64(v.BuyMaxPrice))
+		global.Logger.Info("buff 商品名称:", v.MarketHashName, "价格:", util.StringToFloat64(v.BuyMaxPrice))
 	}
 }
 
@@ -242,10 +242,15 @@ func handleBuffData(buffData BuffData) {
 func isNeedUpdateBuffData(info model.Goods) {
 	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的buff数据
+	config := myDao.GetOneSystemConfig(1)
 	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
 	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	info.SteamSellPrice = util.StringToFloat64(SteamSellPrice)
+	if SteamSellPrice == "" {
+		gredis.Hset(goodsCacheKey, "steam_sell_price", 0)
+		return
+	}
 	if buyMaxPrice == "" {
 		//缓存中没有数据
 		//更新缓存
@@ -265,7 +270,7 @@ func isNeedUpdateBuffData(info model.Goods) {
 			}
 			//发送telegram消息
 			info.Proportion = P
-			if P >= 0.0 {
+			if P >= config.BotProportion {
 				sendTelegram(&info, 1)
 			}
 		}

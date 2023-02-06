@@ -1,6 +1,7 @@
 package service
 
 import (
+	"buff-go/global"
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
@@ -77,25 +78,11 @@ type SteamGoodsInfo struct {
 	} `json:"results"`
 }
 
-// CheckSteamStatus 检测steam 状态是否开启
-func CheckSteamStatus() bool {
-	return true
-	config := myDao.GetOneSystemConfig(1)
-	if config.SteamCookie == 1 && config.StartSteamSell == 1 {
-		return true
-	} else {
-		return false
-	}
-}
-
 // Steam 获取steam数据
 func Steam() {
-	if CheckSteamStatus() {
-		getSteam()
-	}
+	getSteam()
 }
 func getSteam() {
-
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
@@ -150,7 +137,6 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 	myDao.UpdateSteamUserStatus(int(account.ID), 1)
 	for {
 		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"))
-		SteamConfig := myDao.GetOneSteamConfig(1)
 		//循环N次 获取steam数据
 		var start = 0
 		for i := 1; i <= 80; i++ {
@@ -222,8 +208,15 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1)
 			}
+			config := myDao.GetOneSystemConfig(1)
+			if config.StartSteamSell == 0 {
+				//结束协程
+				fmt.Println("结束协程")
+				endSteamTask(resp, account, 0, 1)
+				return
+			}
 			//每次请求间隔
-			delay := time.Duration(SteamConfig.Delay)
+			delay := time.Duration(config.SteamDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
@@ -234,6 +227,7 @@ func handleSteamData(steamData SteamGoodsInfo) bool {
 	//批量更新steam数据 不存在的话就插入
 	isUpdateCookie := false
 	for _, v := range steamData.Results {
+		global.Logger.Println("steam - 商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
 		fmt.Println("steam - 商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
 		//检查是否有 ¥ 符号
 		if strings.Contains(v.SellPriceText, "¥") {
@@ -292,8 +286,9 @@ func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
 				return
 			}
 			//发送telegram消息
+			config := myDao.GetOneSystemConfig(1)
 			info.Proportion = P
-			if info.Proportion >= 0.7 {
+			if info.Proportion >= config.BotProportion {
 				info.SteamSellPrice = float64(steamSellPrice) / 100
 				sendTelegram(info, 2)
 			}
