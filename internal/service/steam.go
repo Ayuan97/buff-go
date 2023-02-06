@@ -137,9 +137,10 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 	myDao.UpdateSteamUserStatus(int(account.ID), 1)
 	for {
 		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"))
+		config := myDao.GetOneSystemConfig(1)
 		//循环N次 获取steam数据
 		var start = 0
-		for i := 1; i <= 80; i++ {
+		for i := 1; i <= config.SteamPageNum; i++ {
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23", start)
 			start = start + 100
 			client := &http.Client{}
@@ -208,7 +209,7 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1)
 			}
-			config := myDao.GetOneSystemConfig(1)
+			config = myDao.GetOneSystemConfig(1)
 			if config.StartSteamSell == 0 {
 				//结束协程
 				fmt.Println("结束协程")
