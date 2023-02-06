@@ -65,6 +65,7 @@ func (g *Goods) CreateOn(db *gorm.DB, goods *Goods) bool {
 			SellReferencePrice: goods.SellReferencePrice,
 			SteamMarketUrl:     goods.SteamMarketUrl,
 			TransactedNum:      goods.TransactedNum,
+			BuffUpdate:         goods.BuffUpdate,
 		}).Error
 		if err != nil {
 			fmt.Println("更新错误", err)
