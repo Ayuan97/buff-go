@@ -1,6 +1,10 @@
 package util
 
-import "strconv"
+import (
+	"crypto/md5"
+	"encoding/hex"
+	"strconv"
+)
 
 // 字符串转float64
 func StringToFloat64(str string) float64 {
@@ -28,4 +32,11 @@ func StringToInt64(str string) int64 {
 // int转字符串
 func IntToString(i int) string {
 	return strconv.Itoa(i)
+}
+
+// 字符串转MD5
+func StringToMD5(str string) string {
+	h := md5.New()
+	h.Write([]byte(str))
+	return hex.EncodeToString(h.Sum(nil))
 }

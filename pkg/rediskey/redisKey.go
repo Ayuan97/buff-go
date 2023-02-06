@@ -1,6 +1,7 @@
 package rediskey
 
 import (
+	"buff-go/pkg/util"
 	"fmt"
 )
 
@@ -17,8 +18,10 @@ const BuffLocalKey = "buff:local:key"
 const SteamLocalKey = "steam:local:key"
 
 // 商品缓存
-func GetCacheKey(id int) string {
-	return fmt.Sprintf("goods:cache:key:%d", id)
+func GetCacheKey(name string) string {
+	//将名称转换为md5字符串
+	str := util.StringToMD5(name)
+	return fmt.Sprintf("goods:cache:key:%s", str)
 }
 
 // 查询本地代理是否在使用中 - buff

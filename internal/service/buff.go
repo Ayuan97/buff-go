@@ -245,10 +245,7 @@ func isNeedUpdateBuffData(info model.Goods) {
 	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
 	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
-	if SteamSellPrice == "" {
-		fmt.Println("steam_sell_price 为空", info.GoodsId, "cacheKey:", goodsCacheKey)
-		return
-	}
+	info.SteamSellPrice = util.StringToFloat64(SteamSellPrice)
 	if buyMaxPrice == "" {
 		//缓存中没有数据
 		//更新缓存

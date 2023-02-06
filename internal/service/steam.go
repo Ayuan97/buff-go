@@ -205,7 +205,7 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 			}
 			if SteamData.Success == false {
 				fmt.Println("steam err6:", SteamData)
-				endSteamTask(resp, account, 3, 1)
+				endSteamTask(resp, account, 2, 1)
 			}
 
 			if SteamData.Success {
@@ -270,6 +270,10 @@ func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
 	//查询缓存中的steam数据
 	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
+	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
+	if buyMaxPrice == "" {
+		gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
+	}
 	if SteamSellPrice == "" {
 		//缓存中没有数据
 		//更新缓存
