@@ -70,7 +70,7 @@ func New(s *setting.LoggerSettingS) (*logrus.Logger, error) {
 	case setting.LogFileType:
 		log.Out = &lumberjack.Logger{
 			Filename:  s.LogFileSavePath + "/" + s.LogFileName + s.LogFileExt,
-			MaxSize:   600,
+			MaxSize:   100,
 			MaxAge:    10,
 			LocalTime: true,
 		}

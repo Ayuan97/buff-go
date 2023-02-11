@@ -130,7 +130,7 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 		//循环N次 获取buff数据
 		config := myDao.GetOneSystemConfig(1) //系统配置
 		for i := 1; i <= config.BuffPageNum; i++ {
-			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&use_suggestion=0&_=%v", i, config.BuffMinPrice, config.BuffMaxPrice, time.Now().UnixNano()/1e6)
+			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", i, config.BuffMinPrice, config.BuffMaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
 			if isProxy == 1 {
@@ -232,14 +232,14 @@ func handleBuffData(buffData BuffData) {
 		goodsInfo.SteamMarketUrl = v.SteamMarketUrl
 		goodsInfo.BuffUpdate = time.Now().Unix()
 		myDao.CreateGoods(&goodsInfo)
-		isNeedUpdateBuffData(goodsInfo)
+		isNeedUpdateBuffData(&goodsInfo)
 		fmt.Println("buff 商品名称:", v.MarketHashName, "价格:", util.StringToFloat64(v.BuyMaxPrice))
 		global.Logger.Info("buff 商品名称:", v.MarketHashName, "价格:", util.StringToFloat64(v.BuyMaxPrice))
 	}
 }
 
 // 是否需要更新buff数据 通知 更新比例
-func isNeedUpdateBuffData(info model.Goods) {
+func isNeedUpdateBuffData(info *model.Goods) {
 	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
 	//查询缓存中的buff数据
 	config := myDao.GetOneSystemConfig(1)
@@ -247,6 +247,9 @@ func isNeedUpdateBuffData(info model.Goods) {
 	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
 	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
 	info.SteamSellPrice = util.StringToFloat64(SteamSellPrice)
+	if util.StringToFloat64(SteamSellPrice) == 0 {
+		return
+	}
 	if SteamSellPrice == "" {
 		gredis.Hset(goodsCacheKey, "steam_sell_price", 0)
 		return
@@ -270,8 +273,8 @@ func isNeedUpdateBuffData(info model.Goods) {
 			}
 			//发送telegram消息
 			info.Proportion = P
-			if P >= config.BotProportion {
-				sendTelegram(&info, 1)
+			if P >= config.BotProportion && util.StringToFloat64(SteamSellPrice) >= 0 {
+				sendTelegram(info, 1)
 			}
 		}
 	}

@@ -204,10 +204,10 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 					}
 				}()
 			} else {
-				fmt.Println("steam err6:", SteamData)
+				fmt.Println("steam err7:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 0, 1)
+				endSteamTask(resp, account, 3, 1)
 			}
 			config = myDao.GetOneSystemConfig(1)
 			if config.StartSteamSell == 0 {
