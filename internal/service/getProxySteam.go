@@ -41,6 +41,8 @@ func StartGetProxy() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	ipChan := make(chan *model.Ip, 2000)
 
+	//检查库中的ip
+
 	//检查 chan 中的ip
 	go func() {
 		for {
