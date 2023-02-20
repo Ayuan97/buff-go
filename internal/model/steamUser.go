@@ -8,6 +8,7 @@ type SteamUser struct {
 	Account          string `json:"account"`
 	Password         string `json:"password"`
 	Status           int    `json:"status"`
+	Type             int    `json:"type"`
 	SteamCountry     string `json:"steam_country"`
 	BrowserId        string `json:"browser_id"`
 	SteamLoginSecure string `json:"steam_login_secure"`
@@ -24,9 +25,9 @@ func (a SteamUser) GetSteamUserList(db *gorm.DB) ([]*SteamUser, error) {
 }
 
 // 查询状态为 0 的账号 只取一个
-func (a SteamUser) GetOneSteamUser(db *gorm.DB) (SteamUser, error) {
+func (a SteamUser) GetOneSteamUser(db *gorm.DB, UserType int) (SteamUser, error) {
 	var steamUser SteamUser
-	err := db.Where("status = ?", 0).First(&steamUser).Error
+	err := db.Where("status = ? and type = ?", 0, UserType).First(&steamUser).Error
 	if err != nil {
 		return steamUser, err
 	}

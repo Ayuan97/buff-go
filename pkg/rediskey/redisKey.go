@@ -16,6 +16,12 @@ const GoodsNameKey = "goods:name:key:%d"
 
 const BuffLocalKey = "buff:local:key"
 const SteamLocalKey = "steam:local:key"
+const ProxySteamKey = "proxy:steam:key:%s"
+
+// 代理key
+func GetProxySteamKey(ip string) string {
+	return fmt.Sprintf(ProxySteamKey, ip)
+}
 
 // 商品缓存
 func GetCacheKey(name string) string {
