@@ -107,7 +107,7 @@ func ClearAllAccountCache() {
 		fmt.Sprintf("清除buff用户缓存成功,用户id:%d", buffUser.ID)
 	}
 
-	steamLocalKey := rediskey.GetSteamLocalKey()
+	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1")
 	gredis.Del(steamLocalKey)
 	steamUserList, err := myDao.GetSteamUserList()
 	for _, steamUser := range steamUserList {
