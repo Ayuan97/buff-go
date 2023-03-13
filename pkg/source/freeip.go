@@ -37,7 +37,7 @@ func FreeProxy() []*model.Ip {
 			} else {
 				IsHttps = 0
 			}
-			fmt.Println("ip:", ip, "port:", port, "is_https:", IsHttps)
+			//fmt.Println("ip:", ip, "port:", port, "is_https:", IsHttps)
 			ips = append(ips, &model.Ip{
 				Ip:      ip,
 				Port:    port,

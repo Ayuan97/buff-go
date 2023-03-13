@@ -2,6 +2,8 @@ package service
 
 import (
 	"buff-go/internal/model"
+	"buff-go/pkg/gredis"
+	"buff-go/pkg/rediskey"
 	"buff-go/pkg/source"
 	"crypto/tls"
 	"encoding/json"
@@ -42,8 +44,34 @@ func StartGetProxy() {
 	ipChan := make(chan *model.Ip, 2000)
 
 	//检查库中的ip
+	go func() {
+		for {
+			steamUser, err := myDao.GetOneSteamUser(2)
+			if err != nil {
+				continue
+			}
+			//查询数据库中的ip
+			ips, err := myDao.GetAllIp()
+			if err != nil {
+				continue
+			}
+			for _, ip := range ips {
+				//通过redis 检测ip是否已经在使用中
+				key := rediskey.GetProxySteamKey(ip.Ip)
+				if gredis.Get(key) != "" {
+					//fmt.Println("ip已经在使用中", ip.Ip)
+					continue
+				}
+				go func() {
+					fmt.Println("开启协程 进行抓取", ip.Ip)
+					getSteam(ip, steamUser)
+				}()
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}()
 
-	//检查 chan 中的ip
+	//检查 chan 中的ip是否可用  可用加入数据库 不可用删除
 	go func() {
 		for {
 			steamUser, err := myDao.GetOneSteamUser(2)
@@ -54,7 +82,7 @@ func StartGetProxy() {
 		}
 	}()
 
-	// 检查 chan 中的数据
+	// 检查 chan 中的数据  -- 要抓取的url
 	GoodsChan()
 
 	//开启抓取  写入channel
@@ -136,7 +164,7 @@ func CheckIP(ip *model.Ip, steamUser model.SteamUser) bool {
 	resp, err := httpClient.Do(request)
 
 	if err != nil {
-		//fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
+		fmt.Printf("[CheckIP] testIP = %s, 代理不可用 \n", testIP)
 		GoodChan <- getUrl
 		return false
 	}
@@ -149,11 +177,12 @@ func CheckIP(ip *model.Ip, steamUser model.SteamUser) bool {
 		bodyByte, _ := io.ReadAll(body)
 		err := json.Unmarshal(bodyByte, &SteamData)
 		if err != nil {
-			//fmt.Printf("[CheckIP]-2 testIP = %s, 代理不可用 \n", testIP)
+			fmt.Printf("[CheckIP]-2 testIP = %s, 代理不可用  抓取结果: %s \n ", testIP, SteamData)
 			GoodChan <- getUrl
-			return true
+			return false
 		}
 		if SteamData.Success {
+			fmt.Printf("[CheckIP]-2 testIP = %s, 代理可用 !! \n", testIP)
 			go func() {
 				handleSteamData(SteamData)
 			}()
@@ -161,6 +190,10 @@ func CheckIP(ip *model.Ip, steamUser model.SteamUser) bool {
 		} else {
 			fmt.Println("proxy steam err:", SteamData)
 		}
+	} else {
+		fmt.Printf("[CheckIP]-2 testIP = %s, 代理不可用  resp.StatusCode: %d \n ", testIP, resp.StatusCode)
+		GoodChan <- getUrl
+		return false
 	}
 	return false
 }
@@ -184,4 +217,25 @@ func GoodsChan() {
 			time.Sleep(time.Second * 5)
 		}
 	}()
+}
+
+// 抓取steam信息
+func getSteam(ip *model.Ip, steamUser model.SteamUser) {
+	key := rediskey.GetProxySteamKey(ip.Ip)
+	gredis.Set(key, 1, time.Minute*30)
+	for {
+		if CheckIP(ip, steamUser) {
+			//如果代理可用 则继续循环
+			time.Sleep(time.Second * 1)
+		} else {
+			fmt.Println("代理不可用", ip)
+			//如果代理不可用 则删除
+			myDao.DeleteIp(ip)
+			gredis.Del(key)
+			fmt.Println("代理不可用,删除", ip)
+			//停止循环 结束协程
+			runtime.Goexit()
+		}
+	}
+
 }
