@@ -7,13 +7,16 @@ import (
 
 type Ip struct {
 	*Model
-	Ip      string `json:"data"`
-	Type    int    `json:"type"`
-	Country int    `json:"country"`
-	IsHttps string `json:"is_https"`
-	Speed   int    `json:"speed"`
-	Source  string `json:"source"`
-	Port    int    `json:"port"`
+	Ip        string `json:"data"`
+	Type      int    `json:"type"`
+	Name      string `json:"name"`
+	PassWord  string `json:"pass_word"`
+	ProxyType int    `json:"proxy_type"`
+	Country   int    `json:"country"`
+	IsHttps   string `json:"is_https"`
+	Speed     int    `json:"speed"`
+	Source    string `json:"source"`
+	Port      int    `json:"port"`
 }
 
 func (i *Ip) CountIps(db *gorm.DB) int64 {
@@ -36,7 +39,7 @@ func (i *Ip) DeleteIp(db *gorm.DB) error {
 
 func (i *Ip) GetAllIp(db *gorm.DB) ([]*Ip, error) {
 	var ips []*Ip
-	err := db.Find(&ips).Error
+	err := db.Where("type = 1").Find(&ips).Error
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +60,26 @@ func (i *Ip) GetIps(db *gorm.DB) (*Ip, error) {
 func (i *Ip) GetRandomIps(db *gorm.DB) (*Ip, error) {
 	var ips *Ip
 	err := db.Order("rand()").Find(&ips).Error
+	if err != nil {
+		return nil, err
+	}
+	return ips, nil
+}
+
+// 获取一个私有代理
+func (i *Ip) GetOneIp(db *gorm.DB, country int) (*Ip, error) {
+	var ips *Ip
+	err := db.Where("type = 2 and country = ?", country).Find(&ips).Error
+	if err != nil {
+		return nil, err
+	}
+	return ips, nil
+}
+
+// 获取所有私有代理
+func (i *Ip) GetAllPrivateIp(db *gorm.DB) ([]*Ip, error) {
+	var ips []*Ip
+	err := db.Where("type = 2").Find(&ips).Error
 	if err != nil {
 		return nil, err
 	}

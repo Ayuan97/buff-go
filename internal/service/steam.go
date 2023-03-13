@@ -8,10 +8,12 @@ import (
 	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/net/proxy"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -103,29 +105,54 @@ func GetSteam() {
 			steamAccountResult := gredis.Get(steamAccountKey)
 			if steamLocalResult == "" && steamAccountResult == "" {
 				//开启本地代理
-				go GetSteamData(0, "127.0.0.1", steamUser)
+				Ip := model.Ip{Ip: "127.0.0.1", Port: 80, Type: 2}
+				go GetSteamData(0, &Ip, steamUser)
 				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("steam本地代理正在抓取中...")
 
 			}
 
-			////查询是否有可用代理
-			//proxy := myDao.GetOneProxy(1)
-			////查询是否有可用账号
-			//account := myDao.GetOneAccount(1)
-			//if proxy != nil && account != nil {
-			//	//启动一个协程 使用代理
-			//	go GetSteamData(1, proxy.Ip)
-			//}
+			//查询是否有可用代理
+			oneIp, err := myDao.GetOneIp(2)
+			if err != nil {
+				fmt.Println("没有可用代理")
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			proxyKey := rediskey.GetProxySteamKey(oneIp.Ip + ":" + strconv.Itoa(oneIp.Port))
+			proxyKeyResult := gredis.Get(proxyKey)
+
+			//查询是否有可用账号
+			account, err := myDao.GetOneSteamUser(1)
+			if err != nil {
+				fmt.Println("没有可用账号")
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			accountKey := rediskey.GetSteamAccountKey(int(account.ID))
+			accountKeyResult := gredis.Get(accountKey)
+
+			if proxyKeyResult == "" && accountKeyResult == "" {
+				fmt.Println("代理和账号都可用 启动协程", oneIp.Ip, account.Account)
+				//启动一个协程 使用代理
+				go GetSteamData(1, oneIp, account)
+			} else {
+				fmt.Println("proxyKey", proxyKey)
+				fmt.Println("accountKey", accountKey)
+				//fmt.Println("代理或账号正在抓取中", oneIp.Ip, account.Account)
+				time.Sleep(10 * time.Second)
+				continue
+			}
 			time.Sleep(10 * time.Second)
 		}
 	}()
 }
 
-func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
+func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
+	p := Ip.Ip + ":" + strconv.Itoa(Ip.Port)
 	//设置代理正在抓取中
-	steamProxyKey := rediskey.GetProxySteamKey(proxy)
+	steamProxyKey := rediskey.GetProxySteamKey(p)
 	gredis.Set(steamProxyKey, "1", 0)
 	//设置账号正在抓取中
 	steamAccountKey := rediskey.GetSteamAccountKey(int(account.ID))
@@ -143,9 +170,20 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 			client := &http.Client{}
 			//isProxy 设置代理
 			if isProxy == 1 {
-				proxyURL, _ := url.Parse(proxy)
-				client.Transport = &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
+				if Ip.ProxyType == 1 {
+					proxyURL, _ := url.Parse(p)
+					client.Transport = &http.Transport{
+						Proxy: http.ProxyURL(proxyURL),
+					}
+				} else {
+					//socks5
+					str := "socks5://" + Ip.Name + ":" + Ip.PassWord + "@" + Ip.Ip + ":" + strconv.Itoa(Ip.Port)
+					proxyUrl, _ := url.Parse(str)
+					dialer, _ := proxy.FromURL(proxyUrl, proxy.Direct)
+					// 创建 HTTP 客户端，并指定代理
+					client.Transport = &http.Transport{
+						Dial: dialer.Dial,
+					}
 				}
 			}
 			req, err := http.NewRequest("GET", geturl, nil)
@@ -170,47 +208,47 @@ func GetSteamData(isProxy int, proxy string, account model.SteamUser) {
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("steam err2:", err)
-				endSteamTask(resp, account, 0, 1, proxy)
+				endSteamTask(resp, account, 0, 1, p)
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				fmt.Println("steam err3:", err)
 				//结束协程
-				endSteamTask(resp, account, 0, 1, proxy)
+				endSteamTask(resp, account, 0, 1, p)
 				return
 			}
 			var SteamData SteamGoodsInfo
 			err = json.Unmarshal(body, &SteamData)
 			if err != nil {
 				fmt.Println("steam err4:", err)
-				endSteamTask(resp, account, 0, 1, proxy)
+				endSteamTask(resp, account, 0, 1, p)
 				return
 			}
 			if SteamData.Success == false {
 				fmt.Println("steam err6:", SteamData)
-				endSteamTask(resp, account, 2, 1, proxy)
+				endSteamTask(resp, account, 2, 1, p)
 			}
 
 			if SteamData.Success {
 				go func() {
-					p := handleSteamData(SteamData)
-					if p {
+					a := handleSteamData(SteamData)
+					if a {
 						//结束协程
-						endSteamTask(resp, account, 2, 1, proxy)
+						endSteamTask(resp, account, 2, 1, p)
 					}
 				}()
 			} else {
 				fmt.Println("steam err7:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 3, 1, proxy)
+				endSteamTask(resp, account, 3, 1, p)
 			}
 			config = myDao.GetOneSystemConfig(1)
 			if config.StartSteamSell == 0 {
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 0, 1, proxy)
+				endSteamTask(resp, account, 0, 1, p)
 				return
 			}
 			//每次请求间隔

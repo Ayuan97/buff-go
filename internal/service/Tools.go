@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -95,6 +96,9 @@ func ClearAllAccountCache() {
 
 	buffLocalKey := rediskey.GetBuffLocalKey()
 	gredis.Del(buffLocalKey)
+	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1")
+	gredis.Del(steamLocalKey)
+
 	buffUserList, err := myDao.GetBuffUserList()
 	if err != nil {
 		fmt.Println("获取buff用户列表失败", err)
@@ -107,14 +111,27 @@ func ClearAllAccountCache() {
 		fmt.Sprintf("清除buff用户缓存成功,用户id:%d", buffUser.ID)
 	}
 
-	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1")
-	gredis.Del(steamLocalKey)
 	steamUserList, err := myDao.GetSteamUserList()
 	for _, steamUser := range steamUserList {
 		steamAccountKey := rediskey.GetSteamAccountKey(int(steamUser.ID))
+		fmt.Println("清除:", steamAccountKey)
 		gredis.Del(steamAccountKey)
 		myDao.UpdateSteamUserStatus(int(steamUser.ID), 0)
-		fmt.Sprintf("清除steam用户缓存成功,用户id:%d", steamUser.ID)
+		fmt.Println("清除steam用户缓存成功,用户id:", steamUser.ID)
+
+	}
+
+	ipsList, err := myDao.GetAllPrivateIp()
+	if err != nil {
+		fmt.Println("获取私有ip列表失败", err)
+		return
+	}
+	for _, ip := range ipsList {
+		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
+		key := rediskey.GetProxySteamKey(address)
+		fmt.Println("清除:", key)
+		gredis.Del(key)
+
 	}
 
 }

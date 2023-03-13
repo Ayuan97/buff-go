@@ -50,6 +50,7 @@ func StartGetProxy() {
 			if err != nil {
 				continue
 			}
+
 			//查询数据库中的ip
 			ips, err := myDao.GetAllIp()
 			if err != nil {
@@ -184,7 +185,11 @@ func CheckIP(ip *model.Ip, steamUser model.SteamUser) bool {
 		if SteamData.Success {
 			fmt.Printf("[CheckIP]-2 testIP = %s, 代理可用 !! \n", testIP)
 			go func() {
-				handleSteamData(SteamData)
+				result := handleSteamData(SteamData)
+				if result {
+					//修改账号状态
+					myDao.UpdateSteamUserStatus(int(steamUser.ID), 2)
+				}
 			}()
 			return true
 		} else {
@@ -226,7 +231,7 @@ func getSteam(ip *model.Ip, steamUser model.SteamUser) {
 	for {
 		if CheckIP(ip, steamUser) {
 			//如果代理可用 则继续循环
-			time.Sleep(time.Second * 1)
+
 		} else {
 			fmt.Println("代理不可用", ip)
 			//如果代理不可用 则删除

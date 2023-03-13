@@ -7,6 +7,18 @@ func (d *Dao) CountIps() int64 {
 	return ip.CountIps(d.engine)
 }
 
+// 获取一个私有代理
+func (d *Dao) GetOneIp(country int) (*model.Ip, error) {
+	var ip model.Ip
+	return ip.GetOneIp(d.engine, country)
+}
+
+// 获取所有私有代理
+func (d *Dao) GetAllPrivateIp() ([]*model.Ip, error) {
+	var ip model.Ip
+	return ip.GetAllPrivateIp(d.engine)
+}
+
 // 添加代理到数据库
 func (d *Dao) AddIp(ip *model.Ip) error {
 	return ip.AddIp(d.engine)
