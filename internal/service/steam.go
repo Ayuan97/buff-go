@@ -78,7 +78,7 @@ type SteamGoodsInfo struct {
 	} `json:"results"`
 }
 
-func getSteam() {
+func GetSteam() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
@@ -107,6 +107,7 @@ func getSteam() {
 				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("steam本地代理正在抓取中...")
+
 			}
 
 			////查询是否有可用代理

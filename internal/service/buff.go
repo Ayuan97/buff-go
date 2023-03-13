@@ -161,7 +161,7 @@ func GetBuffData(isProxy int, proxy string, account model.BuffUser) {
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("buff err2:", err)
-				endTask(resp, account, 0, 1)
+				endTask2(resp, account, 0, 1)
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
@@ -286,6 +286,21 @@ func endTask(resp *http.Response, account model.BuffUser, status int, taskType i
 	buffLocalKey := rediskey.GetBuffLocalKey()
 	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
 	resp.Body.Close()
+	//设置本地代理抓取结束
+	gredis.Del(buffLocalKey)
+	//设置账号抓取结束
+	gredis.Del(buffAccountKey)
+	//设置账号状态
+	myDao.UpdateBuffUserStatus(int(account.ID), status)
+	if taskType == 1 {
+		runtime.Goexit()
+	}
+}
+
+// 结束任务
+func endTask2(resp *http.Response, account model.BuffUser, status int, taskType int) {
+	buffLocalKey := rediskey.GetBuffLocalKey()
+	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
 	//设置本地代理抓取结束
 	gredis.Del(buffLocalKey)
 	//设置账号抓取结束
