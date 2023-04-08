@@ -264,16 +264,15 @@ func handleSteamData(steamData SteamGoodsInfo) {
 
 	for _, v := range steamData.Results {
 		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
+		var Info model.Info
 		//查询缓存
-		value := gredis.Get(key)
-		if value == "" {
+		value, _ := gredis.HGetAll(key)
+		if len(value) > 0 {
 			//缓存不存在
 			//查询数据库
 			_, err := myDao.GetOneInfoByMarketHashName(v.AssetDescription.MarketHashName)
 			if err != nil {
 				//数据库不存在
-				var Info model.Info
-
 				Info.MarketHashName = v.AssetDescription.MarketHashName
 				//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //steam 购买价格
 				//Info.SteamBuyNum = v.BuyNum 						   //steam 购买数量
@@ -282,26 +281,41 @@ func handleSteamData(steamData SteamGoodsInfo) {
 				Info.Name = v.Name
 				//插入数据库
 				myDao.CreateInfo(&Info)
+				//初始化缓存
+				c := CacheData{
+					Key:            key,
+					id:             0,
+					name:           v.Name,
+					marketHashName: v.AssetDescription.MarketHashName,
+					BuffBuyPrice:   0,
+					BuffBuyNum:     0,
+					BuffSellPrice:  0,
+					BuffSellNum:    0,
+					SteamBuyPrice:  0,
+					SteamBuyNum:    0,
+					SteamSellPrice: float64(v.SellPrice) / 100,
+					SteamSellNum:   v.SellListings,
+				}
+				InitGoodCache(c)
 			}
 		} else {
 			//缓存存在
 			//批量更新数据
-			var Info model.Info
 			//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
 			//Info.SteamBuyNum = v.BuyNum 						   //buff 购买数量
 			Info.SteamSellPrice = util.IntToFloat64(v.SellPrice) / 100 //buff 出售价格
 			Info.SteamSellNum = v.SellListings                         //buff 出售数量
 			Info.MarketHashName = v.AssetDescription.MarketHashName
 			Info.Name = v.Name
-			//比对价格是否有变动
-			CheckPriceChange(key, 2, Info)
-
 			InfoList = append(InfoList, &Info)
-
+			//插入缓存
+			gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
+			gredis.Hset(key, "steam_sell_num", v.SellListings)
 		}
-		//插入缓存
-		gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
-		gredis.Hset(key, "steam_sell_num", v.SellListings)
+		if len(value) > 0 {
+			//比对价格是否有变动
+			CheckPriceChange(key, 2, value)
+		}
 	}
 }
 

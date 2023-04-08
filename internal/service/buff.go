@@ -202,13 +202,13 @@ func handleBuffData(buffData BuffData) {
 		key := rediskey.GetCacheKey(v.MarketHashName)
 		//查询缓存
 		value, _ := gredis.HGetAll(key)
+		var Info model.Info
 		if len(value) == 0 {
 			//缓存不存在
 			//查询数据库
 			_, err := myDao.GetOneInfoByMarketHashName(v.MarketHashName)
 			if err != nil {
 				//数据库不存在
-				var Info model.Info
 				Info.Appid = v.Appid
 				Info.GoodsId = v.Id
 				Info.MarketHashName = v.MarketHashName
@@ -222,19 +222,33 @@ func handleBuffData(buffData BuffData) {
 				Info.IconUrl = v.GoodsInfo.OriginalIconUrl
 				//插入数据库
 				myDao.CreateInfo(&Info)
+				//初始化缓存
+				c := CacheData{
+					Key:            key,
+					id:             v.Id,
+					name:           v.Name,
+					marketHashName: v.MarketHashName,
+					BuffBuyPrice:   util.StringToFloat64(v.BuyMaxPrice),
+					BuffBuyNum:     v.BuyNum,
+					BuffSellPrice:  util.StringToFloat64(v.SellMinPrice),
+					BuffSellNum:    v.SellNum,
+					SteamBuyPrice:  0,
+					SteamBuyNum:    0,
+					SteamSellPrice: 0,
+					SteamSellNum:   0,
+				}
+
+				InitGoodCache(c)
 			}
 		} else {
 			//缓存存在
 			//批量更新数据
-			var Info model.Info
 			Info.Name = v.Name
 			Info.MarketHashName = v.MarketHashName
 			Info.BuffBuyPrice = util.StringToFloat64(v.BuyMaxPrice)   //buff 购买价格
 			Info.BuffBuyNum = v.BuyNum                                //buff 购买数量
 			Info.BuffSellPrice = util.StringToFloat64(v.SellMinPrice) //buff 出售价格
 			Info.BuffSellNum = v.SellNum                              //buff 出售数量
-			CheckPriceChange(key, 1, Info)
-
 			InfoList = append(InfoList, &Info)
 
 		}
@@ -243,11 +257,16 @@ func handleBuffData(buffData BuffData) {
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
 		gredis.Hset(key, "buff_sell_min_price", v.SellMinPrice)
 		gredis.Hset(key, "buff_sell_num", v.SellNum)
+		if len(value) > 0 {
+			//更新前数据
+			CheckPriceChange(key, 1, value)
+		}
 	}
 	if len(InfoList) > 0 {
 		//更新数据库
 		myDao.BatchBuffUpdateInfo(InfoList)
 	}
+
 }
 
 // 结束任务

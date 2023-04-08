@@ -1,141 +1,62 @@
 package service
 
 import (
-	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
-	"buff-go/pkg/util"
-	"context"
 	"fmt"
-	"github.com/chromedp/chromedp"
-	"io/ioutil"
-	"log"
-	"os"
 	"strconv"
-	"time"
 )
 
-// 获取系统配置
-func GetSystemConfig() model.Config {
-	return myDao.GetOneSystemConfig(1)
+type CacheData struct {
+	Key            string
+	id             int
+	name           string
+	marketHashName string
+	BuffBuyPrice   float64
+	BuffBuyNum     int
+	BuffSellPrice  float64
+	BuffSellNum    int
+	SteamBuyPrice  float64
+	SteamBuyNum    int
+	SteamSellPrice float64
+	SteamSellNum   int
+}
+
+//初始化该商品的缓存
+func InitGoodCache(c CacheData) {
+	//初始化商品缓存
+	gredis.Hset(c.Key, "buff_buy_price", strconv.FormatFloat(c.BuffBuyPrice, 'f', 2, 64))
+	gredis.Hset(c.Key, "buff_buy_num", strconv.Itoa(c.BuffBuyNum))
+	gredis.Hset(c.Key, "buff_sell_price", strconv.FormatFloat(c.BuffSellPrice, 'f', 2, 64))
+	gredis.Hset(c.Key, "buff_sell_num", strconv.Itoa(c.BuffSellNum))
+	gredis.Hset(c.Key, "steam_buy_price", strconv.FormatFloat(c.SteamBuyPrice, 'f', 2, 64))
+	gredis.Hset(c.Key, "steam_buy_num", strconv.Itoa(c.SteamBuyNum))
+	gredis.Hset(c.Key, "steam_sell_price", strconv.FormatFloat(c.SteamSellPrice, 'f', 2, 64))
+	gredis.Hset(c.Key, "steam_sell_num", strconv.Itoa(c.SteamSellNum))
+	gredis.Hset(c.Key, "name", c.name)
+	gredis.Hset(c.Key, "market_hash_name", c.marketHashName)
+	gredis.Hset(c.Key, "buff_goods_id", c.id)
+
 }
 
 //检查价格是否有变动
-func CheckPriceChange(key string, checkType int, Info model.Info) {
+func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 	//获取 key 的所有 hget
 	data, _ := gredis.HGetAll(key)
-	if data != nil {
-		for k, v := range data {
+	if data != nil && len(data) > 0 {
 
-			isChange := false
-			if checkType == 1 {
-				//buff 价格变动
-				if k == "buff_buy_max_price" {
-					if Info.BuffBuyPrice != util.StringToFloat64(v) {
-						isChange = true
-						fmt.Println("buff 购买价格变动:", Info.MarketHashName)
-					}
-				}
-				if k == "buff_sell_min_price" {
-					if Info.BuffSellPrice != util.StringToFloat64(v) {
-						isChange = true
-						fmt.Println("buff 出售价格变动", Info.MarketHashName)
-					}
-				}
-			} else {
-				//steam 价格变动
-				if k == "steam_sell_price" {
-					if Info.SteamSellPrice != util.StringToFloat64(v) {
-						isChange = true
-						fmt.Println("steam 购买价格变动", Info.MarketHashName)
-					}
-				}
-				if k == "steam_buy_max_price" {
-					if Info.SteamBuyPrice != util.StringToFloat64(v) {
-						isChange = true
-						fmt.Println("steam 出售价格变动", Info.MarketHashName)
-					}
-				}
-			}
-			if isChange {
-				//发送telegram通知
-
-				//检测是否需要购买操作
-
+		if checkType == 1 {
+			if data["buff_buy_max_price"] != oldValue["buff_buy_max_price"] || data["buff_sell_min_price"] != oldValue["buff_sell_min_price"] {
+				send(data, checkType)
 			}
 		}
-	}
-}
-
-// 更新比例
-func UpdateGoodsProportion(goodsId int, cat_type int) {
-
-	goodsInfo, err := myDao.GetGoodsByGoodsId(int64(goodsId))
-	if err != nil {
-		fmt.Println("UpdateGoodsProportion err :", err)
-		return
-	}
-	if goodsInfo.GoodsId > 0 {
-		goodsInfo.Proportion = goodsInfo.BuyMaxPrice / goodsInfo.SteamSellPrice
-		err := myDao.UpdateGoodsRatio(goodsInfo, goodsInfo.Proportion)
-		if err != nil {
-			fmt.Println("更新比例失败", err)
-			return
-		}
-		config := myDao.GetOneSystemConfig(1)
-		if cat_type == 2 && goodsInfo.Proportion >= config.BotProportion && goodsInfo.SteamSellPrice >= config.BotPrice {
-			//商品名称是否包含 印花
-			if !util.Contains(goodsInfo.MarketHashName, "Sticker") {
-				//sendTelegram(goodsInfo)
+		if checkType == 2 {
+			if data["steam_sell_price"] != oldValue["steam_sell_price"] {
+				send(data, checkType)
 			}
 		}
+
 	}
-
-}
-
-// 登录steam获取cookie
-func LoginSteam() {
-	options := []chromedp.ExecAllocatorOption{
-		chromedp.Flag("headless", false), // debug使用
-		chromedp.Flag("blink-settings", "imagesEnabled=true"),
-		chromedp.UserAgent(`Mozilla/5.0 (Windows NT 6.3; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.103 Safari/537.36`),
-	}
-	options = append(chromedp.DefaultExecAllocatorOptions[:], options...)
-	c, _ := chromedp.NewExecAllocator(context.Background(), options...)
-
-	// create context
-	ctx, cancel := chromedp.NewContext(c, chromedp.WithLogf(log.Printf))
-	defer cancel()
-
-	// navigate to a page, wait for an element, click
-	var example string
-	err := chromedp.Run(ctx,
-		//打开网页
-		chromedp.Navigate("https://steamcommunity.com/login/home/?goto="),
-		////等待3秒
-		//chromedp.Sleep(5*time.Second),
-		//等待元素出现
-		chromedp.WaitVisible(`#responsive_page_template_content > div.page_content > div:nth-child(1) > div > div > div > div.newlogindialog_FormContainer_3jLIH > div`),
-		//输入账号
-		chromedp.SendKeys(`#responsive_page_template_content > div.page_content > div:nth-child(1) > div > div > div > div.newlogindialog_FormContainer_3jLIH > div > form > div:nth-child(1) > input`, "zhao19970223"),
-		//输入密码
-		chromedp.SendKeys(`#responsive_page_template_content > div.page_content > div:nth-child(1) > div > div > div > div.newlogindialog_FormContainer_3jLIH > div > form > div:nth-child(2) > input`, "ZHAO19970223."),
-		//点击登录
-		chromedp.Click(`#responsive_page_template_content > div.page_content > div:nth-child(1) > div > div > div > div.newlogindialog_FormContainer_3jLIH > div > form > div.newlogindialog_SignInButtonContainer_14fsn > button`, chromedp.NodeVisible),
-		//等待3秒
-		chromedp.Sleep(10*time.Second),
-		//打开网页
-		chromedp.Navigate("https://steamcommunity.com/market/"),
-		//等待3秒
-		chromedp.Sleep(10*time.Second),
-
-		//获取浏览器cookie
-		chromedp.Evaluate(`document.cookie`, &example),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Go's time.After example:\n%s", example)
 }
 
 // 清楚所有账号缓存
@@ -181,21 +102,4 @@ func ClearAllAccountCache() {
 
 	}
 
-}
-
-// 检测文件大小 超过1M则清空
-func CheckLogFileSize() {
-	fileInfo, err := os.Stat("log.txt")
-	if err != nil {
-		fmt.Println("获取文件信息失败", err)
-		return
-	}
-	if fileInfo.Size() > 1024*1024*1 {
-		//输出 "" 到文件
-		err := ioutil.WriteFile("log.txt", []byte(""), 0777)
-		if err != nil {
-			fmt.Println("清空文件失败", err)
-			return
-		}
-	}
 }
