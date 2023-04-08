@@ -1,7 +1,6 @@
 package service
 
 import (
-	"buff-go/global"
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
@@ -231,13 +230,14 @@ func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			}
 
 			if SteamData.Success {
-				go func() {
-					a := handleSteamData(SteamData)
-					if a {
-						//结束协程
-						endSteamTask(resp, account, 2, 1, p)
-					}
-				}()
+				if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
+					go handleSteamData(SteamData)
+				} else {
+					fmt.Println("steam err5:", SteamData)
+					//结束协程
+					fmt.Println("结束协程")
+					endSteamTask(resp, account, 3, 1, p)
+				}
 			} else {
 				fmt.Println("steam err7:", SteamData)
 				//结束协程
@@ -259,78 +259,50 @@ func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 }
 
 // 处理steam数据
-func handleSteamData(steamData SteamGoodsInfo) bool {
-	//批量更新steam数据 不存在的话就插入
-	isUpdateCookie := false
+func handleSteamData(steamData SteamGoodsInfo) {
+	var InfoList []*model.Info
+
 	for _, v := range steamData.Results {
-		global.Logger.Println("steam - 商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
-		fmt.Println("steam - 商品名称:", v.HashName, "商品价格分:", v.SellPrice, "商品价格text:", v.SellPriceText)
-		//检查是否有 ¥ 符号
-		if strings.Contains(v.SellPriceText, "¥") {
-			//查找是否存在 存在更新steam出售价格
-			goods, err := myDao.GetGoodsBySteamItemNameId(v.HashName)
+		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
+		//查询缓存
+		value := gredis.Get(key)
+		if value == "" {
+			//缓存不存在
+			//查询数据库
+			_, err := myDao.GetOneInfoByMarketHashName(v.AssetDescription.MarketHashName)
 			if err != nil {
-				fmt.Println("查询商品错误:", err)
-				continue
+				//数据库不存在
+				var Info model.Info
+
+				Info.MarketHashName = v.AssetDescription.MarketHashName
+				//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //steam 购买价格
+				//Info.SteamBuyNum = v.BuyNum 						   //steam 购买数量
+				Info.SteamSellPrice = float64(v.SellPrice) / 100 //steam 出售价格
+				Info.SteamSellNum = v.SellListings               //steam 出售数量
+				Info.Name = v.Name
+				//插入数据库
+				myDao.CreateInfo(&Info)
 			}
-			if goods.MarketHashName == "" {
-				fmt.Println("商品不存在")
-				continue
-			}
-			//更新商品价格
-			err = myDao.UpdateGoodsPrice(goods, v.SellPrice)
-			if err != nil {
-				fmt.Println("更新商品价格错误:", err)
-				continue
-			}
-			//判断商品价格是否变动 如果变动就通知telegram
-			isNeedUpdateSteamData(goods, v.SellPrice)
 		} else {
-			fmt.Println("不是人民币 需要重新获取cookie")
-			isUpdateCookie = true
-			return true
-		}
-	}
-	return isUpdateCookie
-}
+			//缓存存在
+			//批量更新数据
+			var Info model.Info
+			//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
+			//Info.SteamBuyNum = v.BuyNum 						   //buff 购买数量
+			Info.SteamSellPrice = util.IntToFloat64(v.SellPrice) / 100 //buff 出售价格
+			Info.SteamSellNum = v.SellListings                         //buff 出售数量
+			Info.MarketHashName = v.AssetDescription.MarketHashName
+			Info.Name = v.Name
+			//比对价格是否有变动
+			CheckPriceChange(key, 2, Info)
 
-// 是否需要更新steam数据 通知 更新比例
-func isNeedUpdateSteamData(info *model.Goods, steamSellPrice int) {
-	//查询缓存中的steam数据 与数据库中的steam数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
-	//查询缓存中的steam数据
-	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
-	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
-	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
-	if buyMaxPrice == "" {
-		gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
-	}
-	if SteamSellPrice == "" {
-		//缓存中没有数据
-		//更新缓存
-		gredis.Hset(goodsCacheKey, "steam_sell_price", util.IntToFloat64(steamSellPrice)/100)
-	} else {
-		//缓存中有数据
-		//比较价格
-		if util.StringToFloat64(SteamSellPrice) != util.IntToFloat64(steamSellPrice)/100 {
-			//价格变化
-			//更新缓存
-			gredis.Hset(goodsCacheKey, "steam_sell_price", util.IntToFloat64(steamSellPrice)/100)
-			//更新比例
-			P := info.BuyMaxPrice / (util.IntToFloat64(steamSellPrice) / 100)
-			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)
-			if err != nil {
-				return
-			}
-			//发送telegram消息
-			config := myDao.GetOneSystemConfig(1)
-			info.Proportion = P
-			if info.Proportion >= config.BotProportion {
-				info.SteamSellPrice = float64(steamSellPrice) / 100
-				sendTelegram(info, 2)
-			}
-		}
-	}
+			InfoList = append(InfoList, &Info)
 
+		}
+		//插入缓存
+		gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
+		gredis.Hset(key, "steam_sell_num", v.SellListings)
+	}
 }
 
 // 结束steam任务

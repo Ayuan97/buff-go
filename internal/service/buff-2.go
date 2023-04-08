@@ -2,9 +2,6 @@ package service
 
 import (
 	"buff-go/internal/model"
-	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
-	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -146,47 +143,4 @@ func getBuffGoodInfo(goods *model.Goods) {
 	} else {
 		fmt.Println("buff err5:", err)
 	}
-}
-
-// 是否需要更新buff数据 通知 更新比例
-func isNeedUpdateBuffData(info *model.Goods) {
-	//查询缓存中的buff数据 与数据库中的buff数据对比 有变化的话就发送telegram消息 更新比例和更新缓存
-	//查询缓存中的buff数据
-	config := myDao.GetOneSystemConfig(1)
-	goodsCacheKey := rediskey.GetCacheKey(info.MarketHashName)
-	buyMaxPrice := gredis.Hget(goodsCacheKey, "buy_max_price")
-	SteamSellPrice := gredis.Hget(goodsCacheKey, "steam_sell_price")
-	info.SteamSellPrice = util.StringToFloat64(SteamSellPrice)
-	if util.StringToFloat64(SteamSellPrice) == 0 {
-		return
-	}
-	if SteamSellPrice == "" {
-		gredis.Hset(goodsCacheKey, "steam_sell_price", 0)
-		return
-	}
-	if buyMaxPrice == "" {
-		//缓存中没有数据
-		//更新缓存
-		gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
-	} else {
-		//缓存中有数据
-		//比较价格
-		if util.StringToFloat64(buyMaxPrice) != info.BuyMaxPrice {
-			//价格变化
-			//更新缓存
-			gredis.Hset(goodsCacheKey, "buy_max_price", info.BuyMaxPrice)
-			//更新比例
-			P := info.BuyMaxPrice / util.StringToFloat64(SteamSellPrice)
-			err := myDao.UpdateGoodsRatioByGoodsId(info.GoodsId, P)
-			if err != nil {
-				return
-			}
-			//发送telegram消息
-			info.Proportion = P
-			if P >= config.BotProportion && util.StringToFloat64(SteamSellPrice) >= 0 {
-				sendTelegram(info, 1)
-			}
-		}
-	}
-
 }

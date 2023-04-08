@@ -40,6 +40,17 @@ func Hget(key string, field string) string {
 	return val
 }
 
+// get all hash
+func HGetAll(key string) (map[string]string, map[string]string) {
+	key = global.RedisSetting.Prefix + key
+	val, err := global.Redis.HGetAll(ctx, key).Result()
+	if err != nil {
+		//global.Logger.Errorf("redis hget failed %v", err)
+		return nil, nil
+	}
+	return val, nil
+}
+
 // Set a key/value
 func Set(key string, data interface{}, expiration time.Duration) error {
 	key = global.RedisSetting.Prefix + key

@@ -20,6 +20,53 @@ func GetSystemConfig() model.Config {
 	return myDao.GetOneSystemConfig(1)
 }
 
+//检查价格是否有变动
+func CheckPriceChange(key string, checkType int, Info model.Info) {
+	//获取 key 的所有 hget
+	data, _ := gredis.HGetAll(key)
+	if data != nil {
+		for k, v := range data {
+
+			isChange := false
+			if checkType == 1 {
+				//buff 价格变动
+				if k == "buff_buy_max_price" {
+					if Info.BuffBuyPrice != util.StringToFloat64(v) {
+						isChange = true
+						fmt.Println("buff 购买价格变动:", Info.MarketHashName)
+					}
+				}
+				if k == "buff_sell_min_price" {
+					if Info.BuffSellPrice != util.StringToFloat64(v) {
+						isChange = true
+						fmt.Println("buff 出售价格变动", Info.MarketHashName)
+					}
+				}
+			} else {
+				//steam 价格变动
+				if k == "steam_sell_price" {
+					if Info.SteamSellPrice != util.StringToFloat64(v) {
+						isChange = true
+						fmt.Println("steam 购买价格变动", Info.MarketHashName)
+					}
+				}
+				if k == "steam_buy_max_price" {
+					if Info.SteamBuyPrice != util.StringToFloat64(v) {
+						isChange = true
+						fmt.Println("steam 出售价格变动", Info.MarketHashName)
+					}
+				}
+			}
+			if isChange {
+				//发送telegram通知
+
+				//检测是否需要购买操作
+
+			}
+		}
+	}
+}
+
 // 更新比例
 func UpdateGoodsProportion(goodsId int, cat_type int) {
 

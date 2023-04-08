@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -184,13 +185,9 @@ func CheckIP(ip *model.Ip, steamUser model.SteamUser) bool {
 		}
 		if SteamData.Success {
 			fmt.Printf("[CheckIP]-2 testIP = %s, 代理可用 !! \n", testIP)
-			go func() {
-				result := handleSteamData(SteamData)
-				if result {
-					//修改账号状态
-					myDao.UpdateSteamUserStatus(int(steamUser.ID), 2)
-				}
-			}()
+			if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
+				go handleSteamData(SteamData)
+			}
 			return true
 		} else {
 			fmt.Println("proxy steam err:", SteamData)
