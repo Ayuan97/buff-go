@@ -233,7 +233,7 @@ func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
 					go handleSteamData(SteamData)
 				} else {
-					fmt.Println("steam err5:", SteamData)
+					fmt.Println("steam err5:", "不是人民币")
 					//结束协程
 					fmt.Println("结束协程")
 					endSteamTask(resp, account, 3, 1, p)
@@ -263,6 +263,7 @@ func handleSteamData(steamData SteamGoodsInfo) {
 	var InfoList []*model.Info
 
 	for _, v := range steamData.Results {
+		fmt.Println("steam - name:", v.Name, "- price:", v.SellPriceText, "- num:", v.SellListings)
 		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
 		var Info model.Info
 		//查询缓存

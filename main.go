@@ -14,7 +14,7 @@ func main() {
 	//清楚所有账号缓存 和本地代理缓存
 	service.ClearAllAccountCache()
 	service.GetBuff()
-	//service.GetSteam()
+	service.GetSteam()
 	//代理抓取
 	//service.StartGetProxy()
 	for {
