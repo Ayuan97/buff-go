@@ -48,24 +48,24 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 		//计算比例
 		p := "0"
 		num := 0.0
-		if util.StringToFloat64(data["buff_buy_price"]) == 0 || (util.StringToFloat64(data["steam_sell_price"])) == 0 {
-			p = "0"
-		} else {
+		if util.StringToFloat64(data["buff_buy_price"]) != 0 && (util.StringToFloat64(data["steam_sell_price"])) != 0 {
 			num = util.StringToFloat64(data["buff_buy_price"]) / util.StringToFloat64(data["steam_sell_price"])
-			s := strconv.FormatFloat(num, 'f', 2, 64)
-			//只保留两位小数
-			p = s
+			p = strconv.FormatFloat(num, 'f', 2, 64)
 		}
-		fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"], "goods_id", data["goods_id"])
-		data["proportion"] = p
-		if checkType == 1 {
-			if data["buff_buy_max_price"] != oldValue["buff_buy_max_price"] || data["buff_sell_min_price"] != oldValue["buff_sell_min_price"] {
-				send(data, checkType)
+		//比例大于0.8
+		if num > 0.8 {
+			fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"], "goods_id", data["goods_id"])
+			data["proportion"] = p
+			data["change_type"] = strconv.Itoa(checkType)
+			if checkType == 1 {
+				if data["buff_buy_max_price"] != oldValue["buff_buy_max_price"] || data["buff_sell_min_price"] != oldValue["buff_sell_min_price"] {
+					send(data)
+				}
 			}
-		}
-		if checkType == 2 {
-			if data["steam_sell_price"] != oldValue["steam_sell_price"] {
-				send(data, checkType)
+			if checkType == 2 {
+				if data["steam_sell_price"] != oldValue["steam_sell_price"] {
+					send(data)
+				}
 			}
 		}
 

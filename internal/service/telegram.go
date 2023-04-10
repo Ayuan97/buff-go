@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func send(data map[string]string, checkType int) {
+func send(data map[string]string) {
 	bot, err := tgbotapi.NewBotAPI("5972902393:AAEWNlCSZ0YUqRHcNfHA9nu4jtxPqEeqNb0")
 	if err != nil {
 		log.Panic(err)
@@ -17,7 +17,7 @@ func send(data map[string]string, checkType int) {
 	//log.Printf("Authorized on account %s", bot.Self.UserName)
 	//tgbotapi.NewMessage(-842545535, "开始推送")
 	str := ""
-	if checkType == 1 {
+	if data["change_type"] == "1" {
 		//创建html消息模板
 		str = "%s -buff" + "\n\r" +
 			"<b>%s</b>" + "\n\r" +
