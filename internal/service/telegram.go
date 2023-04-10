@@ -76,7 +76,7 @@ func send(data map[string]string, checkType int) {
 	msg := tgbotapi.NewMessage(-870095753, text)
 	msg.ParseMode = "HTML"
 	msg.DisableWebPagePreview = true
-	if p != "0" && num > 0.8 {
+	if p != "0" && num >= 0.8 {
 		bot.Send(msg)
 	}
 }
