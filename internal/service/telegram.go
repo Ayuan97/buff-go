@@ -55,7 +55,7 @@ func send(data map[string]string, checkType int) {
 		//只保留两位小数
 		p = s
 	}
-	fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"])
+	fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"], "goods_id", data["goods_id"])
 	Proportion := p
 	//url 编码
 	buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
@@ -76,7 +76,7 @@ func send(data map[string]string, checkType int) {
 	msg := tgbotapi.NewMessage(-870095753, text)
 	msg.ParseMode = "HTML"
 	msg.DisableWebPagePreview = true
-	if p != "0" && num > 0.8 {
+	if p != "0" && num > 0.7 {
 		bot.Send(msg)
 	}
 }

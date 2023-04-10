@@ -250,6 +250,7 @@ func handleBuffData(buffData BuffData) {
 			Info.BuffBuyNum = v.BuyNum                                //buff 购买数量
 			Info.BuffSellPrice = util.StringToFloat64(v.SellMinPrice) //buff 出售价格
 			Info.BuffSellNum = v.SellNum                              //buff 出售数量
+			Info.GoodsId = v.Id
 			InfoList = append(InfoList, &Info)
 
 		}
@@ -258,6 +259,7 @@ func handleBuffData(buffData BuffData) {
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
 		gredis.Hset(key, "buff_sell_price", v.SellMinPrice)
 		gredis.Hset(key, "buff_sell_num", v.SellNum)
+		gredis.Hset(key, "buff_goods_id", v.Id)
 		if len(value) > 0 {
 			//更新前数据
 			CheckPriceChange(key, 1, value)
