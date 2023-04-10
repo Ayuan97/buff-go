@@ -6,6 +6,11 @@ import (
 	"strconv"
 )
 
+// float64 保留两位小数 并转为字符串
+func Float64ToFixed(f float64) string {
+	return strconv.FormatFloat(f, 'f', 2, 64)
+}
+
 // 字符串转float64
 func StringToFloat64(str string) float64 {
 	f, _ := strconv.ParseFloat(str, 64)

@@ -6,6 +6,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -44,13 +45,17 @@ func send(data map[string]string, checkType int) {
 	buffSellPrice := data["buff_sell_price"]
 	steamPrice := data["steam_sell_price"]
 	steamBuyPrice := data["steam_buy_price"]
-	p := 0.0
-	if util.StringToInt64(data["buff_buy_price"]) == 0 || (util.StringToInt64(data["steam_sell_price"])) == 0 {
-		p = 0.0
+	p := "0"
+	num := 0.0
+	if util.StringToFloat64(data["buff_buy_price"]) == 0 || (util.StringToFloat64(data["steam_sell_price"])) == 0 {
+		p = "0"
 	} else {
-		p = float64((util.StringToInt64(data["buff_buy_price"]) / 100) / (util.StringToInt64(data["steam_sell_price"]) / 100) * 100)
-
+		num = util.StringToFloat64(data["buff_buy_price"]) / util.StringToFloat64(data["steam_sell_price"])
+		s := strconv.FormatFloat(num, 'f', 2, 64)
+		//只保留两位小数
+		p = s
 	}
+	fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"])
 	Proportion := p
 	//url 编码
 	buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
@@ -71,7 +76,7 @@ func send(data map[string]string, checkType int) {
 	msg := tgbotapi.NewMessage(-870095753, text)
 	msg.ParseMode = "HTML"
 	msg.DisableWebPagePreview = true
-	if p != 0.0 {
+	if p != "0" && num > 0.8 {
 		bot.Send(msg)
 	}
 }

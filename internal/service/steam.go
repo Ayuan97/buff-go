@@ -268,7 +268,8 @@ func handleSteamData(steamData SteamGoodsInfo) {
 		var Info model.Info
 		//查询缓存
 		value, _ := gredis.HGetAll(key)
-		if len(value) > 0 {
+		if len(value) == 0 {
+
 			//缓存不存在
 			//查询数据库
 			_, err := myDao.GetOneInfoByMarketHashName(v.AssetDescription.MarketHashName)
