@@ -52,7 +52,11 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			num = util.StringToFloat64(data["buff_buy_price"]) / util.StringToFloat64(data["steam_sell_price"])
 			p = strconv.FormatFloat(num, 'f', 2, 64)
 		}
-		//比例大于0.8
+		//进行购买
+		if num > 0.8 {
+
+		}
+		//通知telegram
 		if num > 0.8 {
 			fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"], "goods_id", data["goods_id"])
 			data["proportion"] = p
