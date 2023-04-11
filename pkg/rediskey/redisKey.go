@@ -17,6 +17,12 @@ const GoodsNameKey = "goods:name:key:%d"
 const BuffLocalKey = "buff:local:key"
 const SteamLocalKey = "steam:local:key"
 const ProxySteamKey = "proxy:steam:key:%s"
+const IpKey = "ip:key:%s"
+
+// 设置ip
+func GetIpKey(ip string) string {
+	return fmt.Sprintf(IpKey, ip)
+}
 
 // 代理key
 func GetProxySteamKey(ip string) string {

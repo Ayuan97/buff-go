@@ -6,15 +6,15 @@ import (
 )
 
 func main() {
-	//test()
+	test()
 	//gredis.DelAll() //清除所有缓存 慎用
 	//gin.SetMode(global.ServerSetting.RunMode)
 
 	//
 	//清楚所有账号缓存 和本地代理缓存
-	service.ClearAllAccountCache()
-	service.GetBuff()
-	service.GetSteam()
+	//service.ClearAllAccountCache()
+	//service.GetBuff()
+	//service.GetSteam()
 	//代理抓取
 	//service.StartGetProxy()
 	for {
