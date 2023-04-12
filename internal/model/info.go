@@ -29,7 +29,7 @@ type Info struct {
 	BuffUpdate      int64   `json:"buff_update"`
 }
 
-//查询 单个MarketHashName
+// 查询 单个MarketHashName
 func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Info, error) {
 	var info Info
 	err := db.Where("market_hash_name = ?", marketHashName).First(&info).Error
@@ -39,17 +39,32 @@ func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Inf
 	return &info, nil
 }
 
-//插入商品信息
+// 插入商品信息
 func (g *Info) Create(db *gorm.DB, info *Info) bool {
 	db.Create(&info)
 	return true
 }
 
-//批量更新商品信息
+// 批量更新商品信息
 func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
 	db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "market_hash_name"}},
 		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "buff_sell_price", "buff_sell_num"}),
 	}).Create(&info)
 	return true
+}
+
+// 获取所有商品信息
+func (g *Info) GetAll(db *gorm.DB) ([]*Info, error) {
+	var info []*Info
+	err := db.Find(&info).Error
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// 根据goodsid更新商品信息
+func (g *Info) UpdateInfoByGoodsId(db *gorm.DB, info *Info) error {
+	return db.Model(&Info{}).Where("goods_id = ?", info.GoodsId).Updates(info).Error
 }

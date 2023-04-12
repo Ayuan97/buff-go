@@ -112,8 +112,7 @@ type Ip struct {
 	} `json:"data"`
 }
 
-var num = 0
-var g = make(chan *model.Goods, 16000)
+var I = make(chan *model.Info, 16000)
 var proxyChan = make(chan string, 100)
 
 func GetBuffGoodInfo() {
@@ -123,9 +122,9 @@ func GetBuffGoodInfo() {
 			if len(GoodChan) <= 500 {
 				//读取所有商品 写入channel
 				runtime.GOMAXPROCS(runtime.NumCPU())
-				result, _ := myDao.GetAll()
+				result, _ := myDao.GetAllInfo()
 				for _, v := range result {
-					g <- v
+					I <- v
 				}
 			}
 			time.Sleep(time.Second * 2)
@@ -138,9 +137,8 @@ func GetBuffGoodInfo() {
 }
 func getProxy() {
 	for {
-		// 每十秒去取一次代理
 		httpproxy()
-		time.Sleep(time.Second * 1)
+		time.Sleep(time.Second * 30)
 	}
 }
 
@@ -151,8 +149,8 @@ func getData() {
 		case proxy := <-proxyChan:
 			//chan中的数据为空时
 			if proxy == "" {
-				continue
 				time.Sleep(time.Second * 1)
+				continue
 			}
 			//开启协程
 			go func() {
@@ -161,18 +159,18 @@ func getData() {
 				gredis.Set(key, proxy, time.Duration(30)*time.Second)
 				//从chan中取出商品
 				for {
-					good := <-g
-					if good == nil {
+					info := <-I
+					if info == nil {
 						continue
 					}
-					getBuffGoodInfo(good, proxy)
+					getBuffGoodInfo(info, proxy)
 				}
 			}()
 		}
 	}
 }
 
-func getBuffGoodInfo(goods *model.Goods, proxy string) {
+func getBuffGoodInfo(info *model.Info, proxy string) {
 	//设置缓存 30秒
 	key := rediskey.GetIpKey(proxy)
 	value := gredis.Get(key)
@@ -180,17 +178,17 @@ func getBuffGoodInfo(goods *model.Goods, proxy string) {
 	if value == "" {
 		//结束协程
 		fmt.Println("代理失效 - 结束协程")
-		g <- goods
+		I <- info
 		runtime.Goexit()
 	}
 	p, _ := url.Parse("http://" + proxy)
-	url := fmt.Sprintf("https://buff.163.com/api/market/goods/sell_order?game=csgo&goods_id=%v&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1&use_suggestion=0&_=%v", goods.GoodsId, time.Now().UnixNano()/1e6)
+	getUrl := fmt.Sprintf("https://buff.163.com/api/market/goods/sell_order?game=csgo&goods_id=%v&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1&use_suggestion=0&_=%v", info.GoodsId, time.Now().UnixNano()/1e6)
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(p),
 		},
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", getUrl, nil)
 	if err != nil {
 		//fmt.Println("buff err1:", err)
 		return
@@ -214,12 +212,13 @@ func getBuffGoodInfo(goods *model.Goods, proxy string) {
 		return
 	}
 	if buffData.Code == "OK" {
-		//获取buff商品信息成功
-		//更新buff商品信息
-		num++
-		fmt.Println("ok", num)
+		if len(buffData.Data.Items) == 0 {
+			fmt.Println("buff - 没有售卖信息")
+		} else {
+			go BuffBuyInfo(buffData, info)
+		}
 	} else {
-		//fmt.Println("buff err5:", err)
+		//fmt.Println("buff - body",string(body)	)
 	}
 }
 
