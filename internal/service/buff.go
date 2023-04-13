@@ -203,8 +203,6 @@ func handleBuffData(buffData BuffData) {
 			Info.MarketHashName = v.MarketHashName
 			Info.BuffBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
 			Info.BuffBuyNum = v.BuyNum                              //buff 购买数量
-			//Info.BuffSellPrice = util.StringToFloat64(v.SellMinPrice) //buff 出售价格
-			//Info.BuffSellNum = v.SellNum                              //buff 出售数量
 			Info.GoodsId = v.Id
 			InfoList = append(InfoList, &Info)
 
@@ -216,7 +214,6 @@ func handleBuffData(buffData BuffData) {
 		//gredis.Hset(key, "buff_sell_num", v.SellNum)
 		gredis.Hset(key, "buff_goods_id", v.Id)
 		if len(value) > 0 {
-			//更新前数据
 			CheckPriceChange(key, 1, value)
 		}
 	}
@@ -260,8 +257,8 @@ func getBuyProxy() {
 
 			for _, v := range IpData.Data {
 				p := fmt.Sprintf("%v:%v", v.IP, v.Port)
-				if num == 10 {
-					proxySellChan <- p
+				if num == 11 {
+					//proxySellChan <- p
 				} else {
 					proxyBuyChan <- p
 				}
@@ -271,7 +268,7 @@ func getBuyProxy() {
 				}
 			}
 		}
-		time.Sleep(time.Second * 30)
+		time.Sleep(time.Second * 1)
 	}
 }
 
@@ -292,11 +289,20 @@ func getBuyData() {
 				gredis.Set(key, proxy, time.Duration(30)*time.Second)
 				//从chan中取出商品
 				for {
+					value := gredis.Get(key)
+					//fmt.Println("proxy:", proxy, "value:", value)
+					if value == "" {
+						//结束协程
+						//fmt.Println("代理失效 - 结束协程")
+						runtime.Goexit()
+					}
 					info := <-I
 					if info == nil {
+						fmt.Println("通道内没有商品- 跳过")
 						continue
 					}
-					getBuffGoodInfo(info, proxy)
+					go getBuffGoodInfo(info, proxy)
+					time.Sleep(time.Millisecond * 500)
 				}
 			}()
 		}
@@ -311,7 +317,7 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 	//fmt.Println("proxy:", proxy, "value:", value)
 	if value == "" {
 		//结束协程
-		fmt.Println("代理失效 - 结束协程")
+		//fmt.Println("代理失效 - 结束协程")
 		I <- info
 		runtime.Goexit()
 	}
@@ -347,7 +353,7 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 	}
 	if buffData.Code == "OK" {
 		if len(buffData.Data.Items) == 0 {
-			fmt.Println("buff - 没有售卖信息")
+			fmt.Println("buff - 没有售卖信息 -", "url:", getUrl)
 		} else {
 			go BuffBuyInfo(buffData, info)
 		}

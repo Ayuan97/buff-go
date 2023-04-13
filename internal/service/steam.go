@@ -11,74 +11,17 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type SteamGoodsInfo struct {
-	Success    bool `json:"success"`
-	Start      int  `json:"start"`
-	Pagesize   int  `json:"pagesize"`
-	TotalCount int  `json:"total_count"`
-	Searchdata struct {
-		Query              string `json:"query"`
-		SearchDescriptions bool   `json:"search_descriptions"`
-		TotalCount         int    `json:"total_count"`
-		Pagesize           int    `json:"pagesize"`
-		Prefix             string `json:"prefix"`
-		ClassPrefix        string `json:"class_prefix"`
-	} `json:"searchdata"`
-	Results []struct {
-		Name             string `json:"name"`
-		HashName         string `json:"hash_name"`
-		SellListings     int    `json:"sell_listings"`
-		SellPrice        int    `json:"sell_price"`
-		SellPriceText    string `json:"sell_price_text"`
-		AppIcon          string `json:"app_icon"`
-		AppName          string `json:"app_name"`
-		AssetDescription struct {
-			Appid           int    `json:"appid"`
-			Classid         string `json:"classid"`
-			Instanceid      string `json:"instanceid"`
-			Currency        int    `json:"currency"`
-			BackgroundColor string `json:"background_color"`
-			IconUrl         string `json:"icon_url"`
-			IconUrlLarge    string `json:"icon_url_large"`
-			Descriptions    []struct {
-				Type  string `json:"type"`
-				Value string `json:"value"`
-				Color string `json:"color,omitempty"`
-			} `json:"descriptions"`
-			Tradable int `json:"tradable"`
-			Actions  []struct {
-				Link string `json:"link"`
-				Name string `json:"name"`
-			} `json:"actions,omitempty"`
-			Name           string `json:"name"`
-			NameColor      string `json:"name_color"`
-			Type           string `json:"type"`
-			MarketName     string `json:"market_name"`
-			MarketHashName string `json:"market_hash_name"`
-			MarketActions  []struct {
-				Link string `json:"link"`
-				Name string `json:"name"`
-			} `json:"market_actions,omitempty"`
-			Commodity                 int `json:"commodity"`
-			MarketTradableRestriction int `json:"market_tradable_restriction"`
-			Marketable                int `json:"marketable"`
-			OwnerDescriptions         []struct {
-				Type  string `json:"type"`
-				Value string `json:"value"`
-				Color string `json:"color,omitempty"`
-			} `json:"owner_descriptions,omitempty"`
-			Fraudwarnings []string `json:"fraudwarnings,omitempty"`
-		} `json:"asset_description"`
-		SalePriceText string `json:"sale_price_text"`
-	} `json:"results"`
-}
+var itemChan = make(chan *model.Info, 1000)
+var ideaProxyChan = make(chan string, 1000)
 
+// steam 出售
 func GetSteamBuy() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
@@ -207,26 +150,26 @@ func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("steam err2:", err)
-				endSteamTask(resp, account, 0, 1, p)
+				endSteamTask(resp, account, 0, 1, p, 1)
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				fmt.Println("steam err3:", err)
 				//结束协程
-				endSteamTask(resp, account, 0, 1, p)
+				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			var SteamData SteamGoodsInfo
 			err = json.Unmarshal(body, &SteamData)
 			if err != nil {
 				fmt.Println("steam err4:", err)
-				endSteamTask(resp, account, 0, 1, p)
+				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			if SteamData.Success == false {
 				fmt.Println("steam err6:", SteamData)
-				endSteamTask(resp, account, 2, 1, p)
+				endSteamTask(resp, account, 2, 1, p, 0)
 			}
 
 			if SteamData.Success {
@@ -236,19 +179,19 @@ func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 					fmt.Println("steam err5:", "不是人民币")
 					//结束协程
 					fmt.Println("结束协程")
-					endSteamTask(resp, account, 3, 1, p)
+					endSteamTask(resp, account, 3, 1, p, 0)
 				}
 			} else {
 				fmt.Println("steam err7:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 3, 1, p)
+				endSteamTask(resp, account, 3, 1, p, 0)
 			}
 			config = myDao.GetOneSystemConfig(1)
 			if config.StartSteamSell == 0 {
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 0, 1, p)
+				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			//每次请求间隔
@@ -322,10 +265,12 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 }
 
 // 结束steam任务
-func endSteamTask(resp *http.Response, account model.SteamUser, status int, taskType int, proxy string) {
+func endSteamTask(resp *http.Response, account model.SteamUser, status int, taskType int, proxy string, p int) {
 	steamProxyKey := rediskey.GetProxySteamKey(proxy)
 	steamAccountKey := rediskey.GetSteamAccountKey(int(account.ID))
-	resp.Body.Close()
+	if p == 1 {
+		resp.Body.Close()
+	}
 	//设置本地代理抓取结束
 	gredis.Del(steamProxyKey)
 	//设置账号抓取结束
@@ -335,4 +280,139 @@ func endSteamTask(resp *http.Response, account model.SteamUser, status int, task
 	if taskType == 1 {
 		runtime.Goexit()
 	}
+}
+
+// steam 求购
+func GetSteamSell(info *model.Info) {
+	getUrl := fmt.Sprintf("https://steamcommunity.com/market/itemordershistogram?country=CN&language=schinese&currency=23&item_nameid=%s&two_factor=0", info.SteamItemNameId)
+	urli := url.URL{}
+	proxyURL := fmt.Sprintf("http://%s", "proxy.ipidea.io:2336")
+	urlProxy, _ := urli.Parse(proxyURL)
+	urlProxy.User = url.UserPassword("zhaochengyuan-zone-static", "zhaochengyuan")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(urlProxy),
+		},
+	}
+	req, err := http.NewRequest("GET", getUrl, nil)
+	if err != nil {
+		//fmt.Println("buff err1:", err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("buff err2:", err)
+		return
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("buff err3:", err)
+		return
+	}
+	var steamResp SteamSell
+	err = json.Unmarshal(body, &steamResp)
+	if err != nil {
+		fmt.Println("buff err4:", err)
+		return
+	}
+	if steamResp.Success == 1 {
+		info.SteamSellPrice = util.StringToFloat64(steamResp.LowestSellOrder) / 100
+		info.SteamBuyPrice = util.StringToFloat64(steamResp.HighestBuyOrder) / 100
+		key := rediskey.GetCacheKey(info.MarketHashName)
+		gredis.Hset(key, "steam_sell_price", info.SteamSellPrice)
+		gredis.Hset(key, "steam_buy_price", info.SteamBuyPrice)
+		//根据id更新steam数据
+		myDao.UpdateInfo(info)
+		fmt.Println("steam 求购", info.MarketHashName, " 出售价:", info.SteamSellPrice, " 求购价", info.SteamBuyPrice)
+	}
+}
+
+func GetSteamItemId() {
+	//判断chan中的数据是否为空
+	//go func() {
+	//	for {
+	//		if len(itemChan) <= 500 {
+	//			//读取所有商品 写入channel
+	//			runtime.GOMAXPROCS(runtime.NumCPU())
+	//			result, _ := myDao.GetAllInfoBySteamItemId()
+	//			for _, v := range result {
+	//				itemChan <- v
+	//			}
+	//		}
+	//		time.Sleep(time.Second * 2)
+	//	}
+	//}()
+
+	go func() {
+		runtime.GOMAXPROCS(runtime.NumCPU())
+		result, _ := myDao.GetAllInfoBySteamItemId()
+		for _, v := range result {
+			fmt.Println("写入通道", v.MarketHashName)
+			itemChan <- v
+		}
+	}()
+
+	testItem()
+
+}
+
+func testItem() {
+	for {
+		if len(itemChan) == 0 {
+			fmt.Println("结束steam任务")
+			break
+		}
+		info := <-itemChan
+		if info == nil {
+			fmt.Println("通道内没有商品- 跳过")
+			continue
+		}
+		go GetSteamSell(info)
+		time.Sleep(time.Millisecond * 10)
+	}
+}
+
+func getItemId(info *model.Info) {
+
+	getUrl := fmt.Sprintf("https://steamcommunity.com/market/listings/730/%v", info.MarketHashName)
+	urli := url.URL{}
+	proxyURL := fmt.Sprintf("http://%s", "proxy.ipidea.io:2336")
+	urlProxy, _ := urli.Parse(proxyURL)
+	urlProxy.User = url.UserPassword("zhaochengyuan-zone-static", "zhaochengyuan")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(urlProxy),
+		},
+	}
+	req, err := http.NewRequest("GET", getUrl, nil)
+	if err != nil {
+		//fmt.Println("buff err1:", err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("buff err2:", err)
+		return
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("buff err3:", err)
+		return
+	}
+	re1 := regexp.MustCompile("Market_LoadOrderSpread\\(\\s*(\\d+)\\s*\\)")
+	match := re1.FindString(string(body))
+	re2 := regexp.MustCompile("[0-9]+")
+	match2 := re2.FindAllString(match, -1)
+	if len(match2) == 0 {
+		fmt.Println("获取商品id失败", getUrl)
+		return
+	}
+	i := match2[0]
+	info.SteamItemNameId = i
+	myDao.UpdateInfoBySteamItemId(info)
+	fmt.Println("获取商品id成功", info.MarketHashName, "id:", i)
 }

@@ -18,7 +18,6 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	InfoKey := rediskey.GetCacheKey(goodInfo.MarketHashName)
 	minPrice := 99999999.99
 	var orderList []*model.Order
-	var order model.Order
 	for _, v := range buffData.Data.Items {
 		//查找最低价格
 		if util.StringToFloat64(v.Price) < minPrice {
@@ -30,6 +29,7 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 			fmt.Println("buff - 删除订单失败")
 			continue
 		}
+		var order model.Order
 		order.Name = goodInfo.Name
 		order.MarketHashName = goodInfo.MarketHashName
 		order.BuffOrderId = v.Id
@@ -51,18 +51,16 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 		fmt.Println("buff - 批量插入订单失败")
 	}
 	//更新缓存
-	gredis.Hset(InfoKey, "buff_buy_num", buyNum)
-	gredis.Hset(InfoKey, "buff_buy_price", minPrice)
+	gredis.Hset(InfoKey, "buff_sell_num", buyNum)
+	gredis.Hset(InfoKey, "buff_sell_price", minPrice)
 	//更新数据库
 	var Info model.Info
 	Info.GoodsId = info.GoodsId
 	Info.Name = goodInfo.Name
 	Info.MarketHashName = goodInfo.MarketHashName
 
-	Info.BuffBuyPrice = minPrice //buff 购买价格
-	Info.BuffBuyNum = buyNum     //buff 购买数量
-	//Info.BuffSellPrice = util.StringToFloat64(v.SellMinPrice) //buff 出售价格
-	//Info.BuffSellNum = v.SellNum                              //buff 出售数量
+	Info.BuffSellPrice = minPrice //buff 出售价格
+	Info.BuffSellNum = buyNum     //buff 出售数量
 	Info.GoodsId = info.GoodsId
 	myDao.UpdateInfoByGoodsId(&Info)
 	fmt.Println("buff - buy - name:", Info.Name, "buyNum:", buyNum, "minPrice:", minPrice)

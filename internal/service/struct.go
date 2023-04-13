@@ -146,3 +146,93 @@ type Ip struct {
 		Port int    `json:"Port"`
 	} `json:"data"`
 }
+type Ipidea struct {
+	Code    int         `json:"code"`
+	Success interface{} `json:"success"`
+	Msg     string      `json:"msg"`
+	Data    []struct {
+		IP   string `json:"ip"`
+		Port int    `json:"port"`
+	} `json:"data"`
+}
+
+// steam 100 返回
+type SteamGoodsInfo struct {
+	Success    bool `json:"success"`
+	Start      int  `json:"start"`
+	Pagesize   int  `json:"pagesize"`
+	TotalCount int  `json:"total_count"`
+	Searchdata struct {
+		Query              string `json:"query"`
+		SearchDescriptions bool   `json:"search_descriptions"`
+		TotalCount         int    `json:"total_count"`
+		Pagesize           int    `json:"pagesize"`
+		Prefix             string `json:"prefix"`
+		ClassPrefix        string `json:"class_prefix"`
+	} `json:"searchdata"`
+	Results []struct {
+		Name             string `json:"name"`
+		HashName         string `json:"hash_name"`
+		SellListings     int    `json:"sell_listings"`
+		SellPrice        int    `json:"sell_price"`
+		SellPriceText    string `json:"sell_price_text"`
+		AppIcon          string `json:"app_icon"`
+		AppName          string `json:"app_name"`
+		AssetDescription struct {
+			Appid           int    `json:"appid"`
+			Classid         string `json:"classid"`
+			Instanceid      string `json:"instanceid"`
+			Currency        int    `json:"currency"`
+			BackgroundColor string `json:"background_color"`
+			IconUrl         string `json:"icon_url"`
+			IconUrlLarge    string `json:"icon_url_large"`
+			Descriptions    []struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+				Color string `json:"color,omitempty"`
+			} `json:"descriptions"`
+			Tradable int `json:"tradable"`
+			Actions  []struct {
+				Link string `json:"link"`
+				Name string `json:"name"`
+			} `json:"actions,omitempty"`
+			Name           string `json:"name"`
+			NameColor      string `json:"name_color"`
+			Type           string `json:"type"`
+			MarketName     string `json:"market_name"`
+			MarketHashName string `json:"market_hash_name"`
+			MarketActions  []struct {
+				Link string `json:"link"`
+				Name string `json:"name"`
+			} `json:"market_actions,omitempty"`
+			Commodity                 int `json:"commodity"`
+			MarketTradableRestriction int `json:"market_tradable_restriction"`
+			Marketable                int `json:"marketable"`
+			OwnerDescriptions         []struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+				Color string `json:"color,omitempty"`
+			} `json:"owner_descriptions,omitempty"`
+			Fraudwarnings []string `json:"fraudwarnings,omitempty"`
+		} `json:"asset_description"`
+		SalePriceText string `json:"sale_price_text"`
+	} `json:"results"`
+}
+
+// steam sell
+type SteamSell struct {
+	Success          int             `json:"success"`
+	SellOrderTable   string          `json:"sell_order_table"`
+	SellOrderSummary string          `json:"sell_order_summary"`
+	BuyOrderTable    string          `json:"buy_order_table"`
+	BuyOrderSummary  string          `json:"buy_order_summary"`
+	HighestBuyOrder  string          `json:"highest_buy_order"`
+	LowestSellOrder  string          `json:"lowest_sell_order"`
+	BuyOrderGraph    [][]interface{} `json:"buy_order_graph"`
+	SellOrderGraph   [][]interface{} `json:"sell_order_graph"`
+	GraphMaxY        int             `json:"graph_max_y"`
+	GraphMinX        float64         `json:"graph_min_x"`
+	GraphMaxX        float64         `json:"graph_max_x"`
+	PricePrefix      string          `json:"price_prefix"`
+	PriceSuffix      string          `json:"price_suffix"`
+}

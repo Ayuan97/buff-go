@@ -62,7 +62,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			data["proportion"] = p
 			data["change_type"] = strconv.Itoa(checkType)
 			if checkType == 1 {
-				if data["buff_buy_max_price"] != oldValue["buff_buy_max_price"] || data["buff_sell_min_price"] != oldValue["buff_sell_min_price"] {
+				if data["buff_buy_price"] != oldValue["buff_buy_price"] || data["buff_sell_price"] != oldValue["buff_sell_price"] {
 					send(data)
 				}
 			}

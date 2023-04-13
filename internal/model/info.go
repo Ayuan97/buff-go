@@ -60,7 +60,7 @@ func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
 // 获取所有商品信息
 func (g *Info) GetAll(db *gorm.DB) ([]*Info, error) {
 	var info []*Info
-	err := db.Find(&info).Error
+	err := db.Where("goods_id != 0").Find(&info).Error
 	if err != nil {
 		global.Logger.Errorf("GetAll err: %v", err)
 		return nil, err
@@ -73,6 +73,37 @@ func (g *Info) UpdateInfoByGoodsId(db *gorm.DB, info *Info) error {
 	err := db.Model(&Info{}).Where("goods_id = ?", info.GoodsId).Updates(info).Error
 	if err != nil {
 		global.Logger.Errorf("UpdateInfoByGoodsId err: %v", err)
+		return err
+	}
+	return nil
+}
+
+// 根据id更新 steam_item_name_id
+func (g *Info) UpdateInfoBySteamItemId(db *gorm.DB, info *Info) error {
+	err := db.Model(&Info{}).Where("id = ?", info.ID).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateInfoBySteamItemId err: %v", err)
+		return err
+	}
+	return nil
+}
+
+// 获取所有商品信息 item_name_id 为空的
+func (g *Info) GetAllBySteamItemId(db *gorm.DB) ([]*Info, error) {
+	var info []*Info
+	err := db.Where("steam_item_name_id != ''").Find(&info).Error
+	if err != nil {
+		global.Logger.Errorf("GetAllBySteamItemId err: %v", err)
+		return nil, err
+	}
+	return info, nil
+}
+
+// 根据id更新商品信息
+func (g *Info) UpdateInfo(db *gorm.DB, info *Info) error {
+	err := db.Model(&Info{}).Where("id = ?", info.ID).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateInfoById err: %v", err)
 		return err
 	}
 	return nil
