@@ -13,10 +13,10 @@ type Config struct {
 	BotFilter      string  `json:"bot_filter"`
 	BuffPageNum    int     `json:"buff_page_num"`
 	SteamPageNum   int     `json:"steam_page_num"`
-	BuffMinPrice   float64 `json:"buff_min_price"`
-	BuffMaxPrice   float64 `json:"buff_max_price"`
 	BotProportion  float64 `json:"bot_proportion"`
 	BotPrice       float64 `json:"bot_price"`
+	MinPrice       float64 `json:"min_price"`
+	MaxPrice       float64 `json:"max_price"`
 }
 
 // 根据id  获取单个配置

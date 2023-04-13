@@ -79,7 +79,7 @@ type SteamGoodsInfo struct {
 	} `json:"results"`
 }
 
-func GetSteam() {
+func GetSteamBuy() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
@@ -105,7 +105,7 @@ func GetSteam() {
 			if steamLocalResult == "" && steamAccountResult == "" {
 				//开启本地代理
 				Ip := model.Ip{Ip: "127.0.0.1", Port: 80, Type: 2}
-				go GetSteamData(0, &Ip, steamUser)
+				go GetSteamBuyData(0, &Ip, steamUser)
 				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("steam本地代理正在抓取中...")
@@ -135,7 +135,7 @@ func GetSteam() {
 			if proxyKeyResult == "" && accountKeyResult == "" {
 				fmt.Println("代理和账号都可用 启动协程", oneIp.Ip, account.Account)
 				//启动一个协程 使用代理
-				go GetSteamData(1, oneIp, account)
+				go GetSteamBuyData(1, oneIp, account)
 			} else {
 				fmt.Println("proxyKey", proxyKey)
 				fmt.Println("accountKey", accountKey)
@@ -148,7 +148,7 @@ func GetSteam() {
 	}()
 }
 
-func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
+func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 	p := Ip.Ip + ":" + strconv.Itoa(Ip.Port)
 	//设置代理正在抓取中
 	steamProxyKey := rediskey.GetProxySteamKey(p)
@@ -231,7 +231,7 @@ func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 
 			if SteamData.Success {
 				if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
-					go handleSteamData(SteamData)
+					go handleSteamBuyData(SteamData)
 				} else {
 					fmt.Println("steam err5:", "不是人民币")
 					//结束协程
@@ -259,7 +259,7 @@ func GetSteamData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 }
 
 // 处理steam数据
-func handleSteamData(steamData SteamGoodsInfo) {
+func handleSteamBuyData(steamData SteamGoodsInfo) {
 	var InfoList []*model.Info
 
 	for _, v := range steamData.Results {

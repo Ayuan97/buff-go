@@ -1,24 +1,57 @@
 package service
 
-import (
-	"buff-go/internal/model"
-	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"net/http"
-	"net/url"
-	"runtime"
-	"time"
-)
+// buff 求购
+type BuffData struct {
+	Code   string `json:"code"`
+	Result Result `json:"data"`
+	Msg    string `json:"msg"`
+	Error  string `json:"error"`
+	Extra  string `json:"extra"`
+}
+type Result struct {
+	Items      []BuffGoods `json:"items"`
+	PageNum    int         `json:"page_num"`
+	PageSize   int         `json:"page_size"`
+	TotalCount int         `json:"total_count"`
+	TotalPage  int         `json:"total_page"`
+}
+type BuffGoods struct {
+	Appid                 int         `json:"appid"`
+	Bookmarked            bool        `json:"bookmarked"`
+	BuyMaxPrice           string      `json:"buy_max_price"`
+	BuyNum                int         `json:"buy_num"`
+	CanBargain            bool        `json:"can_bargain"`
+	CanSearchByTournament bool        `json:"can_search_by_tournament"`
+	Description           interface{} `json:"description"`
+	Game                  string      `json:"game"`
+	GoodsInfo             GoodInfo    `json:"goods_info"`
+	HasBuffPriceHistory   bool        `json:"has_buff_price_history"`
+	Id                    int         `json:"id"`
+	MarketHashName        string      `json:"market_hash_name"`
+	MarketMinPrice        string      `json:"market_min_price"`
+	Name                  string      `json:"name"`
+	QuickPrice            string      `json:"quick_price"`
+	SellMinPrice          string      `json:"sell_min_price"`
+	SellNum               int         `json:"sell_num"`
+	SellReferencePrice    string      `json:"sell_reference_price"`
+	ShortName             string      `json:"short_name"`
+	SteamMarketUrl        string      `json:"steam_market_url"`
+	TransactedNum         int         `json:"transacted_num"`
+}
+type GoodInfo struct {
+	IconUrl         string      `json:"icon_url"`
+	ItemId          interface{} `json:"item_id"`
+	OriginalIconUrl string      `json:"original_icon_url"`
+	SteamPrice      string      `json:"steam_price"`
+	SteamPriceCny   string      `json:"steam_price_cny"`
+}
 
+// buff 出售
 type Response struct {
 	Code string `json:"code"`
 	Data Data   `json:"data"`
 	Msg  string `json:"msg"`
 }
-
 type Data struct {
 	FopStr             string                 `json:"fop_str"`
 	GoodsInfos         map[string]GoodsInfo   `json:"goods_infos"`
@@ -102,6 +135,8 @@ type AssetInfo struct {
 	TradableCooldownText string      `json:"tradable_cooldown_text"`
 	TradableUnfrozenTime interface{} `json:"tradable_unfrozen_time"`
 }
+
+// 代理
 type Ip struct {
 	Code    int    `json:"code"`
 	Success string `json:"success"`
@@ -110,144 +145,4 @@ type Ip struct {
 		IP   string `json:"IP"`
 		Port int    `json:"Port"`
 	} `json:"data"`
-}
-
-var I = make(chan *model.Info, 16000)
-var proxyChan = make(chan string, 100)
-
-func GetBuffGoodInfo() {
-	//判断chan中的数据是否为空
-	go func() {
-		for {
-			if len(GoodChan) <= 500 {
-				//读取所有商品 写入channel
-				runtime.GOMAXPROCS(runtime.NumCPU())
-				result, _ := myDao.GetAllInfo()
-				for _, v := range result {
-					I <- v
-				}
-			}
-			time.Sleep(time.Second * 2)
-		}
-	}()
-	//获取代理放入channel
-	go getProxy()
-	//从channel中取出代理 开启协程 读取信息
-	go getData()
-}
-func getProxy() {
-	for {
-		httpproxy()
-		time.Sleep(time.Second * 30)
-	}
-}
-
-// getData
-func getData() {
-	for {
-		select {
-		case proxy := <-proxyChan:
-			//chan中的数据为空时
-			if proxy == "" {
-				time.Sleep(time.Second * 1)
-				continue
-			}
-			//开启协程
-			go func() {
-				key := rediskey.GetIpKey(proxy)
-				//设置缓存 30秒
-				gredis.Set(key, proxy, time.Duration(30)*time.Second)
-				//从chan中取出商品
-				for {
-					info := <-I
-					if info == nil {
-						continue
-					}
-					getBuffGoodInfo(info, proxy)
-				}
-			}()
-		}
-	}
-}
-
-func getBuffGoodInfo(info *model.Info, proxy string) {
-	//设置缓存 30秒
-	key := rediskey.GetIpKey(proxy)
-	value := gredis.Get(key)
-	//fmt.Println("proxy:", proxy, "value:", value)
-	if value == "" {
-		//结束协程
-		fmt.Println("代理失效 - 结束协程")
-		I <- info
-		runtime.Goexit()
-	}
-	p, _ := url.Parse("http://" + proxy)
-	getUrl := fmt.Sprintf("https://buff.163.com/api/market/goods/sell_order?game=csgo&goods_id=%v&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1&use_suggestion=0&_=%v", info.GoodsId, time.Now().UnixNano()/1e6)
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(p),
-		},
-	}
-	req, err := http.NewRequest("GET", getUrl, nil)
-	if err != nil {
-		//fmt.Println("buff err1:", err)
-		return
-	}
-	req.AddCookie(&http.Cookie{Name: "Device-Id", Value: "nSt86DRnNpIcAVkzG5QC"})
-	req.AddCookie(&http.Cookie{Name: "client_id", Value: "u591PbZEqJi47BnljKgbaA"})
-	resp, err := client.Do(req)
-	if err != nil {
-		//fmt.Println("buff err2:", err)
-		return
-	}
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		//fmt.Println("buff err3:", err)
-		return
-	}
-	buffData := Response{}
-	err = json.Unmarshal(body, &buffData)
-	if err != nil {
-		//fmt.Println("buff err4:", err)
-		return
-	}
-	if buffData.Code == "OK" {
-		if len(buffData.Data.Items) == 0 {
-			fmt.Println("buff - 没有售卖信息")
-		} else {
-			go BuffBuyInfo(buffData, info)
-		}
-	} else {
-		//fmt.Println("buff - body",string(body)	)
-	}
-}
-
-func httpproxy() {
-	client := &http.Client{}
-	rqt, err := http.NewRequest("GET", "https://aapi.51daili.com/getapi2?linePoolIndex=1&packid=2&unkey=&tid=&qty=2&time=1&port=1&format=json&ss=1&css=&pro=&city=&dt=1&ct=0&service=1&usertype=17", nil)
-	if err != nil {
-		println("http:", "err")
-		return
-	}
-	response, _ := client.Do(rqt)
-	defer response.Body.Close()
-	body, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return
-	}
-
-	fmt.Println("http:", string(body))
-	var proxy Ip
-
-	err = json.Unmarshal(body, &proxy)
-	if err != nil {
-		fmt.Println("json err:", err)
-		return
-	}
-	for _, v := range proxy.Data {
-		p := fmt.Sprintf("%v:%v", v.IP, v.Port)
-		proxyChan <- p
-	}
-	return
-
 }

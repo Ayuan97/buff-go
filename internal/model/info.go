@@ -1,6 +1,7 @@
 package model
 
 import (
+	"buff-go/global"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -34,6 +35,7 @@ func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Inf
 	var info Info
 	err := db.Where("market_hash_name = ?", marketHashName).First(&info).Error
 	if err != nil {
+		global.Logger.Errorf("GetInfoByMarketHashName err: %v", err)
 		return nil, err
 	}
 	return &info, nil
@@ -42,6 +44,7 @@ func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Inf
 // 插入商品信息
 func (g *Info) Create(db *gorm.DB, info *Info) bool {
 	db.Create(&info)
+
 	return true
 }
 
@@ -49,7 +52,7 @@ func (g *Info) Create(db *gorm.DB, info *Info) bool {
 func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
 	db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "market_hash_name"}},
-		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "buff_sell_price", "buff_sell_num"}),
+		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "buff_sell_price", "buff_sell_num", "goods_id"}),
 	}).Create(&info)
 	return true
 }
@@ -59,6 +62,7 @@ func (g *Info) GetAll(db *gorm.DB) ([]*Info, error) {
 	var info []*Info
 	err := db.Find(&info).Error
 	if err != nil {
+		global.Logger.Errorf("GetAll err: %v", err)
 		return nil, err
 	}
 	return info, nil
@@ -66,5 +70,10 @@ func (g *Info) GetAll(db *gorm.DB) ([]*Info, error) {
 
 // 根据goodsid更新商品信息
 func (g *Info) UpdateInfoByGoodsId(db *gorm.DB, info *Info) error {
-	return db.Model(&Info{}).Where("goods_id = ?", info.GoodsId).Updates(info).Error
+	err := db.Model(&Info{}).Where("goods_id = ?", info.GoodsId).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateInfoByGoodsId err: %v", err)
+		return err
+	}
+	return nil
 }

@@ -34,7 +34,7 @@ func Hget(key string, field string) string {
 	key = global.RedisSetting.Prefix + key
 	val, err := global.Redis.HGet(ctx, key, field).Result()
 	if err != nil {
-		//global.Logger.Errorf("redis hget failed %v", err)
+		global.Logger.Errorf("redis hget failed %v", err)
 		return ""
 	}
 	return val
@@ -45,7 +45,7 @@ func HGetAll(key string) (map[string]string, map[string]string) {
 	key = global.RedisSetting.Prefix + key
 	val, err := global.Redis.HGetAll(ctx, key).Result()
 	if err != nil {
-		//global.Logger.Errorf("redis hget failed %v", err)
+		global.Logger.Errorf("redis hget failed %v", err)
 		return nil, nil
 	}
 	return val, nil
