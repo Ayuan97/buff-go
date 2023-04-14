@@ -118,3 +118,13 @@ func (g *Info) UpdateInfo(db *gorm.DB, info *Info) error {
 	}
 	return nil
 }
+
+// 更新比例
+func (g *Info) UpdateProportion(db *gorm.DB, info *Info) error {
+	err := db.Model(&Info{}).Where("market_hash_name = ?", info.MarketHashName).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateProportion err: %v", err)
+		return err
+	}
+	return nil
+}

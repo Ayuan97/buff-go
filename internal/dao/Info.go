@@ -55,3 +55,11 @@ func (d *Dao) UpdateInfoBySteamItemId(info *model.Info) error {
 func (d *Dao) UpdateInfo(info *model.Info) error {
 	return info.UpdateInfo(d.engine, info)
 }
+
+// 更新比例
+func (d *Dao) UpdateInfoProportion(name string, p float64) error {
+	var info *model.Info
+	info.MarketHashName = name
+	info.Proportion = p
+	return info.UpdateProportion(d.engine, info)
+}
