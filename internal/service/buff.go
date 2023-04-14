@@ -27,7 +27,7 @@ func GetBuffSell() {
 		for {
 			//查询buff抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
-			if config.StartBuff == 0 {
+			if config.BuffSellStatus == 0 {
 				fmt.Println("buff抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
@@ -136,12 +136,12 @@ func GetBuffSellData(isProxy int, proxy string, account model.BuffUser) {
 				endTask(resp, account, 0, 1)
 			}
 			config = myDao.GetOneSystemConfig(1) //系统配置
-			if config.StartBuff == 0 {
+			if config.BuffSellStatus == 0 {
 				endTask(resp, account, 0, 1)
 				return
 			}
 			//每次请求间隔
-			delay := time.Duration(config.BuffDelay)
+			delay := time.Duration(config.BuffSellDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
@@ -250,11 +250,17 @@ func GetBuffBuy() {
 func getBuyProxy() {
 	num := 0
 	for {
+		config := myDao.GetOneSystemConfig(1)
+		if config.SteamBuyStatus == 0 {
+			//buff 出售抓取关闭
+			fmt.Println("buff buy 出售抓取关闭")
+			time.Sleep(time.Second * 10)
+			continue
+		}
 		IpData, err := httpproxy()
 		if err != nil {
 			log.Println(err)
 		} else {
-
 			for _, v := range IpData.Data {
 				p := fmt.Sprintf("%v:%v", v.IP, v.Port)
 				if num == 11 {
@@ -268,7 +274,8 @@ func getBuyProxy() {
 				}
 			}
 		}
-		time.Sleep(time.Second * 1)
+		delay := time.Duration(config.BuffBuyDelay)
+		time.Sleep(time.Second * delay)
 	}
 }
 
@@ -279,7 +286,7 @@ func getBuyData() {
 		case proxy := <-proxyBuyChan:
 			//chan中的数据为空时
 			if proxy == "" {
-				time.Sleep(time.Second * 1)
+				time.Sleep(time.Second * 5)
 				continue
 			}
 			//开启协程

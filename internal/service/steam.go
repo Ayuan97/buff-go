@@ -27,7 +27,7 @@ func GetSteamBuy() {
 		for {
 			//查询steam抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
-			if config.StartSteamSell == 0 {
+			if config.SteamBuyStatus == 0 {
 				fmt.Println("steam出售抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
@@ -187,14 +187,14 @@ func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				endSteamTask(resp, account, 3, 1, p, 0)
 			}
 			config = myDao.GetOneSystemConfig(1)
-			if config.StartSteamSell == 0 {
+			if config.SteamBuyStatus == 0 {
 				//结束协程
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			//每次请求间隔
-			delay := time.Duration(config.SteamDelay)
+			delay := time.Duration(config.SteamBuyDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
@@ -298,14 +298,21 @@ func GetSteamSell() {
 
 	go func() {
 		for {
-
+			config := myDao.GetOneSystemConfig(1)
+			if config.SteamSellStatus == 0 {
+				fmt.Println("steam 求购任务已关闭")
+				time.Sleep(time.Second * 10)
+				continue
+			}
 			info := <-itemChan
 			if info == nil {
-				fmt.Println("通道内没有商品- 跳过 time:", time.Now().Format("2006-01-02 15:04:05"))
-				break
+				fmt.Println("求购通道没有商品")
+				time.Sleep(time.Second * 10)
+				continue
 			}
 			go GetSteamSellData(info)
-			time.Sleep(time.Millisecond * 500)
+			delay := time.Duration(config.SteamSellDelay)
+			time.Sleep(time.Millisecond * delay)
 		}
 	}()
 }

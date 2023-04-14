@@ -30,13 +30,3 @@ func (d *Dao) GetOneSystemConfig(id int64) model.Config {
 	}
 
 }
-
-// 根据id  更新 StartSteamSellPrice
-func (d *Dao) UpdateStartSteamSellPrice(id int64, res int) error {
-
-	SystemConfig := model.Config{
-		Model:          &model.Model{ID: id},
-		StartSteamSell: res,
-	}
-	return SystemConfig.UpdateStartSteamSell(d.engine)
-}
