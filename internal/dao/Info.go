@@ -15,10 +15,16 @@ func (d *Dao) CreateInfo(info *model.Info) bool {
 	return info.Create(d.engine, info)
 }
 
-// 批量更新商品信息
+// 批量更新商品信息 - buff
 func (d *Dao) BatchBuffUpdateInfo(infoList []*model.Info) bool {
 	var info model.Info
 	return info.BatchBuffUpdate(d.engine, infoList)
+}
+
+// 批量更新商品信息 - steam
+func (d *Dao) BatchSteamUpdateInfo(infoList []*model.Info) bool {
+	var info model.Info
+	return info.BatchSteamUpdate(d.engine, infoList)
 }
 
 // 获取所有商品信息

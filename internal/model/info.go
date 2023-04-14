@@ -25,9 +25,12 @@ type Info struct {
 	IconUrl         string  `json:"icon_url"`
 	SteamItemNameId string  `json:"steam_item_name_id"`
 	IsPush          int     `json:"is_push"`
+	IsBuy           int     `json:"is_buy"`
 	Proportion      float64 `json:"proportion"`
-	SteamUpdate     int64   `json:"steam_update"`
-	BuffUpdate      int64   `json:"buff_update"`
+	BuffBuyUpdate   int     `json:"buff_buy_update"`
+	BuffSellUpdate  int     `json:"buff_sell_update"`
+	SteamBuyUpdate  int     `json:"steam_buy_update"`
+	SteamSellUpdate int     `json:"steam_sell_update"`
 }
 
 // 查询 单个MarketHashName
@@ -48,11 +51,18 @@ func (g *Info) Create(db *gorm.DB, info *Info) bool {
 	return true
 }
 
-// 批量更新商品信息
+// 批量更新商品信息 - buff
 func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
 	db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "market_hash_name"}},
-		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "buff_sell_price", "buff_sell_num", "goods_id"}),
+		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "goods_id", "buff_buy_update"}),
+	}).Create(&info)
+	return true
+}
+func (g *Info) BatchSteamUpdate(db *gorm.DB, info []*Info) bool {
+	db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "market_hash_name"}},
+		DoUpdates: clause.AssignmentColumns([]string{"steam_sell_price", "steam_sell_num", "steam_sell_update"}),
 	}).Create(&info)
 	return true
 }

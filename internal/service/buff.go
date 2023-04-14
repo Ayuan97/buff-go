@@ -204,14 +204,13 @@ func handleBuffData(buffData BuffData) {
 			Info.BuffBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
 			Info.BuffBuyNum = v.BuyNum                              //buff 购买数量
 			Info.GoodsId = v.Id
+			Info.BuffBuyUpdate = int(time.Now().Unix())
 			InfoList = append(InfoList, &Info)
 
 		}
 		//插入缓存
 		gredis.Hset(key, "buff_buy_price", v.BuyMaxPrice)
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
-		//gredis.Hset(key, "buff_sell_price", v.SellMinPrice)
-		//gredis.Hset(key, "buff_sell_num", v.SellNum)
 		gredis.Hset(key, "buff_goods_id", v.Id)
 		if len(value) > 0 {
 			CheckPriceChange(key, 1, value)

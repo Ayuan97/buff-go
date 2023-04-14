@@ -251,6 +251,7 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 			Info.SteamSellNum = v.SellListings                         //buff 出售数量
 			Info.MarketHashName = v.AssetDescription.MarketHashName
 			Info.Name = v.Name
+			Info.SteamSellUpdate = int(time.Now().Unix())
 			InfoList = append(InfoList, &Info)
 			//插入缓存
 			gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
@@ -259,6 +260,10 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 		if len(value) > 0 {
 			//比对价格是否有变动
 			CheckPriceChange(key, 2, value)
+		}
+		if len(InfoList) > 0 {
+			//批量更新数据库
+			myDao.BatchSteamUpdateInfo(InfoList)
 		}
 	}
 }
@@ -355,6 +360,7 @@ func GetSteamSellData(info *model.Info) {
 	if steamResp.Success == 1 {
 		info.SteamSellPrice = util.StringToFloat64(steamResp.LowestSellOrder) / 100
 		info.SteamBuyPrice = util.StringToFloat64(steamResp.HighestBuyOrder) / 100
+		info.SteamBuyUpdate = int(time.Now().Unix())
 		key := rediskey.GetCacheKey(info.MarketHashName)
 		gredis.Hset(key, "steam_sell_price", info.SteamSellPrice)
 		gredis.Hset(key, "steam_buy_price", info.SteamBuyPrice)

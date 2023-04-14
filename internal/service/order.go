@@ -7,6 +7,7 @@ import (
 	"buff-go/pkg/util"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // 处理buff出售信息
@@ -62,6 +63,7 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	Info.BuffSellPrice = minPrice //buff 出售价格
 	Info.BuffSellNum = buyNum     //buff 出售数量
 	Info.GoodsId = info.GoodsId
+	Info.BuffSellUpdate = int(time.Now().Unix())
 	myDao.UpdateInfoByGoodsId(&Info)
 	fmt.Println("buff - buy - name:", Info.Name, "buyNum:", buyNum, "minPrice:", minPrice)
 
