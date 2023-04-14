@@ -18,8 +18,7 @@ import (
 	"time"
 )
 
-var itemChan = make(chan *model.Info, 1000)
-var ideaProxyChan = make(chan string, 1000)
+var itemChan = make(chan *model.Info, 20000)
 
 // steam 出售
 func GetSteamBuy() {
@@ -282,8 +281,37 @@ func endSteamTask(resp *http.Response, account model.SteamUser, status int, task
 	}
 }
 
+func GetSteamSell() {
+	go func() {
+		for {
+			if len(itemChan) <= 500 {
+				//读取所有商品 写入channel
+				runtime.GOMAXPROCS(runtime.NumCPU())
+				result, _ := myDao.GetAllInfoBySteamItemId()
+				for _, v := range result {
+					itemChan <- v
+				}
+			}
+			time.Sleep(time.Second * 2)
+		}
+	}()
+
+	go func() {
+		for {
+
+			info := <-itemChan
+			if info == nil {
+				fmt.Println("通道内没有商品- 跳过 time:", time.Now().Format("2006-01-02 15:04:05"))
+				break
+			}
+			go GetSteamSellData(info)
+			time.Sleep(time.Millisecond * 500)
+		}
+	}()
+}
+
 // steam 求购
-func GetSteamSell(info *model.Info) {
+func GetSteamSellData(info *model.Info) {
 	getUrl := fmt.Sprintf("https://steamcommunity.com/market/itemordershistogram?country=CN&language=schinese&currency=23&item_nameid=%s&two_factor=0", info.SteamItemNameId)
 	urli := url.URL{}
 	proxyURL := fmt.Sprintf("http://%s", "proxy.ipidea.io:2336")
@@ -326,51 +354,6 @@ func GetSteamSell(info *model.Info) {
 		//根据id更新steam数据
 		myDao.UpdateInfo(info)
 		fmt.Println("steam 求购", info.MarketHashName, " 出售价:", info.SteamSellPrice, " 求购价", info.SteamBuyPrice)
-	}
-}
-
-func GetSteamItemId() {
-	//判断chan中的数据是否为空
-	//go func() {
-	//	for {
-	//		if len(itemChan) <= 500 {
-	//			//读取所有商品 写入channel
-	//			runtime.GOMAXPROCS(runtime.NumCPU())
-	//			result, _ := myDao.GetAllInfoBySteamItemId()
-	//			for _, v := range result {
-	//				itemChan <- v
-	//			}
-	//		}
-	//		time.Sleep(time.Second * 2)
-	//	}
-	//}()
-
-	go func() {
-		runtime.GOMAXPROCS(runtime.NumCPU())
-		result, _ := myDao.GetAllInfoBySteamItemId()
-		for _, v := range result {
-			fmt.Println("写入通道", v.MarketHashName)
-			itemChan <- v
-		}
-	}()
-
-	testItem()
-
-}
-
-func testItem() {
-	for {
-		if len(itemChan) == 0 {
-			fmt.Println("结束steam任务")
-			break
-		}
-		info := <-itemChan
-		if info == nil {
-			fmt.Println("通道内没有商品- 跳过")
-			continue
-		}
-		go GetSteamSell(info)
-		time.Sleep(time.Millisecond * 10)
 	}
 }
 

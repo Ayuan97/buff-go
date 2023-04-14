@@ -10,14 +10,14 @@ func main() {
 
 	service.ClearAllAccountCache() //清楚所有账号缓存 和本地代理缓存
 
-	//service.GetBuffSell() //buff  求购
-	//service.GetBuffBuy()  //buff  出售
-	//service.GetSteamBuy()  // steam 出售
-	//service.GetSteamSell() // steam 求购
+	service.GetBuffSell()  //buff  求购
+	service.GetBuffBuy()   //buff  出售
+	service.GetSteamBuy()  // steam 出售
+	service.GetSteamSell() // steam 求购
 
 	//service.StartGetProxy()	//代理抓取
 
-	service.GetSteamItemId() //steam 商品id抓取
+	//service.GetSteamItemId() //steam 商品id抓取
 
 	for {
 		//等待10秒
