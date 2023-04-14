@@ -7,3 +7,4 @@ Reptile*
 dist
 /go.mod
 /go.sum
+/tmp/

@@ -21,13 +21,13 @@ var proxyBuyChan = make(chan string, 100)
 var proxySellChan = make(chan string, 100)
 
 // buff 求购
-func GetBuffSell() {
+func GetBuffBuy() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
 			//查询buff抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
-			if config.BuffSellStatus == 0 {
+			if config.BuffBuyStatus == 0 {
 				fmt.Println("buff抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
@@ -46,7 +46,7 @@ func GetBuffSell() {
 			buffAccountResult := gredis.Get(buffAccountKey)
 			if buffLocalResult == "" && buffAccountResult == "" {
 				//开启本地代理
-				go GetBuffSellData(0, "", buffUser)
+				go GetBuffBuyData(0, "", buffUser)
 				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("buff本地代理正在抓取中...")
@@ -57,7 +57,7 @@ func GetBuffSell() {
 }
 
 // buff 求购数据
-func GetBuffSellData(isProxy int, proxy string, account model.BuffUser) {
+func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 	//设置本地代理正在抓取中
 	buffLocalKey := rediskey.GetBuffLocalKey()
 	gredis.Set(buffLocalKey, "1", 0)
@@ -154,7 +154,7 @@ func handleBuffData(buffData BuffData) {
 	//查询缓存是否存在该商品
 	var InfoList []*model.Info
 	for _, v := range buffData.Result.Items {
-		fmt.Println("buff 商品:", v.Name, "| 购买价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum, "| 出售价格:", v.SellMinPrice, "| 数量:", v.SellNum)
+		fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
 		key := rediskey.GetCacheKey(v.MarketHashName)
 		//查询缓存
 		value, _ := gredis.HGetAll(key)
@@ -204,6 +204,7 @@ func handleBuffData(buffData BuffData) {
 			Info.BuffBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
 			Info.BuffBuyNum = v.BuyNum                              //buff 购买数量
 			Info.GoodsId = v.Id
+			Info.IconUrl = v.GoodsInfo.OriginalIconUrl
 			Info.BuffBuyUpdate = int(time.Now().Unix())
 			InfoList = append(InfoList, &Info)
 
@@ -224,7 +225,7 @@ func handleBuffData(buffData BuffData) {
 }
 
 // buff 出售channel 添加数据
-func GetBuffBuy() {
+func GetBuffSell() {
 	//判断chan中的数据是否为空
 	go func() {
 		for {
@@ -240,17 +241,17 @@ func GetBuffBuy() {
 		}
 	}()
 	//获取代理放入channel
-	go getBuyProxy()
+	go getSellProxy()
 	//从channel中取出代理 开启协程 读取信息
-	go getBuyData()
+	go getSellData()
 }
 
 // 出售 获取代理放入 channel
-func getBuyProxy() {
+func getSellProxy() {
 	num := 0
 	for {
 		config := myDao.GetOneSystemConfig(1)
-		if config.SteamBuyStatus == 0 {
+		if config.SteamSellStatus == 0 {
 			//buff 出售抓取关闭
 			fmt.Println("buff buy 出售抓取关闭")
 			time.Sleep(time.Second * 10)
@@ -273,13 +274,13 @@ func getBuyProxy() {
 				}
 			}
 		}
-		delay := time.Duration(config.BuffBuyDelay)
+		delay := time.Duration(config.BuffSellDelay)
 		time.Sleep(time.Second * delay)
 	}
 }
 
 // 出售 从channel中取出代理 开启协程 读取信息
-func getBuyData() {
+func getSellData() {
 	for {
 		select {
 		case proxy := <-proxyBuyChan:

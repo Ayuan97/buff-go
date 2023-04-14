@@ -87,7 +87,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			}
 		} else if checkType == 3 {
 			//steam-求购 更新
-			//buff 出售 / (steam 求购) * 0.85 = 比例
+			//(steam 求购) * 0.85  / buff 出售= 比例
 			buffSellPrice := util.StringToFloat64(data["buff_sell_price"])        //buff 出售
 			steamBuyPrice := util.StringToFloat64(data["steam_buy_price"])        //steam 求购
 			oldSteamBuyPrice := util.StringToFloat64(oldValue["steam_buy_price"]) //steam 求购 旧
@@ -118,8 +118,16 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 				}
 			}
 		}
-		if data["is_push"] == "1" || num >= config.BotProportion {
-			send(data)
+		//is_push 是否存在
+		if data["is_push"] == "" {
+			data["is_push"] = "1"
+		}
+		if data["is_push"] == "1" {
+			if (checkType == 1 || checkType == 4) && (num >= config.BotBuffProportion && num != 0.0) {
+				send(data)
+			} else if (checkType == 2 || checkType == 3) && (num <= config.BotSteamProportion && num != 0.0) {
+				send(data)
+			}
 		}
 	}
 

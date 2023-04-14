@@ -205,7 +205,8 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 	var InfoList []*model.Info
 
 	for _, v := range steamData.Results {
-		fmt.Println("steam -sell - name:", v.Name, "- price:", v.SellPriceText, "- num:", v.SellListings)
+
+		fmt.Println("steam -sell - name:", v.Name, "| 价格:", v.SellPriceText, "| 数量:", v.SellListings)
 		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
 		var Info model.Info
 		//查询缓存
@@ -366,7 +367,7 @@ func GetSteamBuyData(info *model.Info) {
 		myDao.UpdateInfo(info)
 		//检查价格变动
 		CheckPriceChange(key, 3, oldCache)
-		fmt.Println("steam - buy - name:", info.MarketHashName, " 出售价:", info.SteamSellPrice, " 求购价", info.SteamBuyPrice)
+		fmt.Println("steam - buy - name:", info.MarketHashName, "| 出售价格:", info.SteamSellPrice, "| 求购价", info.SteamBuyPrice)
 	}
 }
 

@@ -70,6 +70,6 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	//检查价格是否变动
 	CheckPriceChange(InfoKey, 2, oldCache)
 
-	fmt.Println("buff - buy - name:", Info.Name, "buyNum:", buyNum, "minPrice:", minPrice)
+	fmt.Println("buff - sell - name:", Info.Name, "| 数量:", buyNum, "| 价格:", minPrice)
 
 }
