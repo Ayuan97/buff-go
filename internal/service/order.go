@@ -51,6 +51,8 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	if err != true {
 		fmt.Println("buff - 批量插入订单失败")
 	}
+	//获取旧缓存
+	oldCache, _ := gredis.HGetAll(InfoKey)
 	//更新缓存
 	gredis.Hset(InfoKey, "buff_sell_num", buyNum)
 	gredis.Hset(InfoKey, "buff_sell_price", minPrice)
@@ -65,6 +67,9 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	Info.GoodsId = info.GoodsId
 	Info.BuffSellUpdate = int(time.Now().Unix())
 	myDao.UpdateInfoByGoodsId(&Info)
+	//检查价格是否变动
+	CheckPriceChange(InfoKey, 2, oldCache)
+
 	fmt.Println("buff - buy - name:", Info.Name, "buyNum:", buyNum, "minPrice:", minPrice)
 
 }

@@ -359,12 +359,10 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 	}
 	if buffData.Code == "OK" {
 		if len(buffData.Data.Items) == 0 {
-			fmt.Println("buff - 没有售卖信息 -", "url:", getUrl)
+			fmt.Println("buff - 没有售卖信息 -")
 		} else {
 			go BuffBuyInfo(buffData, info)
 		}
-	} else {
-		//fmt.Println("buff - body",string(body)	)
 	}
 }
 

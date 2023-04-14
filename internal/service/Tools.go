@@ -37,43 +37,92 @@ func InitGoodCache(c CacheData) {
 	gredis.Hset(c.Key, "name", c.name)
 	gredis.Hset(c.Key, "market_hash_name", c.marketHashName)
 	gredis.Hset(c.Key, "buff_goods_id", c.id)
+	gredis.Hset(c.Key, "is_push", "1")
+	gredis.Hset(c.Key, "is_buy", "1")
 
 }
 
-// 检查价格是否有变动
+// CheckPriceChange 检查价格是否有变动
+// checkType 1 buff-buy 2 buff-sell 3 steam-buy 4 steam-sell
 func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
+	config := myDao.GetOneSystemConfig(1)
+
 	//获取 key 的所有 hget
 	data, _ := gredis.HGetAll(key)
 	if data != nil && len(data) > 0 {
-		//计算比例
-		p := "0"
 		num := 0.0
-		if util.StringToFloat64(data["buff_buy_price"]) != 0 && (util.StringToFloat64(data["steam_sell_price"])) != 0 {
-			num = util.StringToFloat64(data["buff_buy_price"]) / util.StringToFloat64(data["steam_sell_price"])
-			p = strconv.FormatFloat(num, 'f', 2, 64)
-		}
-		//进行购买
-		if num > 0.8 {
+		//计算比例
+		if checkType == 1 {
+			//buff-求购 更新
+			//buff 求购 / steam 出售 = 比例
+			buffBuyPrice := util.StringToFloat64(data["buff_buy_price"])        //buff 求购
+			steamSellPrice := util.StringToFloat64(data["steam_sell_price"])    //steam 出售
+			oldBuffBuyPrice := util.StringToFloat64(oldValue["buff_buy_price"]) //buff 求购 旧
 
-		}
-		//通知telegram
-		if num > 0.8 {
-			fmt.Println("比例", p, "buff_buy_price", data["buff_buy_price"], "steam_sell_price", data["steam_sell_price"], "goods_id", data["goods_id"])
-			data["proportion"] = p
-			data["change_type"] = strconv.Itoa(checkType)
-			if checkType == 1 {
-				if data["buff_buy_price"] != oldValue["buff_buy_price"] || data["buff_sell_price"] != oldValue["buff_sell_price"] {
-					send(data)
+			if buffBuyPrice != 0 && steamSellPrice != 0 {
+				//价格是否变化
+				if buffBuyPrice != oldBuffBuyPrice {
+					num = buffBuyPrice / steamSellPrice
+					p := strconv.FormatFloat(num, 'f', 2, 64)
+					data["proportion"] = p
+					data["change_type"] = strconv.Itoa(checkType)
 				}
 			}
-			if checkType == 2 {
-				if data["steam_sell_price"] != oldValue["steam_sell_price"] {
-					send(data)
+		} else if checkType == 2 {
+			//buff-出售 更新
+			//buff 出售 / (steam 求购) * 0.85 = 比例
+			buffSellPrice := util.StringToFloat64(data["buff_sell_price"])        //buff 出售
+			steamBuyPrice := util.StringToFloat64(data["steam_buy_price"])        //steam 求购
+			oldBuffSellPrice := util.StringToFloat64(oldValue["buff_sell_price"]) //buff 出售 旧
+			//oldSteamBuyPrice := util.StringToFloat64(oldValue["steam_buy_price"])
+
+			if buffSellPrice != 0 && steamBuyPrice != 0 {
+				//价格是否变化
+				if buffSellPrice != oldBuffSellPrice {
+					num = buffSellPrice / (steamBuyPrice * 0.85)
+					p := strconv.FormatFloat(num, 'f', 2, 64)
+					data["proportion"] = p
+					data["change_type"] = strconv.Itoa(checkType)
+				}
+			}
+		} else if checkType == 3 {
+			//steam-求购 更新
+			//buff 出售 / (steam 求购) * 0.85 = 比例
+			buffSellPrice := util.StringToFloat64(data["buff_sell_price"])        //buff 出售
+			steamBuyPrice := util.StringToFloat64(data["steam_buy_price"])        //steam 求购
+			oldSteamBuyPrice := util.StringToFloat64(oldValue["steam_buy_price"]) //steam 求购 旧
+
+			if steamBuyPrice != 0 && buffSellPrice != 0 {
+				//价格是否变化
+				if steamBuyPrice != oldSteamBuyPrice {
+					num = buffSellPrice / (steamBuyPrice * 0.85)
+					p := strconv.FormatFloat(num, 'f', 2, 64)
+					data["proportion"] = p
+					data["change_type"] = strconv.Itoa(checkType)
+				}
+			}
+		} else if checkType == 4 {
+			//steam-出售 更新
+			//buff 求购 / steam 出售 = 比例
+			buffBuyPrice := util.StringToFloat64(data["buff_buy_price"])            //buff 求购
+			steamSellPrice := util.StringToFloat64(data["steam_sell_price"])        //steam 出售
+			oldSteamSellPrice := util.StringToFloat64(oldValue["steam_sell_price"]) //steam 出售 旧
+
+			if buffBuyPrice != 0 && steamSellPrice != 0 {
+				//价格是否变化
+				if steamSellPrice != oldSteamSellPrice {
+					num = buffBuyPrice / steamSellPrice
+					p := strconv.FormatFloat(num, 'f', 2, 64)
+					data["proportion"] = p
+					data["change_type"] = strconv.Itoa(checkType)
 				}
 			}
 		}
-
+		if data["is_push"] == "1" || num >= config.BotProportion {
+			send(data)
+		}
 	}
+
 }
 
 // 清楚所有账号缓存

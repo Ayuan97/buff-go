@@ -21,13 +21,13 @@ import (
 var itemChan = make(chan *model.Info, 20000)
 
 // steam 出售
-func GetSteamBuy() {
+func GetSteamSell() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	go func() {
 		for {
 			//查询steam抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
-			if config.SteamBuyStatus == 0 {
+			if config.SteamSellStatus == 0 {
 				fmt.Println("steam出售抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
@@ -47,7 +47,7 @@ func GetSteamBuy() {
 			if steamLocalResult == "" && steamAccountResult == "" {
 				//开启本地代理
 				Ip := model.Ip{Ip: "127.0.0.1", Port: 80, Type: 2}
-				go GetSteamBuyData(0, &Ip, steamUser)
+				go GetSteamSellData(0, &Ip, steamUser)
 				time.Sleep(2 * time.Second)
 			} else {
 				fmt.Println("steam本地代理正在抓取中...")
@@ -77,7 +77,7 @@ func GetSteamBuy() {
 			if proxyKeyResult == "" && accountKeyResult == "" {
 				fmt.Println("代理和账号都可用 启动协程", oneIp.Ip, account.Account)
 				//启动一个协程 使用代理
-				go GetSteamBuyData(1, oneIp, account)
+				go GetSteamSellData(1, oneIp, account)
 			} else {
 				fmt.Println("proxyKey", proxyKey)
 				fmt.Println("accountKey", accountKey)
@@ -90,7 +90,7 @@ func GetSteamBuy() {
 	}()
 }
 
-func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
+func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 	p := Ip.Ip + ":" + strconv.Itoa(Ip.Port)
 	//设置代理正在抓取中
 	steamProxyKey := rediskey.GetProxySteamKey(p)
@@ -173,7 +173,7 @@ func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 
 			if SteamData.Success {
 				if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
-					go handleSteamBuyData(SteamData)
+					go handleSteamSellData(SteamData)
 				} else {
 					fmt.Println("steam err5:", "不是人民币")
 					//结束协程
@@ -187,25 +187,25 @@ func GetSteamBuyData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				endSteamTask(resp, account, 3, 1, p, 0)
 			}
 			config = myDao.GetOneSystemConfig(1)
-			if config.SteamBuyStatus == 0 {
+			if config.SteamSellStatus == 0 {
 				//结束协程
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			//每次请求间隔
-			delay := time.Duration(config.SteamBuyDelay)
+			delay := time.Duration(config.SteamSellDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
 }
 
 // 处理steam数据
-func handleSteamBuyData(steamData SteamGoodsInfo) {
+func handleSteamSellData(steamData SteamGoodsInfo) {
 	var InfoList []*model.Info
 
 	for _, v := range steamData.Results {
-		fmt.Println("steam - name:", v.Name, "- price:", v.SellPriceText, "- num:", v.SellListings)
+		fmt.Println("steam -sell - name:", v.Name, "- price:", v.SellPriceText, "- num:", v.SellListings)
 		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
 		var Info model.Info
 		//查询缓存
@@ -218,8 +218,6 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 			if err != nil {
 				//数据库不存在
 				Info.MarketHashName = v.AssetDescription.MarketHashName
-				//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //steam 购买价格
-				//Info.SteamBuyNum = v.BuyNum 						   //steam 购买数量
 				Info.SteamSellPrice = float64(v.SellPrice) / 100 //steam 出售价格
 				Info.SteamSellNum = v.SellListings               //steam 出售数量
 				Info.Name = v.Name
@@ -245,8 +243,7 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 		} else {
 			//缓存存在
 			//批量更新数据
-			//Info.SteamBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
-			//Info.SteamBuyNum = v.BuyNum 						   //buff 购买数量
+
 			Info.SteamSellPrice = util.IntToFloat64(v.SellPrice) / 100 //buff 出售价格
 			Info.SteamSellNum = v.SellListings                         //buff 出售数量
 			Info.MarketHashName = v.AssetDescription.MarketHashName
@@ -259,7 +256,7 @@ func handleSteamBuyData(steamData SteamGoodsInfo) {
 		}
 		if len(value) > 0 {
 			//比对价格是否有变动
-			CheckPriceChange(key, 2, value)
+			CheckPriceChange(key, 4, value)
 		}
 		if len(InfoList) > 0 {
 			//批量更新数据库
@@ -286,7 +283,7 @@ func endSteamTask(resp *http.Response, account model.SteamUser, status int, task
 	}
 }
 
-func GetSteamSell() {
+func GetSteamBuy() {
 	go func() {
 		for {
 			if len(itemChan) <= 500 {
@@ -304,7 +301,7 @@ func GetSteamSell() {
 	go func() {
 		for {
 			config := myDao.GetOneSystemConfig(1)
-			if config.SteamSellStatus == 0 {
+			if config.SteamBuyStatus == 0 {
 				fmt.Println("steam 求购任务已关闭")
 				time.Sleep(time.Second * 10)
 				continue
@@ -315,15 +312,15 @@ func GetSteamSell() {
 				time.Sleep(time.Second * 10)
 				continue
 			}
-			go GetSteamSellData(info)
-			delay := time.Duration(config.SteamSellDelay)
+			go GetSteamBuyData(info)
+			delay := time.Duration(config.SteamBuyDelay)
 			time.Sleep(time.Millisecond * delay)
 		}
 	}()
 }
 
 // steam 求购
-func GetSteamSellData(info *model.Info) {
+func GetSteamBuyData(info *model.Info) {
 	getUrl := fmt.Sprintf("https://steamcommunity.com/market/itemordershistogram?country=CN&language=schinese&currency=23&item_nameid=%s&two_factor=0", info.SteamItemNameId)
 	urli := url.URL{}
 	proxyURL := fmt.Sprintf("http://%s", "proxy.ipidea.io:2336")
@@ -358,15 +355,18 @@ func GetSteamSellData(info *model.Info) {
 		return
 	}
 	if steamResp.Success == 1 {
+		key := rediskey.GetCacheKey(info.MarketHashName)
+		oldCache, _ := gredis.HGetAll(key)
 		info.SteamSellPrice = util.StringToFloat64(steamResp.LowestSellOrder) / 100
 		info.SteamBuyPrice = util.StringToFloat64(steamResp.HighestBuyOrder) / 100
 		info.SteamBuyUpdate = int(time.Now().Unix())
-		key := rediskey.GetCacheKey(info.MarketHashName)
 		gredis.Hset(key, "steam_sell_price", info.SteamSellPrice)
 		gredis.Hset(key, "steam_buy_price", info.SteamBuyPrice)
 		//根据id更新steam数据
 		myDao.UpdateInfo(info)
-		fmt.Println("steam 求购", info.MarketHashName, " 出售价:", info.SteamSellPrice, " 求购价", info.SteamBuyPrice)
+		//检查价格变动
+		CheckPriceChange(key, 3, oldCache)
+		fmt.Println("steam - buy - name:", info.MarketHashName, " 出售价:", info.SteamSellPrice, " 求购价", info.SteamBuyPrice)
 	}
 }
 

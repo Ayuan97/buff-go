@@ -60,10 +60,18 @@ func send(data map[string]string) {
 		buffUrl,
 		steamUrl,
 	)
-	msg := tgbotapi.NewMessage(-870095753, text)
-	msg.ParseMode = "HTML"
-	msg.DisableWebPagePreview = true
-	bot.Send(msg)
+	if data["change_type"] == "1" || data["change_type"] == "3" {
+		msg := tgbotapi.NewMessage(-870095753, text)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		bot.Send(msg)
+	} else {
+		msg := tgbotapi.NewMessage(-842545535, text)
+		msg.ParseMode = "HTML"
+		msg.DisableWebPagePreview = true
+		bot.Send(msg)
+	}
+
 }
 
 //func sendTelegram() {
