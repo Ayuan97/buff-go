@@ -17,7 +17,7 @@ import (
 
 var I = make(chan *model.Info, 16000)
 
-var proxyBuyChan = make(chan string, 100)
+var proxyBuyChan = make(chan string, 1000)
 var proxySellChan = make(chan string, 100)
 
 // buff 求购
