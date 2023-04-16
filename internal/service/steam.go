@@ -254,6 +254,8 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 			//插入缓存
 			gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
 			gredis.Hset(key, "steam_sell_num", v.SellListings)
+			gredis.Hset(key, "name", v.Name)
+			gredis.Hset(key, "market_hash_name", v.AssetDescription.MarketHashName)
 		}
 		if len(value) > 0 {
 			//比对价格是否有变动

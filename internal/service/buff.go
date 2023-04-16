@@ -213,6 +213,8 @@ func handleBuffData(buffData BuffData) {
 		gredis.Hset(key, "buff_buy_price", v.BuyMaxPrice)
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
 		gredis.Hset(key, "buff_goods_id", v.Id)
+		gredis.Hset(key, "name", v.Name)
+		gredis.Hset(key, "market_hash_name", v.MarketHashName)
 		if len(value) > 0 {
 			CheckPriceChange(key, 1, value)
 		}
