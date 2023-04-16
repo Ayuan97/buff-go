@@ -181,4 +181,9 @@ func ClearAllAccountCache() {
 
 	}
 
+	//清楚config 缓存
+	configKey := rediskey.GetConfigKey()
+	gredis.Del(configKey)
+	fmt.Println("清楚config缓存")
+
 }
