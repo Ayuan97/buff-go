@@ -141,7 +141,7 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 				return
 			}
 			//每次请求间隔
-			delay := time.Duration(config.BuffSellDelay)
+			delay := time.Duration(config.BuffBuyDelay)
 			time.Sleep(time.Second * delay)
 		}
 	}
