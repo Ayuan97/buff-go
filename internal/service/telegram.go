@@ -74,7 +74,7 @@ func send(data map[string]string) {
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
 		steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(data["market_hash_name"])
 
-		steamBuyPriceFold := fmt.Sprintf("%.2f", util.StringToFloat64(data["steam_buy_price"])*0.85)
+		steamBuyPriceFold := fmt.Sprintf("%.2f", util.StringToFloat64(data["steam_buy_price"])*0.87)
 
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
