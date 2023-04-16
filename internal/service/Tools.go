@@ -79,7 +79,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			if buffSellPrice != 0 && steamBuyPrice != 0 {
 				//价格是否变化
 				if buffSellPrice != oldBuffSellPrice {
-					num = buffSellPrice / (steamBuyPrice * 0.85)
+					num = buffSellPrice / (steamBuyPrice * 0.87)
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
@@ -95,7 +95,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			if steamBuyPrice != 0 && buffSellPrice != 0 {
 				//价格是否变化
 				if steamBuyPrice != oldSteamBuyPrice {
-					num = buffSellPrice / (steamBuyPrice * 0.85)
+					num = buffSellPrice / (steamBuyPrice * 0.87)
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
