@@ -174,7 +174,6 @@ func handleBuffData(buffData BuffData) {
 				Info.BuffSellNum = v.SellNum                              //buff 出售数量
 				Info.Game = v.Game
 				Info.Name = v.Name
-				Info.SteamMarketUrl = v.SteamMarketUrl //steam市场链接
 				Info.IconUrl = v.GoodsInfo.OriginalIconUrl
 				//插入数据库
 				myDao.CreateInfo(&Info)

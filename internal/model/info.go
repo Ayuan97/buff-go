@@ -17,7 +17,6 @@ type Info struct {
 	SteamBuyNum     int     `json:"steam_buy_num"`
 	SteamSellPrice  float64 `json:"steam_sell_price"`
 	SteamSellNum    int     `json:"steam_sell_num"`
-	SteamMarketUrl  string  `json:"steam_market_url"`
 	Game            string  `json:"game"`
 	Name            string  `json:"name"`
 	MarketHashName  string  `json:"market_hash_name"`
