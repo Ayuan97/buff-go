@@ -252,7 +252,7 @@ func getSellProxy() {
 	num := 0
 	for {
 		config := myDao.GetOneSystemConfig(1)
-		if config.SteamSellStatus == 0 {
+		if config.BuffSellStatus == 0 {
 			//buff 出售抓取关闭
 			fmt.Println("buff buy 出售抓取关闭")
 			time.Sleep(time.Second * 10)
