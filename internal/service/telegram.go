@@ -19,7 +19,7 @@ func send(data map[string]string) {
 	//tgbotapi.NewMessage(-842545535, "开始推送")
 
 	if data["change_type"] == "1" || data["change_type"] == "4" {
-		str := "%s" + "\n\r" +
+		str := "%s" + "- %s" + "\n\r" +
 			"<b>%s</b>" + "\n\r" +
 			"<u>buff求购:%s</u>" + "                " + "<u>buff出售:%s</u>" + "\n\r" +
 			"<u>steam出售:%s</u>" + "                " + "<u>steam求购:%s</u>" + "\n\r" +
@@ -37,10 +37,11 @@ func send(data map[string]string) {
 		//url 编码
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
 		steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(data["market_hash_name"])
-
+		changeName := data["change_name"]
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
 			upTime,
+			changeName,
 			data["name"],
 			buffPrice,
 			buffSellPrice,
@@ -55,7 +56,7 @@ func send(data map[string]string) {
 		msg.DisableWebPagePreview = true
 		bot.Send(msg)
 	} else {
-		str := "%s" + "\n\r" +
+		str := "%s" + "- %s" + "\n\r" +
 			"<b>%s</b>" + "\n\r" +
 			"<u>buff求购:%s</u>" + "                " + "<u>buff出售:%s</u>" + "\n\r" +
 			"<u>steam出售:%s</u>" + "                " + "<u>steam求购:%s  --->(%s)</u>" + "\n\r" +
@@ -70,8 +71,9 @@ func send(data map[string]string) {
 		steamPrice := data["steam_sell_price"]
 		steamBuyPrice := data["steam_buy_price"]
 		Proportion := data["proportion"]
+		changeName := data["change_name"]
 		//url 编码
-		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
+		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=selling"
 		steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(data["market_hash_name"])
 
 		steamBuyPriceFold := fmt.Sprintf("%.2f", util.StringToFloat64(data["steam_buy_price"])*0.87)
@@ -79,6 +81,7 @@ func send(data map[string]string) {
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
 			upTime,
+			changeName,
 			data["name"],
 			buffPrice,
 			buffSellPrice,

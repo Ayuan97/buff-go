@@ -66,6 +66,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
+					data["change_name"] = "buff"
 				}
 			}
 		} else if checkType == 2 {
@@ -83,6 +84,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
+					data["change_name"] = "buff"
 				}
 			}
 		} else if checkType == 3 {
@@ -99,6 +101,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
+					data["change_name"] = "steam"
 				}
 			}
 		} else if checkType == 4 {
@@ -115,6 +118,8 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 					p := strconv.FormatFloat(num, 'f', 2, 64)
 					data["proportion"] = p
 					data["change_type"] = strconv.Itoa(checkType)
+					data["change_name"] = "steam"
+
 				}
 			}
 		}
