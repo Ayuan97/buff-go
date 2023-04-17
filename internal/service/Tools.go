@@ -124,7 +124,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 			}
 		}
 		//更新比例
-		if num != 0.0 && data["market_hash_name"] != "" {
+		if (checkType == 1 || checkType == 4) && num != 0.0 && data["market_hash_name"] != "" {
 			p := fmt.Sprintf("%.2f", num)
 			//更新比例
 			myDao.UpdateInfoProportion(data["market_hash_name"], util.StringToFloat64(p))
