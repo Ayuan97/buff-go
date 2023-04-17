@@ -311,7 +311,7 @@ func getSellData() {
 						continue
 					}
 					go getBuffGoodInfo(info, proxy)
-					time.Sleep(time.Millisecond * 500)
+					time.Sleep(time.Millisecond * 800)
 				}
 			}()
 			time.Sleep(time.Millisecond * 200)

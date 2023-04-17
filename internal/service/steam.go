@@ -172,7 +172,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			}
 
 			if SteamData.Success {
-				if strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
+				if len(SteamData.Results) > 0 && strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
 					go handleSteamSellData(SteamData)
 				} else {
 					fmt.Println("steam err5:", "不是人民币")
