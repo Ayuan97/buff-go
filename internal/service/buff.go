@@ -71,6 +71,8 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 		//循环N次 获取buff数据
 		config := myDao.GetOneSystemConfig(1) //系统配置
 		for i := 1; i <= config.BuffPageNum; i++ {
+			i = i + 1
+			fmt.Println("buff page:", i)
 			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", i, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
