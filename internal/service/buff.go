@@ -178,24 +178,24 @@ func handleBuffData(buffData BuffData) {
 				Info.IconUrl = v.GoodsInfo.OriginalIconUrl
 				//插入数据库
 				myDao.CreateInfo(&Info)
-				//初始化缓存
-				c := CacheData{
-					Key:            key,
-					id:             v.Id,
-					name:           v.Name,
-					marketHashName: v.MarketHashName,
-					BuffBuyPrice:   util.StringToFloat64(v.BuyMaxPrice),
-					BuffBuyNum:     v.BuyNum,
-					BuffSellPrice:  util.StringToFloat64(v.SellMinPrice),
-					BuffSellNum:    v.SellNum,
-					SteamBuyPrice:  0,
-					SteamBuyNum:    0,
-					SteamSellPrice: 0,
-					SteamSellNum:   0,
-				}
-
-				InitGoodCache(c)
 			}
+			//初始化缓存
+			c := CacheData{
+				Key:            key,
+				id:             v.Id,
+				name:           v.Name,
+				marketHashName: v.MarketHashName,
+				BuffBuyPrice:   util.StringToFloat64(v.BuyMaxPrice),
+				BuffBuyNum:     v.BuyNum,
+				BuffSellPrice:  util.StringToFloat64(v.SellMinPrice),
+				BuffSellNum:    v.SellNum,
+				SteamBuyPrice:  0,
+				SteamBuyNum:    0,
+				SteamSellPrice: 0,
+				SteamSellNum:   0,
+			}
+
+			InitGoodCache(c)
 		} else {
 			//缓存存在
 			//批量更新数据

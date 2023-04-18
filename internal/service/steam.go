@@ -224,23 +224,23 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 				Info.Name = v.Name
 				//插入数据库
 				myDao.CreateInfo(&Info)
-				//初始化缓存
-				c := CacheData{
-					Key:            key,
-					id:             0,
-					name:           v.Name,
-					marketHashName: v.AssetDescription.MarketHashName,
-					BuffBuyPrice:   0,
-					BuffBuyNum:     0,
-					BuffSellPrice:  0,
-					BuffSellNum:    0,
-					SteamBuyPrice:  0,
-					SteamBuyNum:    0,
-					SteamSellPrice: float64(v.SellPrice) / 100,
-					SteamSellNum:   v.SellListings,
-				}
-				InitGoodCache(c)
 			}
+			//初始化缓存
+			c := CacheData{
+				Key:            key,
+				id:             0,
+				name:           v.Name,
+				marketHashName: v.AssetDescription.MarketHashName,
+				BuffBuyPrice:   0,
+				BuffBuyNum:     0,
+				BuffSellPrice:  0,
+				BuffSellNum:    0,
+				SteamBuyPrice:  0,
+				SteamBuyNum:    0,
+				SteamSellPrice: float64(v.SellPrice) / 100,
+				SteamSellNum:   v.SellListings,
+			}
+			InitGoodCache(c)
 		} else {
 			//缓存存在
 			//批量更新数据
