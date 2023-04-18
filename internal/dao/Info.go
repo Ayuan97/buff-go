@@ -57,9 +57,17 @@ func (d *Dao) UpdateInfo(info *model.Info) error {
 }
 
 // 更新比例
-func (d *Dao) UpdateInfoProportion(name string, p float64) error {
+func (d *Dao) UpdateInfoBuffProportion(name string, p float64) error {
 	var info model.Info
 	info.MarketHashName = name
-	info.Proportion = p
-	return info.UpdateProportion(d.engine, &info)
+	info.BuffProportion = p
+	return info.UpdateBuffProportion(d.engine, &info)
+}
+
+// 更新比例-steam
+func (d *Dao) UpdateInfoSteamProportion(name string, p float64) error {
+	var info model.Info
+	info.MarketHashName = name
+	info.SteamProportion = p
+	return info.UpdateSteamProportion(d.engine, &info)
 }

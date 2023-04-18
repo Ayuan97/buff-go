@@ -25,7 +25,8 @@ type Info struct {
 	SteamItemNameId string  `json:"steam_item_name_id"`
 	IsPush          int     `json:"is_push"`
 	IsBuy           int     `json:"is_buy"`
-	Proportion      float64 `json:"proportion"`
+	BuffProportion  float64 `json:"buff_proportion"`
+	SteamProportion float64 `json:"steam_proportion"`
 	BuffBuyUpdate   int     `json:"buff_buy_update"`
 	BuffSellUpdate  int     `json:"buff_sell_update"`
 	SteamBuyUpdate  int     `json:"steam_buy_update"`
@@ -119,10 +120,20 @@ func (g *Info) UpdateInfo(db *gorm.DB, info *Info) error {
 }
 
 // 更新比例
-func (g *Info) UpdateProportion(db *gorm.DB, info *Info) error {
+func (g *Info) UpdateBuffProportion(db *gorm.DB, info *Info) error {
 	err := db.Model(&Info{}).Where("market_hash_name = ?", info.MarketHashName).Updates(info).Error
 	if err != nil {
-		global.Logger.Errorf("UpdateProportion err: %v", err)
+		global.Logger.Errorf("UpdateBuffProportion err: %v", err)
+		return err
+	}
+	return nil
+}
+
+// 更新比例-steam
+func (g *Info) UpdateSteamProportion(db *gorm.DB, info *Info) error {
+	err := db.Model(&Info{}).Where("market_hash_name = ?", info.MarketHashName).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateBuffProportion err: %v", err)
 		return err
 	}
 	return nil
