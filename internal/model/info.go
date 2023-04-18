@@ -54,7 +54,7 @@ func (g *Info) Create(db *gorm.DB, info *Info) bool {
 func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
 	db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "market_hash_name"}},
-		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "goods_id", "buff_buy_update"}),
+		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "goods_id", "buff_buy_update", "icon_url"}),
 	}).Create(&info)
 	return true
 }
