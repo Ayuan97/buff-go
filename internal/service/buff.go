@@ -12,13 +12,16 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"sync"
 	"time"
 )
 
-var I = make(chan *model.Info, 16000)
+var I = make(chan *model.Info, 20000)
 
 var proxyBuyChan = make(chan string, 1000)
-var proxySellChan = make(chan string, 100)
+
+var rwProxy sync.RWMutex
+var rwInfo sync.RWMutex
 
 // buff 求购
 func GetBuffBuy() {
@@ -229,21 +232,29 @@ func handleBuffData(buffData BuffData) {
 // buff 出售channel 添加数据
 func GetBuffSell() {
 	//判断chan中的数据是否为空
+
 	go func() {
 		for {
 			if len(I) <= 500 {
+				rwInfo.Lock()
 				//读取所有商品 写入channel
-				runtime.GOMAXPROCS(runtime.NumCPU())
+				fmt.Println("buff - sell - channel - 开始写入")
 				result, _ := myDao.GetAllInfo()
 				for _, v := range result {
 					I <- v
 				}
+				fmt.Println("buff - sell - channel - 写入完毕", len(I))
+				rwInfo.Unlock()
+
 			}
-			time.Sleep(time.Second * 2)
+			fmt.Println("buff -sell - len(I) - ", len(I))
+			time.Sleep(time.Second * 60)
 		}
 	}()
+
 	//获取代理放入channel
 	go getSellProxy()
+
 	//从channel中取出代理 开启协程 读取信息
 	go getSellData()
 }
@@ -264,16 +275,17 @@ func getSellProxy() {
 			log.Println(err)
 		} else {
 			for _, v := range IpData.Data {
-				p := fmt.Sprintf("%v:%v", v.IP, v.Port)
+				rwProxy.Lock()
 				if num == 11 {
-					//proxySellChan <- p
+					//proxySellChan <- v.IP
 				} else {
-					proxyBuyChan <- p
+					proxyBuyChan <- v.IP
 				}
 				num++
 				if num == 10 {
 					num = 0
 				}
+				rwProxy.Unlock()
 			}
 		}
 		delay := time.Duration(config.BuffSellDelay)
@@ -283,39 +295,32 @@ func getSellProxy() {
 
 // 出售 从channel中取出代理 开启协程 读取信息
 func getSellData() {
-	for {
-		select {
-		case proxy := <-proxyBuyChan:
-			//chan中的数据为空时
-			if proxy == "" {
-				time.Sleep(time.Second * 5)
-				continue
-			}
-			//开启协程
-			go func() {
-				key := rediskey.GetIpKey(proxy)
-				//设置缓存 30秒
-				gredis.Set(key, proxy, time.Duration(30)*time.Second)
-				//从chan中取出商品
-				for {
-					value := gredis.Get(key)
-					//fmt.Println("proxy:", proxy, "value:", value)
-					if value == "" {
-						//结束协程
-						//fmt.Println("代理失效 - 结束协程")
-						runtime.Goexit()
-					}
-					info := <-I
-					if info == nil {
-						fmt.Println("通道内没有商品- 跳过")
-						continue
-					}
-					go getBuffGoodInfo(info, proxy)
-					time.Sleep(time.Millisecond * 800)
+	for proxy := range proxyBuyChan {
+		key := rediskey.GetIpKey(proxy)
+		//设置缓存 30秒
+		gredis.Set(key, proxy, time.Duration(30)*time.Second)
+		//从chan中取出商品
+		go func(proxy string, key string) {
+			for {
+				value := gredis.Get(key)
+				//fmt.Println("proxy:", proxy, "value:", value)
+				if value == "" {
+					//结束协程
+					fmt.Println("代理失效 - 结束协程 ip:", proxy)
+					break
 				}
-			}()
-			time.Sleep(time.Millisecond * 200)
-		}
+				rwInfo.RLock()
+				info := <-I
+				rwInfo.RUnlock()
+				if info == nil {
+					fmt.Println("通道内没有商品- 跳过")
+					continue
+				}
+				//fmt.Println("启动协程 - 启动时间:", time.Now().Format("2006-01-02 15:04:05"), " - 代理:", proxy, " - 商品:", info.GoodsId)
+				go getBuffGoodInfo(info, proxy)
+				time.Sleep(time.Second * 1)
+			}
+		}(proxy, key)
 	}
 }
 
@@ -324,56 +329,58 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 	//设置缓存 30秒
 	key := rediskey.GetIpKey(proxy)
 	value := gredis.Get(key)
-	//fmt.Println("proxy:", proxy, "value:", value)
 	if value == "" {
-		//结束协程
-		//fmt.Println("代理失效 - 结束协程")
 		I <- info
-		runtime.Goexit()
+		fmt.Println("代理失效 - 结束协程 ip:", proxy)
+		return
 	}
 	p, _ := url.Parse("http://" + proxy)
+
 	getUrl := fmt.Sprintf("https://buff.163.com/api/market/goods/sell_order?game=csgo&goods_id=%v&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1&use_suggestion=0&_=%v", info.GoodsId, time.Now().UnixNano()/1e6)
 	client := &http.Client{
+		Timeout: time.Millisecond * 2500,
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(p),
 		},
 	}
 	req, err := http.NewRequest("GET", getUrl, nil)
 	if err != nil {
-		//fmt.Println("buff err1:", err)
+		fmt.Println("buff - 请求失败 - req", err)
 		return
 	}
 	req.AddCookie(&http.Cookie{Name: "Device-Id", Value: "nSt86DRnNpIcAVkzG5QC"})
 	req.AddCookie(&http.Cookie{Name: "client_id", Value: "u591PbZEqJi47BnljKgbaA"})
 	resp, err := client.Do(req)
 	if err != nil {
-		//fmt.Println("buff err2:", err)
+		//fmt.Println("buff - 请求失败 - resp", err.Error())
 		return
 	}
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		//fmt.Println("buff err3:", err)
+		fmt.Println("buff - 请求失败 - body", err)
 		return
 	}
 	buffData := Response{}
 	err = json.Unmarshal(body, &buffData)
 	if err != nil {
-		//fmt.Println("buff err4:", err)
-		return
+		//fmt.Println("buff - 请求失败 - json", err)
 	}
 	if buffData.Code == "OK" {
 		if len(buffData.Data.Items) == 0 {
-			fmt.Println("buff - 没有售卖信息 -")
+			fmt.Println("buff - no -")
 		} else {
+			//fmt.Println("buff - 有售卖信息 -", info.GoodsId)
 			go BuffBuyInfo(buffData, info)
 		}
 	}
+
 }
 
 // 获取代理
 func httpproxy() (Ip, error) {
 	client := &http.Client{}
-	rqt, err := http.NewRequest("GET", "https://aapi.51daili.com/getapi2?linePoolIndex=1&packid=2&unkey=&tid=&qty=2&time=1&port=1&format=json&ss=1&css=&pro=&city=&dt=1&ct=0&service=1&usertype=17", nil)
+	rqt, err := http.NewRequest("GET", "https://aapi.51daili.com/getapi2?linePoolIndex=1&packid=2&unkey=&tid=&qty=1&time=1&port=1&format=json&ss=5&css=&ipport=1&pro=%E6%B1%9F%E8%8B%8F%E7%9C%81&city=&dt=3&ct=0&service=1&usertype=17", nil)
 	if err != nil {
 		println("http:", "err")
 		return Ip{}, err
@@ -382,7 +389,7 @@ func httpproxy() (Ip, error) {
 	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		fmt.Println("http:", err)
+		fmt.Println("http:", string(body))
 		return Ip{}, err
 	}
 

@@ -11,9 +11,9 @@ Log: # 日志
   LogFileExt: .log
 Database: # 数据库
   DBType: mysql
-  Username: buff-go # 填写你的数据库账号
-  Password: SNxYdWxKJ8cEWh8m # 填写你的数据库密码
-  Host: 47.243.117.122:3306
+  Username: root # 填写你的数据库账号
+  Password: root # 填写你的数据库密码
+  Host: 127.0.0.1:3306
   DBName: buff-go
   TablePrefix: bf_
   Charset: utf8mb4
@@ -22,7 +22,7 @@ Database: # 数据库
   MaxIdleConns: 10
   MaxOpenConns: 30
 Redis:
-  Host: 47.243.117.122:6379
-  Password: zhaochengyuan
+  Host: 127.0.0.1:6379
+  Password:
   DB: 1
   Prefix: buff-
