@@ -18,18 +18,18 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	goodInfo := buffData.Data.GoodsInfos[strconv.Itoa(info.GoodsId)]
 	InfoKey := rediskey.GetCacheKey(goodInfo.MarketHashName)
 	minPrice := 99999999.99
+	////删除上一次的订单
+	//err := myDao.DeleteOrderByGoodsId(info.GoodsId)
+	//if err != nil {
+	//	fmt.Println("buff - 删除订单失败")
+	//}
 	//var orderList []*model.Order
 	for _, v := range buffData.Data.Items {
 		//查找最低价格
 		if util.StringToFloat64(v.Price) < minPrice {
 			minPrice = util.StringToFloat64(v.Price)
 		}
-		////删除上一次的订单
-		//err := myDao.DeleteOrderByGoodsId(v.GoodsID)
-		//if err != nil {
-		//	fmt.Println("buff - 删除订单失败")
-		//	continue
-		//}
+
 		//var order model.Order
 		//order.Name = goodInfo.Name
 		//order.MarketHashName = goodInfo.MarketHashName
@@ -47,10 +47,7 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 		//orderList = append(orderList, &order)
 	}
 	//批量插入订单
-	//err := myDao.BatchCreateOrder(orderList)
-	//if err != true {
-	//	fmt.Println("buff - 批量插入订单失败")
-	//}
+	//myDao.BatchCreateOrder(orderList)
 	//获取旧缓存
 	oldCache, _ := gredis.HGetAll(InfoKey)
 	//更新缓存

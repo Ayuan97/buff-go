@@ -380,7 +380,7 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 // 获取代理
 func httpproxy() (Ip, error) {
 	client := &http.Client{}
-	rqt, err := http.NewRequest("GET", "https://aapi.51daili.com/getapi2?linePoolIndex=1&packid=2&unkey=&tid=&qty=1&time=1&port=1&format=json&ss=5&css=&ipport=1&pro=%E6%B1%9F%E8%8B%8F%E7%9C%81&city=&dt=3&ct=0&service=1&usertype=17", nil)
+	rqt, err := http.NewRequest("GET", "https://aapi.51daili.com/getapi2?linePoolIndex=1&packid=2&unkey=&tid=&qty=2&time=1&port=1&format=json&ss=5&css=&ipport=1&pro=%E6%B1%9F%E8%8B%8F%E7%9C%81&city=&dt=3&ct=0&service=1&usertype=17", nil)
 	if err != nil {
 		println("http:", "err")
 		return Ip{}, err
