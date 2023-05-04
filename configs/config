@@ -23,6 +23,6 @@ Database: # 数据库
   MaxOpenConns: 30
 Redis:
   Host: 47.243.117.122:6379
-  Password:zhaochengyuan
+  Password: zhaochengyuan
   DB: 1
   Prefix: buff-
