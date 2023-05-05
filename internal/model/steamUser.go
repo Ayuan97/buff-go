@@ -38,3 +38,8 @@ func (a SteamUser) GetOneSteamUser(db *gorm.DB, UserType int) (SteamUser, error)
 func UpdateSteamUserStatus(db *gorm.DB, id int, status int) error {
 	return db.Model(&SteamUser{}).Where("id = ?", id).Update("status", status).Error
 }
+
+// 更新账号信息
+func UpdateSteamUserInfo(db *gorm.DB, id int, steamUser SteamUser) error {
+	return db.Model(&SteamUser{}).Where("id = ?", id).Updates(steamUser).Error
+}
