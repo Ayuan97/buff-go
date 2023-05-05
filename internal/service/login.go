@@ -20,7 +20,7 @@ import (
 const (
 	rsakeyURL     = "https://steamcommunity.com/login/getrsakey"
 	loginURL      = "https://steamcommunity.com/login/dologin/"
-	cacheDuration = 5 * time.Minute
+	cacheDuration = 1 * time.Minute
 )
 
 type steamLogin struct {
