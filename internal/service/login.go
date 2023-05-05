@@ -51,9 +51,10 @@ type loginResponse struct {
 
 func AutoGetSteamCookie() {
 	go func() {
-		//每隔5分钟执行一次
+		//每隔1分钟执行一次
 		ticker := time.NewTicker(cacheDuration)
 		for {
+			fmt.Println("检查steam账号登录状态")
 			//查询所有steam账号
 			allUser, _ := myDao.GetSteamUserList()
 			for _, v := range allUser {
