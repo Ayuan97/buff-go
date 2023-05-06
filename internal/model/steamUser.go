@@ -43,3 +43,13 @@ func UpdateSteamUserStatus(db *gorm.DB, id int, status int) error {
 func UpdateSteamUserInfo(db *gorm.DB, id int, steamUser SteamUser) error {
 	return db.Model(&SteamUser{}).Where("id = ?", id).Updates(steamUser).Error
 }
+
+// 根据id查询账号信息
+func GetSteamUserInfo(db *gorm.DB, id int) (SteamUser, error) {
+	var steamUser SteamUser
+	err := db.Where("id = ?", id).First(&steamUser).Error
+	if err != nil {
+		return steamUser, err
+	}
+	return steamUser, err
+}

@@ -50,33 +50,35 @@ type loginResponse struct {
 }
 
 func AutoGetSteamCookie() {
-	go func() {
-		//每隔1分钟执行一次
-		ticker := time.NewTicker(cacheDuration)
-		for {
-			fmt.Println("检查steam账号登录状态")
-			//查询所有steam账号
-			allUser, _ := myDao.GetSteamUserList()
-			for _, v := range allUser {
-				if v.Status == 0 && v.Type == 1 {
-					info, err := login(v)
-					if err != nil {
-						fmt.Println("登录失败", err)
-					}
-					if info.Success == true {
-						// 更新账号信息
-						v.SteamLoginSecure = info.transfer_parameters.SteamId + "||" + info.transfer_parameters.TokenSecure
-						v.Status = 1
-						myDao.UpdateSteamUserInfo(int(v.ID), *v)
-					} else {
-						fmt.Println("登录失败", info)
-					}
-				}
-			}
-			<-ticker.C
-		}
-	}()
-
+	//go func() {
+	//	//每隔1分钟执行一次
+	//	for {
+	//		fmt.Println("检查steam账号登录状态")
+	//		//查询所有steam账号
+	//		allUser, _ := myDao.GetSteamUserList()
+	//		fmt.Println("所有账号", allUser)
+	//		for _, v := range allUser {
+	//			if v.Status == 2 && v.Type == 1 {
+	//				info, err := login(v)
+	//				if err != nil {
+	//					fmt.Println("登录失败", err)
+	//				}
+	//				if info.Success == true {
+	//					fmt.Println("登录成功", info)
+	//					// 更新账号信息
+	//					v.SteamLoginSecure = info.transfer_parameters.SteamId + "||" + info.transfer_parameters.TokenSecure
+	//					v.Status = 1
+	//					myDao.UpdateSteamUserInfo(int(v.ID), *v)
+	//				} else {
+	//					fmt.Println("登录失败", info)
+	//				}
+	//			}
+	//		}
+	//		time.Sleep(cacheDuration)
+	//	}
+	//}()
+	s, _ := myDao.GetSteamUserInfo(5)
+	login(&s)
 }
 
 func login(steamInfo *model.SteamUser) (loginResponse, error) {
@@ -84,6 +86,8 @@ func login(steamInfo *model.SteamUser) (loginResponse, error) {
 		Username: steamInfo.Account,
 		Password: steamInfo.Password,
 	}
+	fmt.Println("登录账号", steamUser.Username)
+	fmt.Println("登录密码", steamUser.Password)
 
 	// 定义请求参数
 	values := url.Values{}
@@ -92,7 +96,10 @@ func login(steamInfo *model.SteamUser) (loginResponse, error) {
 	body, _ := ioutil.ReadAll(resp.Body)
 	resp.Body.Close()
 	var rsaKey rsaKey
+	// 解析响应数据
+	json.Unmarshal(body, &rsaKey)
 	// 将公钥模数和公钥指数进行转换
+	fmt.Println("rsaKey", rsaKey)
 	modulus, _ := new(big.Int).SetString(rsaKey.Modulus, 16)
 	E := util.StringToInt(rsaKey.Exponent)
 	pub := &rsa.PublicKey{
@@ -116,10 +123,7 @@ func login(steamInfo *model.SteamUser) (loginResponse, error) {
 	data.Set("remember_login", "false")
 
 	// 创建一个 cookie jar
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		panic(err)
-	}
+	jar, _ := cookiejar.New(nil)
 
 	// 创建一个 HTTP 客户端
 	client := &http.Client{
@@ -141,24 +145,26 @@ func login(steamInfo *model.SteamUser) (loginResponse, error) {
 			Name:  "steamCountry",
 			Value: steamInfo.SteamCountry,
 		},
+		{
+			Name:  "browser_id",
+			Value: steamInfo.BrowserId,
+		},
 	})
 
 	// 发送 HTTP POST 请求
-	req, err := http.NewRequest("POST", "https://steamcommunity.com/login/dologin/", strings.NewReader(data.Encode()))
-	if err != nil {
-		panic(err)
-	}
+	req, _ := http.NewRequest("POST", "https://steamcommunity.com/login/dologin/", strings.NewReader(data.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err = client.Do(req)
-	if err != nil {
-		panic(err)
-	}
+	resp, _ = client.Do(req)
+
 	defer resp.Body.Close()
 
 	// 打印响应内容和 cookie
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
+	fmt.Println("steamInfo", steamInfo)
+	fmt.Println(string(body))
 	if err != nil {
-		panic(err)
+		fmt.Println("登录失败", err)
+		return loginResponse{}, err
 	}
 	var loginResponse loginResponse
 	err = json.Unmarshal(body, &loginResponse)
