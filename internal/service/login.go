@@ -1,176 +1,90 @@
 package service
 
 import (
-	"buff-go/internal/model"
-	"buff-go/pkg/util"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"math/big"
-	"net/http"
-	"net/http/cookiejar"
-	"net/url"
-	"strings"
+	"github.com/tebeka/selenium"
+	"github.com/tebeka/selenium/chrome"
+	"os"
 	"time"
 )
 
 const (
-	rsakeyURL     = "https://steamcommunity.com/login/getrsakey"
-	loginURL      = "https://steamcommunity.com/login/dologin/"
-	cacheDuration = 1 * time.Minute
+	chromeDriverPath = "exec/chromedriver"
+	port             = 8080
 )
 
-type steamLogin struct {
-	Username      string
-	Password      string
-	TwoFactorCode string
-}
-
-type rsaKey struct {
-	Modulus       string `json:"publickey_mod"`
-	Exponent      string `json:"publickey_exp"`
-	Timestamp     string `json:"timestamp"`
-	ModulusBigInt *big.Int
-	ExponentInt   *big.Int
-}
-
-type loginResponse struct {
-	Success             bool `json:"success"`
-	Requires2FA         bool `json:"requires_twofactor"`
-	LoginComplete       bool `json:"login_complete"`
-	transfer_parameters struct {
-		SteamId       string `json:"steamid"`
-		TokenSecure   string `json:"token_secure"`
-		Autth         string `json:"auth"`
-		RememberLogin bool   `json:"remember_login"`
+func Login() {
+	// Start a WebDriver server instance
+	opts := []selenium.ServiceOption{
+		selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
-}
-
-func AutoGetSteamCookie() {
-	//go func() {
-	//	//每隔1分钟执行一次
-	//	for {
-	//		fmt.Println("检查steam账号登录状态")
-	//		//查询所有steam账号
-	//		allUser, _ := myDao.GetSteamUserList()
-	//		fmt.Println("所有账号", allUser)
-	//		for _, v := range allUser {
-	//			if v.Status == 2 && v.Type == 1 {
-	//				info, err := login(v)
-	//				if err != nil {
-	//					fmt.Println("登录失败", err)
-	//				}
-	//				if info.Success == true {
-	//					fmt.Println("登录成功", info)
-	//					// 更新账号信息
-	//					v.SteamLoginSecure = info.transfer_parameters.SteamId + "||" + info.transfer_parameters.TokenSecure
-	//					v.Status = 1
-	//					myDao.UpdateSteamUserInfo(int(v.ID), *v)
-	//				} else {
-	//					fmt.Println("登录失败", info)
-	//				}
-	//			}
-	//		}
-	//		time.Sleep(cacheDuration)
-	//	}
-	//}()
-	s, _ := myDao.GetSteamUserInfo(5)
-	login(&s)
-}
-
-func login(steamInfo *model.SteamUser) (loginResponse, error) {
-	steamUser := steamLogin{
-		Username: steamInfo.Account,
-		Password: steamInfo.Password,
-	}
-	fmt.Println("登录账号", steamUser.Username)
-	fmt.Println("登录密码", steamUser.Password)
-
-	// 定义请求参数
-	values := url.Values{}
-	values.Set("username", steamUser.Username)
-	resp, _ := http.PostForm("https://steamcommunity.com/login/getrsakey", values)
-	body, _ := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	var rsaKey rsaKey
-	// 解析响应数据
-	json.Unmarshal(body, &rsaKey)
-	// 将公钥模数和公钥指数进行转换
-	fmt.Println("rsaKey", rsaKey)
-	modulus, _ := new(big.Int).SetString(rsaKey.Modulus, 16)
-	E := util.StringToInt(rsaKey.Exponent)
-	pub := &rsa.PublicKey{
-		N: modulus,
-		E: E,
-	}
-	// 加密
-	encryptedPassword, _ := rsa.EncryptPKCS1v15(rand.Reader, pub, []byte(steamUser.Password))
-	//base64编码
-	encodedPassword := base64.StdEncoding.EncodeToString(encryptedPassword)
-
-	// 准备请求参数
-	data := url.Values{}
-	data.Set("username", steamUser.Username)
-	data.Set("password", encodedPassword)
-	data.Set("captchagid", "-1")
-	data.Set("captcha_text", "")
-	data.Set("emailsteamid", "")
-	data.Set("emailauth", "")
-	data.Set("rsatimestamp", rsaKey.Timestamp)
-	data.Set("remember_login", "false")
-
-	// 创建一个 cookie jar
-	jar, _ := cookiejar.New(nil)
-
-	// 创建一个 HTTP 客户端
-	client := &http.Client{
-		Jar: jar,
-	}
-	jar.SetCookies(&url.URL{
-		Scheme: "https",
-		Host:   "steamcommunity.com",
-	}, []*http.Cookie{
-		{
-			Name:  "sessionid",
-			Value: steamInfo.SessionId,
-		},
-		{
-			Name:  "steamLoginSecure",
-			Value: steamInfo.SteamLoginSecure,
-		},
-		{
-			Name:  "steamCountry",
-			Value: steamInfo.SteamCountry,
-		},
-		{
-			Name:  "browser_id",
-			Value: steamInfo.BrowserId,
-		},
-	})
-
-	// 发送 HTTP POST 请求
-	req, _ := http.NewRequest("POST", "https://steamcommunity.com/login/dologin/", strings.NewReader(data.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, _ = client.Do(req)
-
-	defer resp.Body.Close()
-
-	// 打印响应内容和 cookie
-	body, err := ioutil.ReadAll(resp.Body)
-	fmt.Println("steamInfo", steamInfo)
-	fmt.Println(string(body))
+	selenium.SetDebug(true)
+	service, err := selenium.NewChromeDriverService(chromeDriverPath, port, opts...)
 	if err != nil {
-		fmt.Println("登录失败", err)
-		return loginResponse{}, err
+		panic(err) // panic is used only as an example and is not otherwise recommended.
 	}
-	var loginResponse loginResponse
-	err = json.Unmarshal(body, &loginResponse)
+	defer service.Stop()
+
+	// Connect to the WebDriver instance running locally.
+	caps := selenium.Capabilities{"browserName": "chrome"}
+	// 去掉”被自动控制“提示
+	chromeCaps := chrome.Capabilities{
+		ExcludeSwitches: []string{"enable-automation"},
+		Args:            []string{"no-sandbox"},
+	}
+	caps.AddChrome(chromeCaps)
+	wd, err := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port))
 	if err != nil {
-		return loginResponse, err
+		panic(err)
 	}
-	return loginResponse, nil
+	defer wd.Quit()
+
+	//打开steam登录页面
+	if err := wd.Get("https://steamcommunity.com/login/home/?goto="); err != nil {
+		panic(err)
+	}
+	//等待页面加载完成
+	time.Sleep(5 * time.Second)
+	//找到 class 为 newlogindialog_TextInput_2eKVn type 为 text 的元素
+	elem, err := wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_TextInput_2eKVn[type=text]")
+	if err != nil {
+		panic(err)
+	}
+	//输入账号
+	if err := elem.SendKeys("zhaochengyuan0002"); err != nil {
+		panic(err)
+	}
+	//找到 class 为 newlogindialog_TextInput_2eKVn type 为 password 的元素
+	elem, err = wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_TextInput_2eKVn[type=password]")
+	if err != nil {
+		panic(err)
+	}
+	//输入密码
+	if err := elem.SendKeys("Zhao19970223."); err != nil {
+		panic(err)
+	}
+	//找到 class 为 newlogindialog_SubmitButton_2QgFE type 为 submit 的元素
+	elem, err = wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_SubmitButton_2QgFE[type=submit]")
+	if err != nil {
+		panic(err)
+	}
+	//点击登录
+	if err := elem.Click(); err != nil {
+		panic(err)
+	}
+	time.Sleep(10 * time.Second)
+	//获取cookie
+	cookies, err := wd.GetCookies()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(cookies)
+
+	//打开 新的url
+	if err := wd.Get("https://steamcommunity.com/market/search/render/?query=&start=1000&count=1&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23"); err != nil {
+		panic(err)
+	}
+
+	time.Sleep(5 * time.Minute)
 
 }
