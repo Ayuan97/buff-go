@@ -241,7 +241,9 @@ func GetBuffSell() {
 				fmt.Println("buff - sell - channel - 开始写入")
 				result, _ := myDao.GetAllInfo()
 				for _, v := range result {
-					I <- v
+					if v.BuffBuyPrice >= 80 {
+						I <- v
+					}
 				}
 				fmt.Println("buff - sell - channel - 写入完毕", len(I))
 				rwInfo.Unlock()

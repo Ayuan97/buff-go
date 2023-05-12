@@ -312,7 +312,9 @@ func GetSteamBuy() {
 				runtime.GOMAXPROCS(runtime.NumCPU())
 				result, _ := myDao.GetAllInfoBySteamItemId()
 				for _, v := range result {
-					itemChan <- v
+					if v.SteamSellPrice >= 80 {
+						itemChan <- v
+					}
 				}
 			}
 			time.Sleep(time.Second * 2)
