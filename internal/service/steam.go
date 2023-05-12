@@ -185,7 +185,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			}
 			if SteamData.Success == false {
 				fmt.Println("steam err6:", SteamData)
-				endSteamTask(resp, account, 2, 1, p, 0)
+				endSteamTask(resp, account, 0, 1, p, 0)
 			}
 
 			if SteamData.Success {
@@ -196,7 +196,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 						fmt.Println("steam err5:", "不是人民币->data", SteamData)
 						//结束协程
 						fmt.Println("结束协程")
-						endSteamTask(resp, account, 3, 1, p, 0)
+						endSteamTask(resp, account, 2, 1, p, 0)
 					} else {
 						fmt.Println("steam err5-2:", "data:", SteamData)
 						continue
@@ -206,7 +206,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				fmt.Println("steam err7:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
-				endSteamTask(resp, account, 3, 1, p, 0)
+				endSteamTask(resp, account, 0, 1, p, 0)
 			}
 			config = myDao.GetOneSystemConfig(1)
 			if config.SteamSellStatus == 0 {
