@@ -1,0 +1,28 @@
+Server: # 服务设置
+  RunMode: release
+  HttpIp: 127.0.0.1
+  HttpPort: 9881
+  ReadTimeout: 60
+  WriteTimeout: 60
+Log: # 日志
+  LogType: file
+  LogFileSavePath: storage/logs
+  LogFileName: app
+  LogFileExt: .log
+Database: # 数据库
+  DBType: mysql
+  Username: root # 填写你的数据库账号
+  Password: root # 填写你的数据库密码
+  Host: 127.0.0.1:3306
+  DBName: buff-go
+  TablePrefix: bf_
+  Charset: utf8mb4
+  ParseTime: True
+  LogLevel: 2
+  MaxIdleConns: 10
+  MaxOpenConns: 30
+Redis:
+  Host: 47.243.117.122:6379
+  Password: zhaochengyuan
+  DB: 1
+  Prefix: buff-
