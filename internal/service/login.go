@@ -16,7 +16,7 @@ type Cookie struct {
 const (
 	chromeDriverPathLocal  = "exec/chromedriver_local"
 	chromeDriverPathMaster = "exec/chromedriver_master"
-	port                   = 8080
+	port                   = 9002
 )
 
 func LoginSteam() (*[]Cookie, error) {
