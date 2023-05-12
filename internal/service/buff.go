@@ -247,7 +247,7 @@ func GetBuffSell() {
 				rwInfo.Unlock()
 
 			}
-			fmt.Println("buff -sell - len(I) - ", len(I))
+			//fmt.Println("buff -sell - len(I) - ", len(I))
 			time.Sleep(time.Second * 60)
 		}
 	}()
