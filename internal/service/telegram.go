@@ -14,7 +14,7 @@ func send(data map[string]string) {
 	if err != nil {
 		log.Panic(err)
 	}
-	bot.Debug = true
+	bot.Debug = false
 	//log.Printf("Authorized on account %s", bot.Self.UserName)
 	//tgbotapi.NewMessage(-842545535, "开始推送")
 
