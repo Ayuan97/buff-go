@@ -102,7 +102,7 @@ func AutoGetSteamCookie() {
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Println("开始获取cookie")
+				fmt.Println("检查steam账号状态")
 				userList, err := myDao.GetSteamUserList()
 				if err != nil {
 					fmt.Println(err)
@@ -110,6 +110,7 @@ func AutoGetSteamCookie() {
 				}
 				for _, v := range userList {
 					if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
+						fmt.Println("steam账号", v.Account, "状态为失效---", "开始登录")
 						cookie, err := LoginSteam(v.Account, v.Password)
 						if err != nil {
 							fmt.Println(err)
