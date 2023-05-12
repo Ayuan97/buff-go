@@ -96,39 +96,49 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 }
 
 func AutoGetSteamCookie() {
-	userList, err := myDao.GetSteamUserList()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	for _, v := range userList {
-		if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
-			cookie, err := LoginSteam(v.Account, v.Password)
-			if err != nil {
-				fmt.Println(err)
-				continue
+	go func() {
+		//每五分钟检测一次
+		ticker := time.NewTicker(1 * time.Minute)
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Println("开始获取cookie")
+				userList, err := myDao.GetSteamUserList()
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				for _, v := range userList {
+					if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
+						cookie, err := LoginSteam(v.Account, v.Password)
+						if err != nil {
+							fmt.Println(err)
+							continue
+						}
+						for _, c := range cookie {
+							if c.Name == "steamLoginSecure" {
+								v.SteamLoginSecure = c.Value
+							}
+							if c.Name == "sessionid" {
+								v.SessionId = c.Value
+							}
+							if c.Name == "browserid" {
+								v.BrowserId = c.Value
+							}
+							if c.Name == "steamCountry" {
+								v.SteamCountry = c.Value
+							}
+						}
+						v.Status = 0
+						if err := myDao.UpdateSteamUserInfo(int(v.ID), v); err != nil {
+							fmt.Println(err)
+							continue
+						}
+						myDao.UpdateSteamUserStatus(int(v.ID), 0)
+						fmt.Println("登录成功 name:", v.Account)
+					}
+				}
 			}
-			for _, c := range cookie {
-				if c.Name == "steamLoginSecure" {
-					v.SteamLoginSecure = c.Value
-				}
-				if c.Name == "sessionid" {
-					v.SessionId = c.Value
-				}
-				if c.Name == "browserid" {
-					v.BrowserId = c.Value
-				}
-				if c.Name == "steamCountry" {
-					v.SteamCountry = c.Value
-				}
-			}
-			v.Status = 0
-			if err := myDao.UpdateSteamUserInfo(int(v.ID), v); err != nil {
-				fmt.Println(err)
-				continue
-			}
-			myDao.UpdateSteamUserStatus(int(v.ID), 0)
-			fmt.Println("登录成功 name:", v.Account)
 		}
-	}
+	}()
 }

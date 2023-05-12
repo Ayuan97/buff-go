@@ -18,7 +18,6 @@ func main() {
 	service.GetSteamBuy()          // steam 求购
 	service.GetSteamSell()         // steam 出售
 	service.GetBuffBuy()           //buff  求购
-
 	Wg.Add(1)
 	go func() {
 		for {
