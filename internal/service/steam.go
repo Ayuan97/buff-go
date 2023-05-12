@@ -64,7 +64,12 @@ func GetSteamSell() {
 			var oneIp *model.Ip
 			for _, v := range AllIp {
 				if v.Type == 2 && v.Country == 2 {
-					oneIp = v
+					proxyKey := rediskey.GetProxySteamKey(v.Ip + ":" + strconv.Itoa(v.Port))
+					proxyKeyResult := gredis.Get(proxyKey)
+					if proxyKeyResult == "" {
+						oneIp = v
+						break
+					}
 				}
 			}
 			//没有找到可用代理
