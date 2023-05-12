@@ -102,7 +102,6 @@ func AutoGetSteamCookie() {
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Println("检查steam账号状态")
 				userList, err := myDao.GetSteamUserList()
 				if err != nil {
 					fmt.Println(err)
