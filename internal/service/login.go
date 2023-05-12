@@ -38,6 +38,11 @@ func LoginSteam() (*[]Cookie, error) {
 		ExcludeSwitches: []string{"enable-automation"},
 		Args:            []string{"no-sandbox"},
 	}
+	//添加 --headless
+	chromeCaps.Args = append(chromeCaps.Args, "--headless")
+	chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
+	chromeCaps.Args = append(chromeCaps.Args, "--no-sandbox")
+
 	caps.AddChrome(chromeCaps)
 	wd, err := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port))
 	if err != nil {
