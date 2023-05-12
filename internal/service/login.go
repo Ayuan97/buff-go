@@ -1,9 +1,13 @@
 package service
 
 import (
+	"buff-go/internal/model"
+	"encoding/json"
 	"fmt"
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
+	"io/ioutil"
+	"net/http"
 	"time"
 )
 
@@ -98,7 +102,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 func AutoGetSteamCookie() {
 	go func() {
 		//每五分钟检测一次
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(2 * time.Minute)
 		for {
 			select {
 			case <-ticker.C:
@@ -136,9 +140,45 @@ func AutoGetSteamCookie() {
 						}
 						myDao.UpdateSteamUserStatus(int(v.ID), 0)
 						fmt.Println("登录成功 name:", v.Account)
+						Test(v)
 					}
 				}
 			}
 		}
 	}()
+}
+func Test(s *model.SteamUser) {
+
+	//curl 请求
+	geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=1&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&norender=1&currency=23", 100)
+	client := &http.Client{}
+
+	req, err := http.NewRequest("GET", geturl, nil)
+	if err != nil {
+		fmt.Println("steam err: 发起请求失败", err)
+		return
+	}
+	req.AddCookie(&http.Cookie{Name: "steamCountry", Value: s.SteamCountry})
+	req.AddCookie(&http.Cookie{Name: "timezoneOffset", Value: "28800,0"})
+	req.AddCookie(&http.Cookie{Name: "browserid", Value: s.BrowserId})
+	req.AddCookie(&http.Cookie{Name: "Steam_Language", Value: "schinese"})
+	req.AddCookie(&http.Cookie{Name: "steamLoginSecure", Value: s.SteamLoginSecure})
+	req.AddCookie(&http.Cookie{Name: "sessionid", Value: s.SessionId})
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("steam err2:", err)
+		return
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("steam err3:", err)
+		return
+	}
+	var SteamData SteamGoodsInfo
+	err = json.Unmarshal(body, &SteamData)
+	if err != nil {
+		fmt.Println("steam err4:", err)
+		return
+	}
+	fmt.Println(SteamData.Results)
 }
