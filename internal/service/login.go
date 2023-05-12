@@ -15,7 +15,7 @@ type Cookie struct {
 
 const (
 	chromeDriverPathLocal  = "exec/chromedriver_local"
-	chromeDriverPathMaster = "exec/chromedriver_master"
+	chromeDriverPathMaster = "exec/chromedriver"
 	port                   = 8080
 )
 
