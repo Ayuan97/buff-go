@@ -156,6 +156,7 @@ type Ipidea struct {
 	} `json:"data"`
 }
 
+//{true 1800 100 0 { false 0 100 searchResults market} []}
 // steam 100 返回
 type SteamGoodsInfo struct {
 	Success    bool `json:"success"`
