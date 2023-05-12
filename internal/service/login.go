@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
-	"os"
 	"time"
 )
 
@@ -19,12 +18,12 @@ const (
 	port                   = 8080
 )
 
-func LoginSteam() (*[]Cookie, error) {
+func LoginSteam(name string, password string) ([]*Cookie, error) {
 	// Start a WebDriver server instance
 	opts := []selenium.ServiceOption{
-		selenium.Output(os.Stderr), // Output debug information to STDERR.
+		//selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
-	selenium.SetDebug(true)
+	//selenium.SetDebug(true)
 	service, err := selenium.NewChromeDriverService(chromeDriverPathMaster, port, opts...)
 	if err != nil {
 		return nil, err
@@ -62,7 +61,7 @@ func LoginSteam() (*[]Cookie, error) {
 		return nil, err
 	}
 	//输入账号
-	if err := elem.SendKeys("zhaochengyuan0002"); err != nil {
+	if err := elem.SendKeys(name); err != nil {
 		return nil, err
 	}
 	//找到 class 为 newlogindialog_TextInput_2eKVn type 为 password 的元素
@@ -71,7 +70,7 @@ func LoginSteam() (*[]Cookie, error) {
 		return nil, err
 	}
 	//输入密码
-	if err := elem.SendKeys("Zhao19970223."); err != nil {
+	if err := elem.SendKeys(password); err != nil {
 		return nil, err
 	}
 	//找到 class 为 newlogindialog_SubmitButton_2QgFE type 为 submit 的元素
@@ -84,14 +83,52 @@ func LoginSteam() (*[]Cookie, error) {
 		return nil, err
 	}
 	time.Sleep(10 * time.Second)
-	var CookieList []Cookie
+	var CookieList []*Cookie
 	//获取cookie
 	cookies, err := wd.GetCookies()
 	if err != nil {
 		return nil, err
 	}
 	for _, v := range cookies {
-		CookieList = append(CookieList, Cookie{Name: v.Name, Value: v.Value})
+		CookieList = append(CookieList, &Cookie{Name: v.Name, Value: v.Value})
 	}
-	return &CookieList, nil
+	return CookieList, nil
+}
+
+func AutoGetSteamCookie() {
+	userList, err := myDao.GetSteamUserList()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	for _, v := range userList {
+		if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
+			cookie, err := LoginSteam(v.Account, v.Password)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			for _, c := range cookie {
+				if c.Name == "steamLoginSecure" {
+					v.SteamLoginSecure = c.Value
+				}
+				if c.Name == "sessionid" {
+					v.SessionId = c.Value
+				}
+				if c.Name == "browserid" {
+					v.BrowserId = c.Value
+				}
+				if c.Name == "steamCountry" {
+					v.SteamCountry = c.Value
+				}
+			}
+			v.Status = 0
+			if err := myDao.UpdateSteamUserInfo(int(v.ID), v); err != nil {
+				fmt.Println(err)
+				continue
+			}
+			myDao.UpdateSteamUserStatus(int(v.ID), 0)
+			fmt.Println("登录成功 name:", v.Account)
+		}
+	}
 }

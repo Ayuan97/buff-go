@@ -40,7 +40,7 @@ func UpdateSteamUserStatus(db *gorm.DB, id int, status int) error {
 }
 
 // 更新账号信息
-func UpdateSteamUserInfo(db *gorm.DB, id int, steamUser SteamUser) error {
+func UpdateSteamUserInfo(db *gorm.DB, id int, steamUser *SteamUser) error {
 	return db.Model(&SteamUser{}).Where("id = ?", id).Updates(steamUser).Error
 }
 
