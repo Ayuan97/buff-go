@@ -331,7 +331,7 @@ func getBuffGoodInfo(info *model.Info, proxy string) {
 	value := gredis.Get(key)
 	if value == "" {
 		I <- info
-		fmt.Println("代理失效 - 结束协程 ip:", proxy)
+		//fmt.Println("代理失效 - 结束协程 ip:", proxy)
 		return
 	}
 	p, _ := url.Parse("http://" + proxy)
