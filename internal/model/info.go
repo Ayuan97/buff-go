@@ -70,7 +70,7 @@ func (g *Info) BatchSteamUpdate(db *gorm.DB, info []*Info) bool {
 // 获取所有商品信息
 func (g *Info) GetAll(db *gorm.DB) ([]*Info, error) {
 	var info []*Info
-	err := db.Where("goods_id != 0").Select("goods_id").Find(&info).Error
+	err := db.Where("goods_id != 0").Select("goods_id,buff_buy_price").Find(&info).Error
 	if err != nil {
 		global.Logger.Errorf("GetAll err: %v", err)
 		return nil, err
