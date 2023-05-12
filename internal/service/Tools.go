@@ -153,7 +153,7 @@ func ClearAllAccountCache() {
 
 	buffLocalKey := rediskey.GetBuffLocalKey()
 	gredis.Del(buffLocalKey)
-	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1")
+	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1:80")
 	gredis.Del(steamLocalKey)
 
 	buffUserList, err := myDao.GetBuffUserList()
