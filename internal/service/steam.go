@@ -49,7 +49,7 @@ func GetSteamSell() {
 			go GetSteamSellData(0, &Ip, steamUser)
 			time.Sleep(2 * time.Second)
 		} else {
-			//fmt.Println("steam本地代理正在抓取中...")
+			fmt.Println("steam本地代理正在抓取中...")
 
 		}
 
@@ -72,7 +72,7 @@ func GetSteamSell() {
 			}
 		}
 		//没有找到可用代理
-		if oneIp.Ip == "" {
+		if oneIp == nil {
 			fmt.Println("没有可用代理")
 			time.Sleep(10 * time.Second)
 			continue
@@ -308,7 +308,6 @@ func GetSteamBuy() {
 		for {
 			if len(itemChan) <= 500 {
 				//读取所有商品 写入channel
-				runtime.GOMAXPROCS(runtime.NumCPU())
 				result, _ := myDao.GetAllInfoBySteamItemId()
 				for _, v := range result {
 					if v.SteamSellPrice >= 80 {

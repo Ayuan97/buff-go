@@ -149,12 +149,10 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 }
 
 // 清楚所有账号缓存
-func ClearAllAccountCache() {
+func ClearBuffSell() {
 
 	buffLocalKey := rediskey.GetBuffLocalKey()
 	gredis.Del(buffLocalKey)
-	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1:80")
-	gredis.Del(steamLocalKey)
 
 	buffUserList, err := myDao.GetBuffUserList()
 	if err != nil {
@@ -168,6 +166,16 @@ func ClearAllAccountCache() {
 		fmt.Sprintf("清除buff用户缓存成功,用户id:%d", buffUser.ID)
 	}
 
+	//清楚config 缓存
+	configKey := rediskey.GetConfigKey()
+	gredis.Del(configKey)
+	fmt.Println("清楚config缓存")
+
+}
+
+func ClearSteamSell() {
+	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1:80")
+	gredis.Del(steamLocalKey)
 	steamUserList, err := myDao.GetSteamUserList()
 	for _, steamUser := range steamUserList {
 		steamAccountKey := rediskey.GetSteamAccountKey(int(steamUser.ID))
@@ -195,5 +203,4 @@ func ClearAllAccountCache() {
 	configKey := rediskey.GetConfigKey()
 	gredis.Del(configKey)
 	fmt.Println("清楚config缓存")
-
 }

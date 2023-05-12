@@ -9,8 +9,7 @@ var Wg sync.WaitGroup
 
 func main() {
 
-	service.AutoGetSteamCookie()   //自动获取cookie
-	service.ClearAllAccountCache() //清楚所有账号缓存 和本地代理缓存
+	service.AutoGetSteamCookie() //自动获取cookie
 	Wg.Add(1)
 	//go func() {
 	//	for {
