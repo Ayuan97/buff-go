@@ -26,37 +26,35 @@ var rwInfo sync.RWMutex
 // buff 求购
 func GetBuffBuy() {
 	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
-	go func() {
-		for {
-			//查询buff抓取是否开启
-			config := myDao.GetOneSystemConfig(1)
-			if config.BuffBuyStatus == 0 {
-				//fmt.Println("buff抓取未开启")
-				time.Sleep(10 * time.Second)
-				continue
-			}
-			//查询本地代理和账号是否可用 可用则启动一个本地协程
-			//查询本地代理是否可用
-			buffLocalKey := rediskey.GetBuffLocalKey()
-			buffLocalResult := gredis.Get(buffLocalKey)
-			//查询账号是否可用
-			buffUser, err := myDao.GetOneBuffUser()
-			if err != nil {
-				time.Sleep(10 * time.Second)
-				continue
-			}
-			buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
-			buffAccountResult := gredis.Get(buffAccountKey)
-			if buffLocalResult == "" && buffAccountResult == "" {
-				//开启本地代理
-				go GetBuffBuyData(0, "", buffUser)
-				time.Sleep(2 * time.Second)
-			} else {
-				fmt.Println("buff本地代理正在抓取中...")
-			}
+	for {
+		//查询buff抓取是否开启
+		config := myDao.GetOneSystemConfig(1)
+		if config.BuffBuyStatus == 0 {
+			//fmt.Println("buff抓取未开启")
 			time.Sleep(10 * time.Second)
+			continue
 		}
-	}()
+		//查询本地代理和账号是否可用 可用则启动一个本地协程
+		//查询本地代理是否可用
+		buffLocalKey := rediskey.GetBuffLocalKey()
+		buffLocalResult := gredis.Get(buffLocalKey)
+		//查询账号是否可用
+		buffUser, err := myDao.GetOneBuffUser()
+		if err != nil {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
+		buffAccountResult := gredis.Get(buffAccountKey)
+		if buffLocalResult == "" && buffAccountResult == "" {
+			//开启本地代理
+			go GetBuffBuyData(0, "", buffUser)
+			time.Sleep(2 * time.Second)
+		} else {
+			fmt.Println("buff本地代理正在抓取中...")
+		}
+		time.Sleep(10 * time.Second)
+	}
 }
 
 // buff 求购数据
@@ -158,7 +156,7 @@ func handleBuffData(buffData BuffData) {
 	//查询缓存是否存在该商品
 	var InfoList []*model.Info
 	for _, v := range buffData.Result.Items {
-		//fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
+		fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
 		key := rediskey.GetCacheKey(v.MarketHashName)
 		//查询缓存
 		value, _ := gredis.HGetAll(key)
@@ -256,7 +254,7 @@ func GetBuffSell() {
 	go getSellProxy()
 
 	//从channel中取出代理 开启协程 读取信息
-	go getSellData()
+	getSellData()
 }
 
 // 出售 获取代理放入 channel
