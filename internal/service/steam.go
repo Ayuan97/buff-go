@@ -364,18 +364,18 @@ func GetSteamBuyData(info *model.Info) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println("buff err2:", err)
+		fmt.Println("steam err2:", err)
 		return
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("buff err3:", err)
+		fmt.Println("steam err3:", err)
 		return
 	}
 	var steamResp SteamSell
 	err = json.Unmarshal(body, &steamResp)
 	if err != nil {
-		fmt.Println("buff err4:", err)
+		fmt.Println("steam err4:", err)
 		return
 	}
 	if steamResp.Success == 1 {
