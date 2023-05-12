@@ -247,9 +247,7 @@ func GetBuffSell() {
 				}
 				fmt.Println("buff - sell - channel - 写入完毕", len(I))
 				rwInfo.Unlock()
-
 			}
-			//fmt.Println("buff -sell - len(I) - ", len(I))
 			time.Sleep(time.Second * 60)
 		}
 	}()

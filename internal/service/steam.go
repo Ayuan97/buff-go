@@ -316,6 +316,7 @@ func GetSteamBuy() {
 						itemChan <- v
 					}
 				}
+				fmt.Println("steam buy 通道写入完成 写入数量：", len(itemChan))
 			}
 			time.Sleep(time.Second * 2)
 		}
