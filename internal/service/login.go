@@ -102,7 +102,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 func AutoGetSteamCookie() {
 	go func() {
 		//每五分钟检测一次
-		ticker := time.NewTicker(2 * time.Minute)
+		ticker := time.NewTicker(1 * time.Minute)
 		for {
 			select {
 			case <-ticker.C:
@@ -115,6 +115,7 @@ func AutoGetSteamCookie() {
 					if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
 						fmt.Println("steam账号", v.Account, "状态为失效---", "开始登录")
 						cookie, err := LoginSteam(v.Account, v.Password)
+						fmt.Println("cookie", cookie)
 						if err != nil {
 							fmt.Println(err)
 							continue
