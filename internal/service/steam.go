@@ -34,7 +34,7 @@ func GetSteamSell() {
 			}
 			//查询本地代理和账号是否可用 可用则启动一个本地协程
 			//查询本地代理是否可用
-			steamProxyKey := rediskey.GetProxySteamKey("127.0.0.1")
+			steamProxyKey := rediskey.GetProxySteamKey("127.0.0.1:80")
 			steamLocalResult := gredis.Get(steamProxyKey)
 			//查询账号是否可用
 			steamUser, err := myDao.GetOneSteamUser(1)
