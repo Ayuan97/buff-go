@@ -158,7 +158,7 @@ func handleBuffData(buffData BuffData) {
 	//查询缓存是否存在该商品
 	var InfoList []*model.Info
 	for _, v := range buffData.Result.Items {
-		fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
+		//fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
 		key := rediskey.GetCacheKey(v.MarketHashName)
 		//查询缓存
 		value, _ := gredis.HGetAll(key)

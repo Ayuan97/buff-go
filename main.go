@@ -24,7 +24,7 @@ func main() {
 
 			num := runtime.NumGoroutine()
 			fmt.Println("当前协程数量：", num)
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Minute * 5)
 		}
 
 	}()

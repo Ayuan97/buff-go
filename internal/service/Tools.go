@@ -158,7 +158,7 @@ func ClearAllAccountCache() {
 
 	buffUserList, err := myDao.GetBuffUserList()
 	if err != nil {
-		fmt.Println("获取buff用户列表失败", err)
+		//fmt.Println("获取buff用户列表失败", err)
 		return
 	}
 	for _, buffUser := range buffUserList {

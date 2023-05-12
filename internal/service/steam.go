@@ -101,7 +101,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 	//修改状态
 	myDao.UpdateSteamUserStatus(int(account.ID), 1)
 	for {
-		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"), "isProxy:", isProxy, "Ip:", p, "account:", account.Account)
 		config := myDao.GetOneSystemConfig(1)
 		//循环N次 获取steam数据
 		var start = 0
@@ -206,7 +206,7 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 
 	for _, v := range steamData.Results {
 
-		fmt.Println("steam -sell - name:", v.Name, "| 价格:", v.SellPriceText, "| 数量:", v.SellListings)
+		//fmt.Println("steam -sell - name:", v.Name, "| 价格:", v.SellPriceText, "| 数量:", v.SellListings)
 		key := rediskey.GetCacheKey(v.AssetDescription.MarketHashName)
 		var Info model.Info
 		//查询缓存
