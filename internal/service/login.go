@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
+	"os"
 	"time"
 )
 
@@ -21,9 +22,9 @@ const (
 func LoginSteam() (*[]Cookie, error) {
 	// Start a WebDriver server instance
 	opts := []selenium.ServiceOption{
-		//selenium.Output(os.Stderr), // Output debug information to STDERR.
+		selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
-	//selenium.SetDebug(true)
+	selenium.SetDebug(true)
 	service, err := selenium.NewChromeDriverService(chromeDriverPathMaster, port, opts...)
 	if err != nil {
 		return nil, err

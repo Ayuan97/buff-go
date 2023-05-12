@@ -2,13 +2,18 @@ package main
 
 import (
 	"buff-go/internal/service"
+	"fmt"
 	"sync"
 )
 
 var Wg sync.WaitGroup
 
 func main() {
-	service.LoginSteam()
+	data, err := service.LoginSteam()
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(data)
 
 	//service.AutoGetSteamCookie() //自动获取cookie
 
