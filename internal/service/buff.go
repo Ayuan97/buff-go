@@ -31,7 +31,7 @@ func GetBuffBuy() {
 			//查询buff抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
 			if config.BuffBuyStatus == 0 {
-				fmt.Println("buff抓取未开启")
+				//fmt.Println("buff抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
 			}
@@ -70,11 +70,11 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 	//修改状态
 	myDao.UpdateBuffUserStatus(int(account.ID), 1)
 	for {
-		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"))
+		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"), "账号:", account.Account)
 		//循环N次 获取buff数据
 		config := myDao.GetOneSystemConfig(1) //系统配置
 		for i := 1; i <= config.BuffPageNum; i++ {
-			fmt.Println("buff page:", i)
+			//fmt.Println("buff page:", i)
 			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", i, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
@@ -266,7 +266,7 @@ func getSellProxy() {
 		config := myDao.GetOneSystemConfig(1)
 		if config.BuffSellStatus == 0 {
 			//buff 出售抓取关闭
-			fmt.Println("buff buy 出售抓取关闭")
+			//fmt.Println("buff buy 出售抓取关闭")
 			time.Sleep(time.Second * 10)
 			continue
 		}

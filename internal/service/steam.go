@@ -28,7 +28,7 @@ func GetSteamSell() {
 			//查询steam抓取是否开启
 			config := myDao.GetOneSystemConfig(1)
 			if config.SteamSellStatus == 0 {
-				fmt.Println("steam出售抓取未开启")
+				//fmt.Println("steam出售抓取未开启")
 				time.Sleep(10 * time.Second)
 				continue
 			}
@@ -305,7 +305,7 @@ func GetSteamBuy() {
 		for {
 			config := myDao.GetOneSystemConfig(1)
 			if config.SteamBuyStatus == 0 {
-				fmt.Println("steam 求购任务已关闭")
+				//fmt.Println("steam 求购任务已关闭")
 				time.Sleep(time.Second * 10)
 				continue
 			}
