@@ -50,7 +50,7 @@ func GetSteamSell() {
 				go GetSteamSellData(0, &Ip, steamUser)
 				time.Sleep(2 * time.Second)
 			} else {
-				fmt.Println("steam本地代理正在抓取中...")
+				//fmt.Println("steam本地代理正在抓取中...")
 
 			}
 
@@ -79,8 +79,8 @@ func GetSteamSell() {
 				//启动一个协程 使用代理
 				go GetSteamSellData(1, oneIp, account)
 			} else {
-				fmt.Println("proxyKey", proxyKey)
-				fmt.Println("accountKey", accountKey)
+				//fmt.Println("proxyKey", proxyKey)
+				//fmt.Println("accountKey", accountKey)
 				//fmt.Println("代理或账号正在抓取中", oneIp.Ip, account.Account)
 				time.Sleep(10 * time.Second)
 				continue
