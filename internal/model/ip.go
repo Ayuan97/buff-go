@@ -39,7 +39,7 @@ func (i *Ip) DeleteIp(db *gorm.DB) error {
 
 func (i *Ip) GetAllIp(db *gorm.DB) ([]*Ip, error) {
 	var ips []*Ip
-	err := db.Where("type = 1").Find(&ips).Error
+	err := db.Find(&ips).Error
 	if err != nil {
 		return nil, err
 	}

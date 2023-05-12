@@ -2,10 +2,7 @@ package main
 
 import (
 	"buff-go/internal/service"
-	"fmt"
-	"runtime"
 	"sync"
-	"time"
 )
 
 var Wg sync.WaitGroup
@@ -19,15 +16,15 @@ func main() {
 	service.GetSteamSell()         // steam 出售
 	service.GetBuffBuy()           //buff  求购
 	Wg.Add(1)
-	go func() {
-		for {
-
-			num := runtime.NumGoroutine()
-			fmt.Println("当前协程数量：", num)
-			time.Sleep(time.Minute * 5)
-		}
-
-	}()
-	time.Sleep(time.Second * 10)
+	//go func() {
+	//	for {
+	//
+	//		num := runtime.NumGoroutine()
+	//		fmt.Println("当前协程数量：", num)
+	//		time.Sleep(time.Minute * 5)
+	//	}
+	//
+	//}()
+	//time.Sleep(time.Second * 10)
 	Wg.Wait()
 }

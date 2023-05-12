@@ -54,13 +54,26 @@ func GetSteamSell() {
 
 			}
 
-			//查询是否有可用代理
-			oneIp, err := myDao.GetOneIp(2)
+			//获取所有代理
+			AllIp, err := myDao.GetAllIp()
 			if err != nil {
 				fmt.Println("没有可用代理")
 				time.Sleep(10 * time.Second)
 				continue
 			}
+			var oneIp *model.Ip
+			for _, v := range AllIp {
+				if v.Type == 2 && v.Country == 2 {
+					oneIp = v
+				}
+			}
+			//没有找到可用代理
+			if oneIp.Ip == "" {
+				fmt.Println("没有可用代理")
+				time.Sleep(10 * time.Second)
+				continue
+			}
+
 			proxyKey := rediskey.GetProxySteamKey(oneIp.Ip + ":" + strconv.Itoa(oneIp.Port))
 			proxyKeyResult := gredis.Get(proxyKey)
 
