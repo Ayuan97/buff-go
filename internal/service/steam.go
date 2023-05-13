@@ -179,12 +179,12 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			var SteamData SteamGoodsInfo
 			err = json.Unmarshal(body, &SteamData)
 			if err != nil {
-				fmt.Println("steam err4:", err)
+				fmt.Println("steam err4 代理:", p, "账号:", account.Account, "获取数据失败", "data:", SteamData)
 				endSteamTask(resp, account, 0, 1, p, 0)
 				return
 			}
 			if SteamData.Success == false {
-				fmt.Println("steam err6:", SteamData)
+				fmt.Println("steam err6 代理:", p, "账号:", account.Account, "获取数据失败", "data:", SteamData)
 				endSteamTask(resp, account, 0, 1, p, 0)
 			}
 
@@ -203,7 +203,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 					}
 				}
 			} else {
-				fmt.Println("steam err7:", SteamData)
+				fmt.Println("steam err7 代理:", p, "账号:", account.Account, "获取数据失败", "data:", SteamData)
 				//结束协程
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1, p, 0)
