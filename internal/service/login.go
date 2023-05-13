@@ -93,6 +93,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("获取到的cookie", cookies)
 	for _, v := range cookies {
 		CookieList = append(CookieList, &Cookie{Name: v.Name, Value: v.Value})
 	}
@@ -115,7 +116,6 @@ func AutoGetSteamCookie() {
 					if (v.Status == 2 || v.Status == 3) && v.Type == 1 {
 						fmt.Println("steam账号", v.Account, "状态为失效---", "开始登录")
 						cookie, err := LoginSteam(v.Account, v.Password)
-						fmt.Println("cookie", cookie)
 						if err != nil {
 							fmt.Println(err)
 							continue
