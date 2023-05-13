@@ -184,7 +184,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				return
 			}
 			if SteamData.Success == false {
-				fmt.Println("steam err6 代理:", p, "账号:", account.Account, "获取数据失败", "data:", SteamData)
+				fmt.Println("steam err6 代理:", p, "账号:", account.Account, "获取数据失败", "body:", string(body))
 				endSteamTask(resp, account, 0, 1, p, 0)
 			}
 
