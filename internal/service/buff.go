@@ -222,7 +222,9 @@ func handleBuffData(buffData BuffData) {
 		}
 	}
 	fmt.Println("len(InfoList):", len(InfoList))
-	fmt.Println("InfoList: json", InfoList)
+	//打印json
+	jsonStr, _ := json.Marshal(InfoList)
+	fmt.Println("jsonStr:", string(jsonStr))
 	if len(InfoList) > 0 {
 		//更新数据库
 		myDao.BatchBuffUpdateInfo(InfoList)
