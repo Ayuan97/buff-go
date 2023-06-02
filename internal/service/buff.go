@@ -130,7 +130,7 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 				endTask(resp, account, 2, 1)
 			}
 			if buffData.Code == "OK" {
-				fmt.Println("buff page:", config.BuffPageNum, "页")
+				fmt.Println("buff page:", i, "页")
 				go handleBuffData(buffData)
 			} else {
 				fmt.Println("buff err6:", buffData)
