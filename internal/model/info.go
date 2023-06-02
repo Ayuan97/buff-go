@@ -2,7 +2,6 @@ package model
 
 import (
 	"buff-go/global"
-	"fmt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -54,13 +53,10 @@ func (g *Info) Create(db *gorm.DB, info *Info) bool {
 
 // 批量更新商品信息 - buff
 func (g *Info) BatchBuffUpdate(db *gorm.DB, info []*Info) bool {
-	err := db.Clauses(clause.OnConflict{
+	db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "market_hash_name"}},
 		DoUpdates: clause.AssignmentColumns([]string{"buff_buy_price", "buff_buy_num", "goods_id", "buff_buy_update", "icon_url"}),
-	}).Create(&info).Error
-	if err != nil {
-		fmt.Println("BatchBuffUpdate err: ", err)
-	}
+	}).Create(&info)
 	return true
 }
 func (g *Info) BatchSteamUpdate(db *gorm.DB, info []*Info) bool {

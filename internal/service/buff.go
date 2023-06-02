@@ -221,10 +221,7 @@ func handleBuffData(buffData BuffData) {
 			CheckPriceChange(key, 1, value)
 		}
 	}
-	fmt.Println("len(InfoList):", len(InfoList))
-	//打印json
-	jsonStr, _ := json.Marshal(InfoList)
-	fmt.Println("jsonStr:", string(jsonStr))
+
 	if len(InfoList) > 0 {
 		//更新数据库
 		myDao.BatchBuffUpdateInfo(InfoList)
