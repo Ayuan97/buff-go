@@ -162,7 +162,6 @@ func handleBuffData(buffData BuffData) {
 		//查询缓存
 		value, _ := gredis.HGetAll(key)
 		var Info model.Info
-		fmt.Println("len(value):", len(value))
 		if len(value) == 0 {
 			//缓存不存在
 			//查询数据库
@@ -212,7 +211,6 @@ func handleBuffData(buffData BuffData) {
 			InfoList = append(InfoList, &Info)
 
 		}
-		fmt.Println("time:", int(time.Now().Unix()))
 		//插入缓存
 		gredis.Hset(key, "buff_buy_price", v.BuyMaxPrice)
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
@@ -224,6 +222,7 @@ func handleBuffData(buffData BuffData) {
 		}
 	}
 	fmt.Println("len(InfoList):", len(InfoList))
+	fmt.Println("InfoList: json", InfoList)
 	if len(InfoList) > 0 {
 		//更新数据库
 		myDao.BatchBuffUpdateInfo(InfoList)
