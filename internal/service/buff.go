@@ -212,6 +212,7 @@ func handleBuffData(buffData BuffData) {
 			InfoList = append(InfoList, &Info)
 
 		}
+		fmt.Println("time:", int(time.Now().Unix()))
 		//插入缓存
 		gredis.Hset(key, "buff_buy_price", v.BuyMaxPrice)
 		gredis.Hset(key, "buff_buy_num", v.BuyNum)
