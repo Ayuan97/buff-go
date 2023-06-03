@@ -127,7 +127,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 		}
 		//更新商品信息
 
-		if (checkType == 1 || checkType == 4) && num != 0.0 && data["market_hash_name"] != "" {
+		if (checkType == 1 || checkType == 4) && data["market_hash_name"] != "" {
 			p := fmt.Sprintf("%.2f", num)
 			//myDao.UpdateInfoBuffProportion(data["market_hash_name"], util.StringToFloat64(p))
 			var info model.Info
