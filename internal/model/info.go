@@ -138,3 +138,13 @@ func (g *Info) UpdateSteamProportion(db *gorm.DB, info *Info) error {
 	}
 	return nil
 }
+
+//根据 market_hash_name 更新商品信息
+func (g *Info) UpdateInfoByMarketHashName(db *gorm.DB, info *Info) error {
+	err := db.Model(&Info{}).Where("market_hash_name = ?", info.MarketHashName).Updates(info).Error
+	if err != nil {
+		global.Logger.Errorf("UpdateInfoByMarketHashName err: %v", err)
+		return err
+	}
+	return nil
+}

@@ -1,11 +1,13 @@
 package service
 
 import (
+	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
 	"buff-go/pkg/util"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 type CacheData struct {
@@ -123,11 +125,26 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 				}
 			}
 		}
-		//更新比例
+		//更新商品信息
+
 		if (checkType == 1 || checkType == 4) && num != 0.0 && data["market_hash_name"] != "" {
 			p := fmt.Sprintf("%.2f", num)
-			//更新比例
-			myDao.UpdateInfoBuffProportion(data["market_hash_name"], util.StringToFloat64(p))
+			//myDao.UpdateInfoBuffProportion(data["market_hash_name"], util.StringToFloat64(p))
+			var info model.Info
+			changeTime := time.Now().Unix()
+			info.MarketHashName = data["market_hash_name"]
+			info.BuffProportion = util.StringToFloat64(p)
+			if checkType == 1 {
+				info.BuffBuyPrice = util.StringToFloat64(data["buff_buy_price"])
+				info.BuffBuyNum = util.StringToInt(data["buff_buy_num"])
+				info.BuffBuyUpdate = int(changeTime)
+			} else {
+				info.SteamSellPrice = util.StringToFloat64(data["steam_sell_price"])
+				info.SteamSellNum = util.StringToInt(data["steam_sell_num"])
+				info.SteamSellUpdate = int(changeTime)
+			}
+			myDao.UpdateInfoByMarketHashName(&info)
+
 		} else {
 			p := fmt.Sprintf("%.2f", num)
 			myDao.UpdateInfoSteamProportion(data["market_hash_name"], util.StringToFloat64(p))

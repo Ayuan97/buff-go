@@ -71,3 +71,8 @@ func (d *Dao) UpdateInfoSteamProportion(name string, p float64) error {
 	info.SteamProportion = p
 	return info.UpdateSteamProportion(d.engine, &info)
 }
+
+//根据market_hash_name更新商品信息
+func (d *Dao) UpdateInfoByMarketHashName(info *model.Info) error {
+	return info.UpdateInfoByMarketHashName(d.engine, info)
+}

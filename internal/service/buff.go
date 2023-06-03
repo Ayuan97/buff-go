@@ -155,7 +155,6 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 func handleBuffData(buffData BuffData) {
 	//批量更新buff数据 不存在的话就插入
 	//查询缓存是否存在该商品
-	var InfoList []*model.Info
 	for _, v := range buffData.Result.Items {
 		fmt.Println("buff - buy - name:", v.Name, "| 价格:", v.BuyMaxPrice, "| 数量:", v.BuyNum)
 		key := rediskey.GetCacheKey(v.MarketHashName)
@@ -198,18 +197,6 @@ func handleBuffData(buffData BuffData) {
 			}
 
 			InitGoodCache(c)
-		} else {
-			//缓存存在
-			//批量更新数据
-			Info.Name = v.Name
-			Info.MarketHashName = v.MarketHashName
-			Info.BuffBuyPrice = util.StringToFloat64(v.BuyMaxPrice) //buff 购买价格
-			Info.BuffBuyNum = v.BuyNum                              //buff 购买数量
-			Info.GoodsId = v.Id
-			Info.IconUrl = v.GoodsInfo.OriginalIconUrl
-			Info.BuffBuyUpdate = int(time.Now().Unix())
-			InfoList = append(InfoList, &Info)
-
 		}
 		//插入缓存
 		gredis.Hset(key, "buff_buy_price", v.BuyMaxPrice)
@@ -220,11 +207,6 @@ func handleBuffData(buffData BuffData) {
 		if len(value) > 0 {
 			CheckPriceChange(key, 1, value)
 		}
-	}
-
-	if len(InfoList) > 0 {
-		//更新数据库
-		myDao.BatchBuffUpdateInfo(InfoList)
 	}
 
 }
