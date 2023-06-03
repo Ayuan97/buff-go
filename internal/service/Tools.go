@@ -147,7 +147,20 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 
 		} else {
 			p := fmt.Sprintf("%.2f", num)
-			myDao.UpdateInfoSteamProportion(data["market_hash_name"], util.StringToFloat64(p))
+			var info model.Info
+			changeTime := time.Now().Unix()
+			info.MarketHashName = data["market_hash_name"]
+			info.SteamProportion = util.StringToFloat64(p)
+			if checkType == 2 {
+				info.BuffSellPrice = util.StringToFloat64(data["buff_sell_price"])
+				info.BuffSellNum = util.StringToInt(data["buff_sell_num"])
+				info.BuffSellUpdate = int(changeTime)
+			} else {
+				info.SteamBuyPrice = util.StringToFloat64(data["steam_buy_price"])
+				info.SteamBuyNum = util.StringToInt(data["steam_buy_num"])
+				info.SteamBuyUpdate = int(changeTime)
+			}
+			myDao.UpdateInfoByMarketHashName(&info)
 		}
 
 		//is_push 是否存在

@@ -224,7 +224,6 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 
 // 处理steam数据
 func handleSteamSellData(steamData SteamGoodsInfo) {
-	var InfoList []*model.Info
 
 	for _, v := range steamData.Results {
 
@@ -265,15 +264,7 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 			InitGoodCache(c)
 		} else {
 			//缓存存在
-			//批量更新数据
-
-			Info.SteamSellPrice = util.IntToFloat64(v.SellPrice) / 100 //buff 出售价格
-			Info.SteamSellNum = v.SellListings                         //buff 出售数量
-			Info.MarketHashName = v.AssetDescription.MarketHashName
-			Info.Name = v.Name
-			Info.SteamSellUpdate = int(time.Now().Unix())
-			InfoList = append(InfoList, &Info)
-			//插入缓存
+			//更新缓存
 			gredis.Hset(key, "steam_sell_price", util.IntToFloat64(v.SellPrice)/100)
 			gredis.Hset(key, "steam_sell_num", v.SellListings)
 			gredis.Hset(key, "name", v.Name)
@@ -283,10 +274,7 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 			//比对价格是否有变动
 			CheckPriceChange(key, 4, value)
 		}
-		if len(InfoList) > 0 {
-			//批量更新数据库
-			myDao.BatchSteamUpdateInfo(InfoList)
-		}
+
 	}
 }
 
