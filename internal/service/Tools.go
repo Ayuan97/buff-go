@@ -41,7 +41,6 @@ func InitGoodCache(c CacheData) {
 	gredis.Hset(c.Key, "buff_goods_id", c.id)
 	gredis.Hset(c.Key, "is_push", "1")
 	gredis.Hset(c.Key, "is_buy", "1")
-
 }
 
 // CheckPriceChange 检查价格是否有变动
@@ -167,9 +166,12 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 		if data["is_push"] == "" {
 			data["is_push"] = "1"
 		}
+		//更新时间相差大于一个小时不推送
 		if data["is_push"] == "1" {
 			if (checkType == 1 || checkType == 4) && (num >= config.BotBuffProportion && num != 0.0) {
-				send(data)
+				if util.StringToInt(data["buff_buy_update"])-util.StringToInt(data["steam_sell_update"]) < 60*60 {
+					send(data)
+				}
 			} else if (checkType == 2 || checkType == 3) && (num <= config.BotSteamProportion && num != 0.0) {
 				send(data)
 			}
@@ -181,8 +183,12 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 // 清楚所有账号缓存
 func ClearBuffSell() {
 
-	buffLocalKey := rediskey.GetBuffLocalKey()
-	gredis.Del(buffLocalKey)
+	ips, _ := myDao.GetBuffIps()
+	for _, ip := range ips {
+		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
+		key := rediskey.GetProxyMapKey(address, "buff")
+		gredis.Del(key)
+	}
 
 	buffUserList, err := myDao.GetBuffUserList()
 	if err != nil {
@@ -190,8 +196,6 @@ func ClearBuffSell() {
 		return
 	}
 	for _, buffUser := range buffUserList {
-		buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
-		gredis.Del(buffAccountKey)
 		myDao.UpdateBuffUserStatus(int(buffUser.ID), 0)
 		fmt.Sprintf("清除buff用户缓存成功,用户id:%d", buffUser.ID)
 	}
@@ -204,9 +208,14 @@ func ClearBuffSell() {
 }
 
 func ClearSteamSell() {
-	steamLocalKey := rediskey.GetProxySteamKey("127.0.0.1:80")
-	gredis.Del(steamLocalKey)
-	steamUserList, err := myDao.GetSteamUserList()
+	ips, _ := myDao.GetBuffIps()
+	for _, ip := range ips {
+		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
+		key := rediskey.GetProxyMapKey(address, "steam")
+		gredis.Del(key)
+	}
+
+	steamUserList, _ := myDao.GetSteamUserList()
 	for _, steamUser := range steamUserList {
 		steamAccountKey := rediskey.GetSteamAccountKey(int(steamUser.ID))
 		fmt.Println("清除:", steamAccountKey)
@@ -216,21 +225,27 @@ func ClearSteamSell() {
 
 	}
 
-	ipsList, err := myDao.GetAllPrivateIp()
-	if err != nil {
-		fmt.Println("获取私有ip列表失败", err)
-		return
-	}
-	for _, ip := range ipsList {
-		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
-		key := rediskey.GetProxySteamKey(address)
-		fmt.Println("清除:", key)
-		gredis.Del(key)
-
-	}
-
 	//清楚config 缓存
 	configKey := rediskey.GetConfigKey()
 	gredis.Del(configKey)
 	fmt.Println("清楚config缓存")
+}
+
+// 获取一个没有在用的代理
+// 1->buff 2->steam
+func GetOneProxy(source string) (*model.Ip, string, string, error) {
+	ips, err := myDao.GetBuffIps()
+	if err != nil {
+		return nil, "", "", err
+	}
+	for _, ip := range ips {
+		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
+		key := rediskey.GetProxyMapKey(address, source)
+		value := gredis.Get(key)
+		fmt.Println("key:", key, "value:", value)
+		if value == "" {
+			return ip, address, key, nil
+		}
+	}
+	return nil, "", "", nil
 }

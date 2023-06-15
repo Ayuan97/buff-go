@@ -85,3 +85,13 @@ func (i *Ip) GetAllPrivateIp(db *gorm.DB) ([]*Ip, error) {
 	}
 	return ips, nil
 }
+
+// buff 获取所有代理 country = 1 or country = 3
+func (i *Ip) GetBuffIps(db *gorm.DB) ([]*Ip, error) {
+	var ips []*Ip
+	err := db.Where("country = 1 or country = 3").Find(&ips).Error
+	if err != nil {
+		return nil, err
+	}
+	return ips, nil
+}

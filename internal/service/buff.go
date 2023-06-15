@@ -23,56 +23,49 @@ var proxyBuyChan = make(chan string, 1000)
 var rwProxy sync.RWMutex
 var rwInfo sync.RWMutex
 
+//------------------------------------------- buff 求购 -------------------------------------------
+
 // buff 求购
 func GetBuffBuy() {
-	//每5秒扫描一次 查询是否有可用代理 和 可用账号 如果有则启动一个协程
 	for {
 		//查询buff抓取是否开启
 		config := myDao.GetOneSystemConfig(1)
 		if config.BuffBuyStatus == 0 {
-			//fmt.Println("buff抓取未开启")
-			time.Sleep(10 * time.Second)
+			fmt.Println("buff抓取未开启")
+			time.Sleep(30 * time.Second)
 			continue
 		}
-		//查询本地代理和账号是否可用 可用则启动一个本地协程
-		//查询本地代理是否可用
-		buffLocalKey := rediskey.GetBuffLocalKey()
-		buffLocalResult := gredis.Get(buffLocalKey)
+
 		//查询账号是否可用
 		buffUser, err := myDao.GetOneBuffUser()
 		if err != nil {
 			time.Sleep(10 * time.Second)
 			continue
 		}
-		buffAccountKey := rediskey.GetBuffAccountKey(int(buffUser.ID))
-		buffAccountResult := gredis.Get(buffAccountKey)
-		if buffLocalResult == "" && buffAccountResult == "" {
-			//开启本地代理
-			go GetBuffBuyData(0, "", buffUser)
-			time.Sleep(2 * time.Second)
+		//获取一个代理
+		fmt.Println("user", buffUser)
+		ip, address, key, _ := GetOneProxy("buff")
+		if address != "" {
+			myDao.UpdateBuffUserStatus(int(buffUser.ID), 1)
+			fmt.Println("账号", buffUser.Account)
+			gredis.Set(key, buffUser.ID, 0)
+			fmt.Println("代理", ip)
+			go GetBuffBuyData(1, address, buffUser, key)
 		} else {
-			fmt.Println("buff本地代理正在抓取中...")
+			fmt.Println("无可用代理")
+			time.Sleep(10 * time.Second)
 		}
-		time.Sleep(10 * time.Second)
+
 	}
 }
 
 // buff 求购数据
-func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
-	//设置本地代理正在抓取中
-	buffLocalKey := rediskey.GetBuffLocalKey()
-	gredis.Set(buffLocalKey, "1", 0)
-	//设置账号正在抓取中
-	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
-	gredis.Set(buffAccountKey, "1", 0)
-	//修改状态
-	myDao.UpdateBuffUserStatus(int(account.ID), 1)
+func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey string) {
 	for {
-		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"), "账号:", account.Account)
+		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"), "账号:", account.Account, "代理:", proxy)
 		//循环N次 获取buff数据
 		config := myDao.GetOneSystemConfig(1) //系统配置
 		for i := 1; i <= config.BuffPageNum; i++ {
-			//fmt.Println("buff page:", i)
 			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=csgo&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", i, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理
@@ -87,10 +80,8 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 				fmt.Println("buff err: 发起请求失败", err)
 				//结束协程
 				fmt.Println("结束协程")
-				//设置本地代理抓取结束
-				gredis.Del(buffLocalKey)
-				//设置账号抓取结束
-				gredis.Del(buffAccountKey)
+				//设置代理抓取结束
+				gredis.Del(proxyKey)
 				myDao.UpdateBuffUserStatus(int(account.ID), 0)
 				runtime.Goexit()
 				return
@@ -103,31 +94,33 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 			req.AddCookie(&http.Cookie{Name: "session", Value: account.Sessionid})
 			resp, err := client.Do(req)
 			if err != nil {
-				fmt.Println("buff err2:", err)
-				endTask2(account, 0, 1)
+				fmt.Println("buff err1:", err)
+				gredis.Del(proxyKey)
+				myDao.UpdateBuffUserStatus(int(account.ID), 0)
+				runtime.Goexit()
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				fmt.Println("buff err3:", err)
+				fmt.Println("buff err2:", err)
 				//结束协程
-				endTask(resp, account, 0, 1)
+				endTask(resp, account, 0, 1, proxyKey)
 				return
 			}
 			var buffData BuffData
 			err = json.Unmarshal(body, &buffData)
 			if err != nil {
-				fmt.Println("buff err4:", err)
-				endTask(resp, account, 0, 1)
+				fmt.Println("buff err3:", err)
+				endTask(resp, account, 0, 1, proxyKey)
 				return
 			}
 			if buffData.Code == "Action Forbidden" {
-				fmt.Println("buff err6:", buffData.Code)
-				endTask(resp, account, 3, 1)
+				fmt.Println("buff err4:", buffData.Code)
+				endTask(resp, account, 3, 1, proxyKey)
 			}
 			if buffData.Code == "Login Required" {
-				fmt.Println("buff err7:", buffData)
-				endTask(resp, account, 2, 1)
+				fmt.Println("buff err5:", buffData)
+				endTask(resp, account, 2, 1, proxyKey)
 			}
 			if buffData.Code == "OK" {
 				fmt.Println("buff page:", i, "页")
@@ -136,11 +129,11 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser) {
 				fmt.Println("buff err6:", buffData)
 				//结束协程
 				fmt.Println("结束协程")
-				endTask(resp, account, 0, 1)
+				endTask(resp, account, 0, 1, proxyKey)
 			}
 			config = myDao.GetOneSystemConfig(1) //系统配置
 			if config.BuffBuyStatus == 0 {
-				endTask(resp, account, 0, 1)
+				endTask(resp, account, 0, 1, proxyKey)
 				return
 			}
 			//每次请求间隔
@@ -204,12 +197,17 @@ func handleBuffData(buffData BuffData) {
 		gredis.Hset(key, "buff_goods_id", v.Id)
 		gredis.Hset(key, "name", v.Name)
 		gredis.Hset(key, "market_hash_name", v.MarketHashName)
+		gredis.Hset(key, "buff_buy_update", time.Now().Unix())
 		if len(value) > 0 {
 			CheckPriceChange(key, 1, value)
 		}
 	}
 
 }
+
+//------------------------------------------- buff 求购 -------------------------------------------
+
+// ------------------------------------------- buff 出售 -------------------------------------------
 
 // buff 出售channel 添加数据
 func GetBuffSell() {
@@ -388,31 +386,12 @@ func httpproxy() (Ip, error) {
 
 }
 
-// 结束任务
-func endTask(resp *http.Response, account model.BuffUser, status int, taskType int) {
-	buffLocalKey := rediskey.GetBuffLocalKey()
-	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
-	resp.Body.Close()
-	//设置本地代理抓取结束
-	gredis.Del(buffLocalKey)
-	//设置账号抓取结束
-	gredis.Del(buffAccountKey)
-	//设置账号状态
-	myDao.UpdateBuffUserStatus(int(account.ID), status)
-	if taskType == 1 {
-		runtime.Goexit()
-	}
-}
+// -------------------------------------------- buff 出售 --------------------------------------------
 
 // 结束任务
-func endTask2(account model.BuffUser, status int, taskType int) {
-	buffLocalKey := rediskey.GetBuffLocalKey()
-	buffAccountKey := rediskey.GetBuffAccountKey(int(account.ID))
-	//设置本地代理抓取结束
-	gredis.Del(buffLocalKey)
-	//设置账号抓取结束
-	gredis.Del(buffAccountKey)
-	//设置账号状态
+func endTask(resp *http.Response, account model.BuffUser, status int, taskType int, proxyKey string) {
+	resp.Body.Close()
+	gredis.Del(proxyKey)
 	myDao.UpdateBuffUserStatus(int(account.ID), status)
 	if taskType == 1 {
 		runtime.Goexit()

@@ -52,3 +52,9 @@ func (d *Dao) GetIpCount() int64 {
 	var ip model.Ip
 	return ip.CountIps(d.engine)
 }
+
+// buff获取代理
+func (d *Dao) GetBuffIps() ([]*model.Ip, error) {
+	var ip model.Ip
+	return ip.GetBuffIps(d.engine)
+}

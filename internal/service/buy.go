@@ -57,11 +57,11 @@ func BuySteam() {
 	)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	client := &http.Client{}
-	req.AddCookie(&http.Cookie{Name: "steamCountry", Value: "HK%7C8ad7d7ea3737e06297549f92142430ad"})
+	req.AddCookie(&http.Cookie{Name: "steamCountry", Value: "HK|8ad7d7ea3737e06297549f92142430ad"})
 	req.AddCookie(&http.Cookie{Name: "timezoneOffset", Value: "28800,0"})
 	req.AddCookie(&http.Cookie{Name: "browserid", Value: "2640834275499774739"})
 	req.AddCookie(&http.Cookie{Name: "Steam_Language", Value: "schinese"})
-	req.AddCookie(&http.Cookie{Name: "steamLoginSecure", Value: "76561199029489705%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MTY2M18yMjg1Q0VEQ19FQThEMSIsICJzdWIiOiAiNzY1NjExOTkwMjk0ODk3MDUiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY4NDQ4ODA0NywgIm5iZiI6IDE2NzU3NjA0NzUsICJpYXQiOiAxNjg0NDAwNDc1LCAianRpIjogIjBEMjBfMjI4REE3MjRfQjNGQjAiLCAib2F0IjogMTY4Mzg4NDU4NiwgInJ0X2V4cCI6IDE3MDE3NDU2ODYsICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.YzoOBVA9xYvJ9xlC5ubZWDaXXXPkOIWVLOov5XUdervEE7fEefHbAoqi7shtwbLzXopALxG4Zk2yosRm4l7HAA"})
+	req.AddCookie(&http.Cookie{Name: "steamLoginSecure", Value: "76561199226843106||eyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyAiaXNzIjogInI6MEQzNl8yMjk2RTIxMV9ENjg2NCIsICJzdWIiOiAiNzY1NjExOTkyMjY4NDMxMDYiLCAiYXVkIjogWyAid2ViIiBdLCAiZXhwIjogMTY4NTE3NTQ5MywgIm5iZiI6IDE2NzY0NDgwNzAsICJpYXQiOiAxNjg1MDg4MDcwLCAianRpIjogIjBEMzJfMjI5NkUyMERfRTc5MkYiLCAib2F0IjogMTY4NTA4ODA2OSwgInJ0X2V4cCI6IDE3MDM0MjE2MzksICJwZXIiOiAwLCAiaXBfc3ViamVjdCI6ICIxMDMuMjIwLjc5LjExMCIsICJpcF9jb25maXJtZXIiOiAiMTAzLjIyMC43OS4xMTAiIH0.e5SO73npAWiKuvmz56WYPwHr9JYww6TWdC4u9bnd0JvZzZkKY_Z7M96DN2bvQngWi0pg6KbzU4_1QnOAFiwCBQ"})
 	req.AddCookie(&http.Cookie{Name: "sessionid", Value: "43503aff060fc38f5d65bc97"})
 	resp, err := client.Do(req)
 	if resp != nil {

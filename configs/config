@@ -11,10 +11,10 @@ Log: # 日志
   LogFileExt: .log
 Database: # 数据库
   DBType: mysql
-  Username: root # 填写你的数据库账号
-  Password: root # 填写你的数据库密码
-  Host: 127.0.0.1:3306
-  DBName: buff-go
+  Username: buff_go	# 填写你的数据库账号
+  Password: iWTrtdjnAFPc3SGN # 填写你的数据库密码
+  Host: 47.243.117.122:3306
+  DBName: buff_go
   TablePrefix: bf_
   Charset: utf8mb4
   ParseTime: True

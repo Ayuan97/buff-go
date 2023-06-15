@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+const Proxy = "proxy:%s:%s"
 const ProxyMap = "proxy:list:map:%d" //代理池
 const GetbuffKey = "get:buff:key"
 const GetSteamItemIdKey = "get:steamItemId:key"
@@ -18,6 +19,12 @@ const BuffLocalKey = "buff:local:key"
 const SteamLocalKey = "steam:local:key"
 const ProxySteamKey = "proxy:steam:key:%s"
 const IpKey = "ip:key:%s"
+
+// 获取代理是否在使用中
+// source 1 buff 2 steam
+func GetProxyMapKey(ip string, source string) string {
+	return fmt.Sprintf(Proxy, ip, source)
+}
 
 // 设置ip
 func GetIpKey(ip string) string {
