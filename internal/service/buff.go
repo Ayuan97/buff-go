@@ -200,11 +200,12 @@ func handleBuffData(buffData BuffData) {
 		if len(value) > 0 {
 			//lpush 价格变动队列
 			listKey := rediskey.CheckPriceList()
+			a, _ := json.Marshal(value)
 			var data map[string]interface{}
 			data = make(map[string]interface{})
 			data["key"] = key
 			data["type"] = 1
-			data["value"] = value
+			data["value"] = a
 			jsonStr, _ := json.Marshal(data)
 			gredis.LPush(listKey, jsonStr)
 		}
