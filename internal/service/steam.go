@@ -213,8 +213,16 @@ func handleSteamSellData(steamData SteamGoodsInfo) {
 			gredis.Hset(key, "steam_sell_update", time.Now().Unix())
 		}
 		if len(value) > 0 {
-			//比对价格是否有变动
-			CheckPriceChange(key, 4, value)
+			//lpush 价格变动队列
+			listKey := rediskey.CheckPriceList()
+			a, _ := json.Marshal(value)
+			var data map[string]interface{}
+			data = make(map[string]interface{})
+			data["key"] = key
+			data["type"] = 4
+			data["value"] = a
+			jsonStr, _ := json.Marshal(data)
+			gredis.LPush(listKey, jsonStr)
 		}
 
 	}

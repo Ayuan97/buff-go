@@ -188,7 +188,6 @@ func handleBuffData(buffData BuffData) {
 				SteamSellPrice: 0,
 				SteamSellNum:   0,
 			}
-
 			InitGoodCache(c)
 		}
 		//插入缓存
@@ -199,7 +198,15 @@ func handleBuffData(buffData BuffData) {
 		gredis.Hset(key, "market_hash_name", v.MarketHashName)
 		gredis.Hset(key, "buff_buy_update", time.Now().Unix())
 		if len(value) > 0 {
-			CheckPriceChange(key, 1, value)
+			//lpush 价格变动队列
+			listKey := rediskey.CheckPriceList()
+			var data map[string]interface{}
+			data = make(map[string]interface{})
+			data["key"] = key
+			data["type"] = 1
+			data["value"] = value
+			jsonStr, _ := json.Marshal(data)
+			gredis.LPush(listKey, jsonStr)
 		}
 	}
 
