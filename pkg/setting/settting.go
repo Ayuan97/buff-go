@@ -89,7 +89,7 @@ func NewSetting() (*Setting, error) {
 	} else {
 		vp.SetConfigName("config")
 		vp.AddConfigPath(".")
-		vp.AddConfigPath("configs/")
+		vp.AddConfigPath("../configs/")
 		vp.SetConfigType("yaml")
 	}
 
