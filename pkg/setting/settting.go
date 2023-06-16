@@ -86,6 +86,11 @@ func NewSetting() (*Setting, error) {
 	err := vp.ReadInConfig()
 	if err != nil {
 		return nil, err
+	} else {
+		vp.SetConfigName("config")
+		vp.AddConfigPath(".")
+		vp.AddConfigPath("configs/")
+		vp.SetConfigType("yaml")
 	}
 
 	return &Setting{vp}, nil
