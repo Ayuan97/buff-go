@@ -43,7 +43,7 @@ func processQueue(queueName string, wg *sync.WaitGroup) {
 				fmt.Println("checkPrice -2", d.Key, d.CheckType, err)
 				continue
 			}
-			//fmt.Println("name", value["name"], "type", d.CheckType)
+			fmt.Println("name", value["name"], "type", d.CheckType)
 			service.CheckPriceChange(d.Key, d.CheckType, value)
 		}
 	}
