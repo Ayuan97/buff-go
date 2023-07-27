@@ -9,6 +9,11 @@ const CheckPrice = "check:price:list"
 const Proxy = "proxy:%s:%s"
 const ConfigKey = "get:config:key"
 const IpKey = "ip:key:%s"
+const autobuysteam = "auto:buy:steam"
+
+func AutoBuySteam() string {
+	return autobuysteam
+}
 
 func CheckPriceList() string {
 	return CheckPrice

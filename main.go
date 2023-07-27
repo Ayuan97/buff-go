@@ -46,6 +46,15 @@ func processQueue(queueName string, wg *sync.WaitGroup) {
 			fmt.Println("name", value["name"], "type", d.CheckType)
 			service.CheckPriceChange(d.Key, d.CheckType, value)
 		}
+	case rediskey.AutoBuySteam():
+		//自动购买
+		for {
+			str, err := gredis.RPop(queueName)
+			if str == "" || err != nil {
+				time.Sleep(time.Second * 5)
+				continue
+			}
+		}
 	}
 
 }
@@ -62,6 +71,13 @@ func main() {
 		wg.Add(1)
 		go processQueue(rediskey.CheckPriceList(), &wg)
 	}
+
+	//autobuysteam := 1
+	////自动购买队列
+	//for i := 0; i < autobuysteam; i++ {
+	//	wg.Add(1)
+	//	go processQueue(rediskey.AutoBuySteam(), &wg)
+	//}
 
 	// 等待所有协程完成
 	wg.Wait()

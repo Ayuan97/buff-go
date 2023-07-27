@@ -170,6 +170,7 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 		if data["is_push"] == "1" {
 			if (checkType == 1 || checkType == 4) && (num >= config.BotBuffProportion && num != 0.0) {
 				if util.StringToInt(data["buff_buy_update"])-util.StringToInt(data["steam_sell_update"]) < 60*60 {
+					fmt.Println("buff:name:", data["market_hash_name"], "buff_buy_update:", data["buff_buy_update"], "steam_sell_update:", data["steam_sell_update"], "is_push:", data["is_push"])
 					send(data)
 				}
 			} else if (checkType == 2 || checkType == 3) && (num <= config.BotSteamProportion && num != 0.0) {
