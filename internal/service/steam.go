@@ -107,7 +107,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 			resp, err := client.Do(req)
 			if err != nil {
 				fmt.Println("steam err2:", err)
-				endSteamTask(resp, account, 0, 1, address, 1, 0)
+				endSteamTask(resp, account, 0, 1, address, 0, 0)
 				return
 			}
 			body, err := ioutil.ReadAll(resp.Body)
