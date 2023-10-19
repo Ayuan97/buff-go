@@ -240,7 +240,7 @@ func endSteamTask(resp *http.Response, account model.SteamUser, status int, task
 		gredis.Del(steamProxyKey)
 	} else if proxyStatus == 1 {
 		//代理失效 设置半小时 不可用
-		gredis.Set(steamProxyKey, "请求频繁", 1800)
+		gredis.Set(steamProxyKey, "请求频繁", time.Duration(60)*time.Second)
 	}
 
 	//设置账号状态
