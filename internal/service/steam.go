@@ -87,7 +87,14 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 		for i := 1; i <= config.SteamPageNum; i++ {
 			system = myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				break
+				//结束协程
+				fmt.Println("结束协程")
+				//设置代理抓取结束
+				gredis.Del(key)
+
+				myDao.UpdateSteamUserStatus(int(account.ID), 0)
+				runtime.Goexit()
+				return
 			}
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=%d&norender=1&currency=23", start, appid)
 			start = start + 100
