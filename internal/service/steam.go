@@ -27,11 +27,19 @@ func GetSteamSell() {
 		//查询当前的抓取项目
 		var config model.Config
 		system := myDao.GetOneSystem(1)
+		//获取当前要抓取的项目
+		var game string
+		var appid string
 		if system.SystemType == 1 {
 			config = myDao.GetOneSystemConfig(1) //csgo
+			game = "csgo"
+			appid = "730"
 		} else {
 			config = myDao.GetOneSystemConfig(2) //dota2
+			game = "dota2"
+			appid = "570"
 		}
+
 		if config.SteamSellStatus == 0 {
 			fmt.Println("steam出售抓取未开启")
 			time.Sleep(10 * time.Second)
@@ -52,7 +60,7 @@ func GetSteamSell() {
 			fmt.Println("账号", steamUser.Account)
 			gredis.Set(key, steamUser.ID, 0)
 			fmt.Println("代理", ip)
-			go GetSteamSellData(1, ip, steamUser)
+			go GetSteamSellData(1, ip, steamUser, game, appid, config)
 			time.Sleep(10 * time.Second)
 		} else {
 			fmt.Println("无可用代理")
@@ -63,30 +71,18 @@ func GetSteamSell() {
 
 }
 
-func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
+func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser, game string, appid string, config model.Config) {
 	address := Ip.Ip + ":" + strconv.Itoa(Ip.Port)
 	key := rediskey.GetProxyMapKey(address, "steam")
 	for {
 		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"), "isProxy:", isProxy, "Ip:", address, "account:", account.Account)
-		//获取当前要抓取的项目
-		system := myDao.GetOneSystem(1)
-		//获取系统配置
-		var config model.Config
-		var appid string
-		if system.SystemType == 1 {
-			config = myDao.GetOneSystemConfig(1) //csgo
-			appid = "730"
-		} else {
-			config = myDao.GetOneSystemConfig(2) //dota2
-			appid = "570"
-		}
 		//循环N次 获取steam数据
 		var start = 0
 		for i := 1; i <= config.SteamPageNum; i++ {
-			//判断当前抓取项目还是否是当前项目
-			system = myDao.GetOneSystem(1)
+			system := myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				//结束本次抓取
+				//查询新的config
+				config = myDao.GetOneSystemConfig(system.SystemType)
 				break
 			}
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=%d&norender=1&currency=23", start, appid)
@@ -156,13 +152,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 
 			if SteamData.Success {
 				if len(SteamData.Results) > 0 && strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
-					var game string
-					if appid == "730" {
-						game = "csgo"
-					} else {
-						game = "dota2"
-					}
-					go handleSteamSellData(SteamData, game)
+					go handleSteamSellData(SteamData, game, appid)
 				} else {
 					if len(SteamData.Results) > 0 && strings.Contains(SteamData.Results[0].SellPriceText, "$") {
 						fmt.Println("steam err5:", "不是人民币->data", SteamData)
@@ -195,7 +185,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 }
 
 // 处理steam数据
-func handleSteamSellData(steamData SteamGoodsInfo, game string) {
+func handleSteamSellData(steamData SteamGoodsInfo, game string, appid string) {
 
 	for _, v := range steamData.Results {
 
@@ -233,6 +223,8 @@ func handleSteamSellData(steamData SteamGoodsInfo, game string) {
 				SteamBuyNum:    0,
 				SteamSellPrice: float64(v.SellPrice) / 100,
 				SteamSellNum:   v.SellListings,
+				game:           game,
+				appid:          appid,
 			}
 			InitGoodCache(c)
 		} else {

@@ -23,6 +23,8 @@ type CacheData struct {
 	SteamBuyNum    int
 	SteamSellPrice float64
 	SteamSellNum   int
+	game           string
+	appid          string
 }
 
 // 初始化该商品的缓存
@@ -46,17 +48,15 @@ func InitGoodCache(c CacheData) {
 // CheckPriceChange 检查价格是否有变动
 // checkType 1 buff-求购 2 buff-出售 3 steam-求购 4 steam-出售
 func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
-	//获取当前要抓取的项目
-	system := myDao.GetOneSystem(1)
+	//获取 key 的所有 hget
+	data, _ := gredis.HGetAll(key)
 	//获取系统配置
 	var config model.Config
-	if system.SystemType == 1 {
+	if data["game"] == "csgo" {
 		config = myDao.GetOneSystemConfig(1) //csgo
 	} else {
 		config = myDao.GetOneSystemConfig(2) //dota2
 	}
-	//获取 key 的所有 hget
-	data, _ := gredis.HGetAll(key)
 	if data != nil && len(data) > 0 {
 		num := 0.0
 		//计算比例
