@@ -30,17 +30,11 @@ func GetBuffBuy() {
 	for {
 		//查询当前的抓取项目
 		var config model.Config
-		var game string
-		var appid string
 		system := myDao.GetOneSystem(1)
 		if system.SystemType == 1 {
 			config = myDao.GetOneSystemConfig(1) //csgo
-			game = "csgo"
-			appid = "730"
 		} else {
 			config = myDao.GetOneSystemConfig(2) //dota2
-			game = "dota2"
-			appid = "570"
 		}
 		if config.BuffBuyStatus == 0 {
 			fmt.Println("buff抓取未开启")
@@ -62,7 +56,7 @@ func GetBuffBuy() {
 			fmt.Println("账号", buffUser.Account)
 			gredis.Set(key, buffUser.ID, 0)
 			fmt.Println("代理", ip)
-			go GetBuffBuyData(1, address, buffUser, key, game, appid, config)
+			go GetBuffBuyData(1, address, buffUser, key)
 			//sleep 10秒
 			time.Sleep(10 * time.Second)
 		} else {
@@ -74,15 +68,26 @@ func GetBuffBuy() {
 }
 
 // buff 求购数据
-func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey string, game string, appid string, config model.Config) {
+func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey string) {
 	for {
 		fmt.Println("buff start:", time.Now().Format("2006-01-02 15:04:05"), "账号:", account.Account, "代理:", proxy)
+		system := myDao.GetOneSystem(1)
+		var config model.Config
+		var game string
+		var appid string
+		if system.SystemType == 1 {
+			config = myDao.GetOneSystemConfig(1) //csgo
+			game = "csgo"
+			appid = "730"
+		} else {
+			config = myDao.GetOneSystemConfig(2) //dota2
+			game = "dota2"
+			appid = "570"
+		}
 		for i := 1; i <= config.BuffPageNum; i++ {
 			//判断当前抓取项目还是否是当前项目
-			system := myDao.GetOneSystem(1)
+			system = myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				//查询新的config
-				config = myDao.GetOneSystemConfig(system.SystemType)
 				break
 			}
 			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=%v&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", game, i, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
@@ -150,7 +155,7 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey 
 				fmt.Println("结束协程")
 				endTask(resp, account, 0, 1, proxyKey)
 			}
-			config = myDao.GetOneSystemConfig(1) //系统配置
+			config = myDao.GetOneSystemConfig(system.SystemType) //系统配置
 			if config.BuffBuyStatus == 0 {
 				endTask(resp, account, 0, 1, proxyKey)
 				return

@@ -27,17 +27,10 @@ func GetSteamSell() {
 		//查询当前的抓取项目
 		var config model.Config
 		system := myDao.GetOneSystem(1)
-		//获取当前要抓取的项目
-		var game string
-		var appid string
 		if system.SystemType == 1 {
 			config = myDao.GetOneSystemConfig(1) //csgo
-			game = "csgo"
-			appid = "730"
 		} else {
 			config = myDao.GetOneSystemConfig(2) //dota2
-			game = "dota2"
-			appid = "570"
 		}
 
 		if config.SteamSellStatus == 0 {
@@ -60,7 +53,7 @@ func GetSteamSell() {
 			fmt.Println("账号", steamUser.Account)
 			gredis.Set(key, steamUser.ID, 0)
 			fmt.Println("代理", ip)
-			go GetSteamSellData(1, ip, steamUser, game, appid, config)
+			go GetSteamSellData(1, ip, steamUser)
 			time.Sleep(10 * time.Second)
 		} else {
 			fmt.Println("无可用代理")
@@ -71,18 +64,29 @@ func GetSteamSell() {
 
 }
 
-func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser, game string, appid string, config model.Config) {
+func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 	address := Ip.Ip + ":" + strconv.Itoa(Ip.Port)
 	key := rediskey.GetProxyMapKey(address, "steam")
 	for {
 		fmt.Println("steam start:", time.Now().Format("2006-01-02 15:04:05"), "isProxy:", isProxy, "Ip:", address, "account:", account.Account)
 		//循环N次 获取steam数据
+		system := myDao.GetOneSystem(1)
+		var config model.Config
+		var game string
+		var appid string
+		if system.SystemType == 1 {
+			config = myDao.GetOneSystemConfig(1) //csgo
+			game = "csgo"
+			appid = "730"
+		} else {
+			config = myDao.GetOneSystemConfig(2) //dota2
+			game = "dota2"
+			appid = "570"
+		}
 		var start = 0
 		for i := 1; i <= config.SteamPageNum; i++ {
-			system := myDao.GetOneSystem(1)
+			system = myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				//查询新的config
-				config = myDao.GetOneSystemConfig(system.SystemType)
 				break
 			}
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=%d&norender=1&currency=23", start, appid)
