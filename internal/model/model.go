@@ -27,7 +27,7 @@ func NewDBEngine(databaseSetting *setting.DatabaseSettingS) (*gorm.DB, error) {
 		global.Logger, // io writer（日志输出的目标，前缀和日志包含的内容）
 		logger.Config{
 			SlowThreshold:             time.Second, // 慢 SQL 阈值
-			LogLevel:                  2,           // 日志级别
+			LogLevel:                  1,           // 日志级别
 			IgnoreRecordNotFoundError: true,        // 忽略ErrRecordNotFound（记录未找到）错误
 			Colorful:                  false,       // 禁用彩色打印
 		},

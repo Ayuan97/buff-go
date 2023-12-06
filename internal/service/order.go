@@ -16,7 +16,7 @@ func BuffBuyInfo(buffData Response, info *model.Info) {
 	//获取buff商品信息成功
 	//更新缓存
 	goodInfo := buffData.Data.GoodsInfos[strconv.Itoa(info.GoodsId)]
-	InfoKey := rediskey.GetCacheKey(goodInfo.MarketHashName)
+	InfoKey := rediskey.GetCacheKey(goodInfo.MarketHashName, info.Game)
 	minPrice := 99999999.99
 	////删除上一次的订单
 	//err := myDao.DeleteOrderByGoodsId(info.GoodsId)

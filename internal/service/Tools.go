@@ -44,10 +44,17 @@ func InitGoodCache(c CacheData) {
 }
 
 // CheckPriceChange 检查价格是否有变动
-// checkType 1 buff-buy 2 buff-sell 3 steam-buy 4 steam-sell
+// checkType 1 buff-求购 2 buff-出售 3 steam-求购 4 steam-出售
 func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
-	config := myDao.GetOneSystemConfig(1)
-
+	//获取当前要抓取的项目
+	system := myDao.GetOneSystem(1)
+	//获取系统配置
+	var config model.Config
+	if system.SystemType == 1 {
+		config = myDao.GetOneSystemConfig(1) //csgo
+	} else {
+		config = myDao.GetOneSystemConfig(2) //dota2
+	}
 	//获取 key 的所有 hget
 	data, _ := gredis.HGetAll(key)
 	if data != nil && len(data) > 0 {
@@ -202,7 +209,9 @@ func ClearBuffSell() {
 	}
 
 	//清楚config 缓存
-	configKey := rediskey.GetConfigKey()
+	configKey := rediskey.GetConfigKey(1)
+	gredis.Del(configKey)
+	configKey = rediskey.GetConfigKey(2)
 	gredis.Del(configKey)
 	fmt.Println("清楚config缓存")
 
@@ -227,7 +236,9 @@ func ClearSteamSell() {
 	}
 
 	//清楚config 缓存
-	configKey := rediskey.GetConfigKey()
+	configKey := rediskey.GetConfigKey(1)
+	gredis.Del(configKey)
+	configKey = rediskey.GetConfigKey(2)
 	gredis.Del(configKey)
 	fmt.Println("清楚config缓存")
 }

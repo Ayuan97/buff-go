@@ -1,13 +1,12 @@
 package rediskey
 
 import (
-	"buff-go/pkg/util"
 	"fmt"
 )
 
 const CheckPrice = "check:price:list"
 const Proxy = "proxy:%s:%s"
-const ConfigKey = "get:config:key"
+const ConfigKey = "get:config:key:%d"
 const IpKey = "ip:key:%s"
 const autobuysteam = "auto:buy:steam"
 
@@ -31,10 +30,10 @@ func GetIpKey(ip string) string {
 }
 
 // 商品缓存
-func GetCacheKey(name string) string {
+func GetCacheKey(name string, game string) string {
 	//将名称转换为md5字符串
-	str := util.StringToMD5(name)
-	return fmt.Sprintf("goods:cache:key:%s", str)
+	//str := util.StringToMD5(name)
+	return fmt.Sprintf("goods-%s:cache:key:%s", game, name)
 }
 
 // 查询steam账号是否在使用中 - steam
@@ -42,6 +41,6 @@ func GetSteamAccountKey(id int) string {
 	return fmt.Sprintf("steam:account:key:%d", id)
 }
 
-func GetConfigKey() string {
-	return ConfigKey
+func GetConfigKey(id int) string {
+	return fmt.Sprintf(ConfigKey, id)
 }

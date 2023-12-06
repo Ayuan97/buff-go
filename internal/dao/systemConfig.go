@@ -11,7 +11,7 @@ import (
 // GetSteamConfig 获取steam配置
 func (d *Dao) GetOneSystemConfig(id int64) model.Config {
 	//设置缓存
-	key := rediskey.GetConfigKey()
+	key := rediskey.GetConfigKey(int(id))
 	value := gredis.Get(key)
 	if value == "" {
 		s := model.Config{

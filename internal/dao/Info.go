@@ -10,21 +10,15 @@ func (d *Dao) GetOneInfoByMarketHashName(name string) (*model.Info, error) {
 	return info.GetInfoByMarketHashName(d.engine, name)
 }
 
+//根据goods_id查询商品信息
+func (d *Dao) GetOneInfoByGoodsId(goodsId int) (*model.Info, error) {
+	var info model.Info
+	return info.GetInfoByGoodsId(d.engine, goodsId)
+}
+
 // 插入商品信息
 func (d *Dao) CreateInfo(info *model.Info) bool {
 	return info.Create(d.engine, info)
-}
-
-// 批量更新商品信息 - buff
-func (d *Dao) BatchBuffUpdateInfo(infoList []*model.Info) bool {
-	var info model.Info
-	return info.BatchBuffUpdate(d.engine, infoList)
-}
-
-// 批量更新商品信息 - steam
-func (d *Dao) BatchSteamUpdateInfo(infoList []*model.Info) bool {
-	var info model.Info
-	return info.BatchSteamUpdate(d.engine, infoList)
 }
 
 // 获取所有商品信息

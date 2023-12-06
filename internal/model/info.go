@@ -33,12 +33,22 @@ type Info struct {
 	SteamSellUpdate int     `json:"steam_sell_update"`
 }
 
+//根据goods_id 查询单个商品信息
+func (g *Info) GetInfoByGoodsId(db *gorm.DB, goodsId int) (*Info, error) {
+	var info Info
+	err := db.Where("goods_id = ?", goodsId).First(&info).Error
+	if err != nil {
+		//global.Logger.Errorf("GetInfoByGoodsId err: %v", err)
+		return nil, err
+	}
+	return &info, nil
+}
+
 // 查询 单个MarketHashName
 func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Info, error) {
 	var info Info
 	err := db.Where("market_hash_name = ?", marketHashName).First(&info).Error
 	if err != nil {
-		global.Logger.Errorf("GetInfoByMarketHashName err: %v", err)
 		return nil, err
 	}
 	return &info, nil
@@ -46,8 +56,11 @@ func (g *Info) GetInfoByMarketHashName(db *gorm.DB, marketHashName string) (*Inf
 
 // 插入商品信息
 func (g *Info) Create(db *gorm.DB, info *Info) bool {
-	db.Create(&info)
-
+	err := db.Create(&info).Error
+	if err != nil {
+		global.Logger.Errorf("Create err: %v", err)
+		return false
+	}
 	return true
 }
 
