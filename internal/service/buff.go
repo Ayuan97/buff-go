@@ -58,7 +58,7 @@ func GetBuffBuy() {
 			fmt.Println("代理", ip)
 			go GetBuffBuyData(1, address, buffUser, key)
 			//sleep 10秒
-			time.Sleep(10 * time.Second)
+			time.Sleep(60 * time.Second)
 		} else {
 			fmt.Println("无可用代理")
 			time.Sleep(10 * time.Second)
