@@ -83,6 +83,12 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 		//循环N次 获取steam数据
 		var start = 0
 		for i := 1; i <= config.SteamPageNum; i++ {
+			//判断当前抓取项目还是否是当前项目
+			system = myDao.GetOneSystem(1)
+			if system.SystemType != config.ID {
+				//结束本次抓取
+				break
+			}
 			geturl := fmt.Sprintf("https://steamcommunity.com/market/search/render/?query=&start=%v&count=100&search_descriptions=0&sort_column=price&sort_dir=desc&appid=%d&norender=1&currency=23", start, appid)
 			start = start + 100
 			client := &http.Client{}

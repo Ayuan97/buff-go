@@ -84,6 +84,12 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey 
 			game = "dota2"
 		}
 		for i := 1; i <= config.BuffPageNum; i++ {
+			//判断当前抓取项目还是否是当前项目
+			system = myDao.GetOneSystem(1)
+			if system.SystemType != config.ID {
+				//结束本次抓取
+				break
+			}
 			geturl := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=%v&page_num=%v&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%v", game, i, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
 			client := &http.Client{}
 			//isProxy 设置代理

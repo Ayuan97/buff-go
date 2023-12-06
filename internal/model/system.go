@@ -4,7 +4,7 @@ import "gorm.io/gorm"
 
 type System struct {
 	*Model
-	SystemType int `json:"system_type"`
+	SystemType int64 `json:"system_type"`
 }
 
 // 根据id  获取单个配置
