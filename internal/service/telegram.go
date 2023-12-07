@@ -19,7 +19,7 @@ func send(data map[string]string) {
 	//tgbotapi.NewMessage(-842545535, "开始推送")
 
 	if data["change_type"] == "1" || data["change_type"] == "4" {
-		str := "%s" + "- %s" + "\n\r" +
+		str := "%s" + " - %s" + "\n\r" +
 			"<b>%s</b>" + "\n\r" +
 			"<u>buff求购:%s</u>" + "                " + "<u>buff出售:%s</u>" + "\n\r" +
 			"<u>steam出售:%s</u>" + "                " + "<u>steam求购:%s</u>" + "\n\r" +
@@ -37,7 +37,7 @@ func send(data map[string]string) {
 		//url 编码
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
 		steamUrl := "https://steamcommunity.com/market/listings/" + data["appid"] + "/" + url.PathEscape(data["market_hash_name"])
-		changeName := data["change_name"]
+		changeName := data["change_name"] + " " + data["game"]
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
 			upTime,
