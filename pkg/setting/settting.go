@@ -79,7 +79,7 @@ type JWTSettingS struct {
 
 func NewSetting() (*Setting, error) {
 	vp := viper.New()
-	vp.SetConfigName("config_dev")
+	vp.SetConfigName("config")
 	vp.AddConfigPath(".")
 	vp.AddConfigPath("configs/")
 	vp.SetConfigType("yaml")
