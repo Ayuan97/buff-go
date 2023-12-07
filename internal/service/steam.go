@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,7 +55,7 @@ func GetSteamSell() {
 			gredis.Set(key, steamUser.ID, 0)
 			fmt.Println("代理", ip)
 			go GetSteamSellData(1, ip, steamUser)
-			time.Sleep(60 * time.Second)
+			time.Sleep(10 * time.Second)
 		} else {
 			fmt.Println("无可用代理")
 			time.Sleep(10 * time.Second)
@@ -73,25 +74,26 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 		system := myDao.GetOneSystem(1)
 		var config model.Config
 		var game string
-		var appid string
+		var appid int
 		if system.SystemType == 1 {
 			config = myDao.GetOneSystemConfig(1) //csgo
 			game = "csgo"
-			appid = "730"
+			appid = 730
 		} else {
 			config = myDao.GetOneSystemConfig(2) //dota2
 			game = "dota2"
-			appid = "570"
+			appid = 570
 		}
 		var start = 0
+		var wg sync.WaitGroup
 		for i := 1; i <= config.SteamPageNum; i++ {
 			system = myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				//结束协程
-				fmt.Println("结束协程")
-				//设置代理抓取结束
+				fmt.Println("steam : 当前抓取项目已变更")
+				fmt.Println("等待协程结束")
+				wg.Wait()
+				fmt.Println("协程结束")
 				gredis.Del(key)
-
 				myDao.UpdateSteamUserStatus(int(account.ID), 0)
 				runtime.Goexit()
 				return
@@ -163,7 +165,8 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 
 			if SteamData.Success {
 				if len(SteamData.Results) > 0 && strings.Contains(SteamData.Results[0].SellPriceText, "¥") {
-					go handleSteamSellData(SteamData, game, appid)
+					wg.Add(1)
+					go handleSteamSellData(&wg, SteamData, game, appid)
 				} else {
 					if len(SteamData.Results) > 0 && strings.Contains(SteamData.Results[0].SellPriceText, "$") {
 						fmt.Println("steam err5:", "不是人民币->data", SteamData)
@@ -181,7 +184,7 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 				fmt.Println("结束协程")
 				endSteamTask(resp, account, 0, 1, address, 0, 0)
 			}
-			config = myDao.GetOneSystemConfig(1)
+			config = myDao.GetOneSystemConfig(system.SystemType) //系统配置
 			if config.SteamSellStatus == 0 {
 				//结束协程
 				fmt.Println("结束协程")
@@ -196,8 +199,8 @@ func GetSteamSellData(isProxy int, Ip *model.Ip, account model.SteamUser) {
 }
 
 // 处理steam数据
-func handleSteamSellData(steamData SteamGoodsInfo, game string, appid string) {
-
+func handleSteamSellData(wg *sync.WaitGroup, steamData SteamGoodsInfo, game string, appid int) {
+	defer wg.Done()
 	for _, v := range steamData.Results {
 
 		fmt.Println("steam -sell - name:", v.Name, "| 价格:", v.SellPriceText, "| 数量:", v.SellListings)
@@ -217,6 +220,7 @@ func handleSteamSellData(steamData SteamGoodsInfo, game string, appid string) {
 				Info.SteamSellNum = v.SellListings               //steam 出售数量
 				Info.Name = v.Name
 				Info.Game = game
+				Info.Appid = appid
 				//插入数据库
 				myDao.CreateInfo(&Info)
 			}
@@ -236,6 +240,7 @@ func handleSteamSellData(steamData SteamGoodsInfo, game string, appid string) {
 				SteamSellNum:   v.SellListings,
 				game:           game,
 				appid:          appid,
+				IconUrl:        "",
 			}
 			InitGoodCache(c)
 		} else {

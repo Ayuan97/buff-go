@@ -24,7 +24,8 @@ type CacheData struct {
 	SteamSellPrice float64
 	SteamSellNum   int
 	game           string
-	appid          string
+	appid          int
+	IconUrl        string
 }
 
 // 初始化该商品的缓存
@@ -43,6 +44,9 @@ func InitGoodCache(c CacheData) {
 	gredis.Hset(c.Key, "buff_goods_id", c.id)
 	gredis.Hset(c.Key, "is_push", "1")
 	gredis.Hset(c.Key, "is_buy", "1")
+	gredis.Hset(c.Key, "game", c.game)
+	gredis.Hset(c.Key, "icon_url", c.IconUrl)
+	gredis.Hset(c.Key, "goods_id", strconv.Itoa(c.id))
 }
 
 // CheckPriceChange 检查价格是否有变动
@@ -144,6 +148,8 @@ func CheckPriceChange(key string, checkType int, oldValue map[string]string) {
 				info.BuffBuyPrice = util.StringToFloat64(data["buff_buy_price"])
 				info.BuffBuyNum = util.StringToInt(data["buff_buy_num"])
 				info.BuffBuyUpdate = int(changeTime)
+				info.IconUrl = data["icon_url"]
+				info.GoodsId = util.StringToInt(data["goods_id"])
 			} else {
 				info.SteamSellPrice = util.StringToFloat64(data["steam_sell_price"])
 				info.SteamSellNum = util.StringToInt(data["steam_sell_num"])

@@ -74,24 +74,24 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey 
 		system := myDao.GetOneSystem(1)
 		var config model.Config
 		var game string
-		var appid string
+		var appid int
 		if system.SystemType == 1 {
 			config = myDao.GetOneSystemConfig(1) //csgo
 			game = "csgo"
-			appid = "730"
+			appid = 730
 		} else {
 			config = myDao.GetOneSystemConfig(2) //dota2
 			game = "dota2"
-			appid = "570"
+			appid = 570
 		}
+		var wg sync.WaitGroup
 		for i := 1; i <= config.BuffPageNum; i++ {
 			//判断当前抓取项目还是否是当前项目
 			system = myDao.GetOneSystem(1)
 			if system.SystemType != config.ID {
-				fmt.Println("buff err: 当前抓取项目已变更")
-				//结束协程
-				fmt.Println("结束协程")
-				//设置代理抓取结束
+				fmt.Println("buff : 当前抓取项目已变更")
+				fmt.Println("等待协程结束")
+				wg.Wait()
 				gredis.Del(proxyKey)
 				myDao.UpdateBuffUserStatus(int(account.ID), 0)
 				runtime.Goexit()
@@ -155,7 +155,8 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey 
 			}
 			if buffData.Code == "OK" {
 				fmt.Println("buff page:", i, "页")
-				go handleBuffData(buffData, game, appid)
+				wg.Add(1)
+				go handleBuffData(&wg, buffData, game, appid)
 			} else {
 				fmt.Println("buff err6:", buffData)
 				//结束协程
@@ -176,7 +177,8 @@ func GetBuffBuyData(isProxy int, proxy string, account model.BuffUser, proxyKey 
 }
 
 // 处理buff求购数据
-func handleBuffData(buffData BuffData, game string, appid string) {
+func handleBuffData(wg *sync.WaitGroup, buffData BuffData, game string, appid int) {
+	defer wg.Done()
 	//批量更新buff数据 不存在的话就插入
 	//查询缓存是否存在该商品
 	for _, v := range buffData.Result.Items {
@@ -220,6 +222,7 @@ func handleBuffData(buffData BuffData, game string, appid string) {
 				SteamSellNum:   0,
 				game:           v.Game,
 				appid:          appid,
+				IconUrl:        v.GoodsInfo.OriginalIconUrl,
 			}
 			InitGoodCache(c)
 		}
@@ -230,6 +233,8 @@ func handleBuffData(buffData BuffData, game string, appid string) {
 		gredis.Hset(key, "name", v.Name)
 		gredis.Hset(key, "market_hash_name", v.MarketHashName)
 		gredis.Hset(key, "buff_buy_update", time.Now().Unix())
+		gredis.Hset(key, "goods_id", v.Id)
+		gredis.Hset(key, "icon_url", v.GoodsInfo.OriginalIconUrl)
 		if len(value) > 0 {
 			//lpush 价格变动队列
 			listKey := rediskey.CheckPriceList()

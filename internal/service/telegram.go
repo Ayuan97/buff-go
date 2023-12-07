@@ -36,7 +36,7 @@ func send(data map[string]string) {
 		Proportion := data["proportion"]
 		//url 编码
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
-		steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(data["market_hash_name"])
+		steamUrl := "https://steamcommunity.com/market/listings/" + url.PathEscape(data["appid"]) + "/" + url.PathEscape(data["market_hash_name"])
 		changeName := data["change_name"]
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
