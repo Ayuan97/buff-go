@@ -36,7 +36,7 @@ func send(data map[string]string) {
 		Proportion := data["proportion"]
 		//url 编码
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=buying"
-		steamUrl := "https://steamcommunity.com/market/listings/" + url.PathEscape(data["appid"]) + "/" + url.PathEscape(data["market_hash_name"])
+		steamUrl := "https://steamcommunity.com/market/listings/" + data["appid"] + "/" + url.PathEscape(data["market_hash_name"])
 		changeName := data["change_name"]
 		//替换模板中的变量
 		text := fmt.Sprintf(str,
@@ -74,7 +74,7 @@ func send(data map[string]string) {
 		changeName := data["change_name"]
 		//url 编码
 		buffUrl := "https://buff.163.com/goods/" + data["buff_goods_id"] + "?from=market#tab=selling"
-		steamUrl := "https://steamcommunity.com/market/listings/730/" + url.PathEscape(data["market_hash_name"])
+		steamUrl := "https://steamcommunity.com/market/listings/" + data["appid"] + "/" + url.PathEscape(data["market_hash_name"])
 
 		steamBuyPriceFold := fmt.Sprintf("%.2f", util.StringToFloat64(data["steam_buy_price"])*0.87)
 
