@@ -251,6 +251,7 @@ func handleSteamSellData(wg *sync.WaitGroup, steamData SteamGoodsInfo, game stri
 			gredis.Hset(key, "name", v.Name)
 			gredis.Hset(key, "market_hash_name", v.AssetDescription.MarketHashName)
 			gredis.Hset(key, "steam_sell_update", time.Now().Unix())
+			gredis.Hset(key, "appid", appid)
 		}
 		if len(value) > 0 {
 			//lpush 价格变动队列

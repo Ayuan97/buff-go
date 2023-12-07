@@ -47,6 +47,7 @@ func InitGoodCache(c CacheData) {
 	gredis.Hset(c.Key, "game", c.game)
 	gredis.Hset(c.Key, "icon_url", c.IconUrl)
 	gredis.Hset(c.Key, "goods_id", strconv.Itoa(c.id))
+	gredis.Hset(c.Key, "appid", strconv.Itoa(c.appid))
 }
 
 // CheckPriceChange 检查价格是否有变动

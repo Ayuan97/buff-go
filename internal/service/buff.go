@@ -235,6 +235,7 @@ func handleBuffData(wg *sync.WaitGroup, buffData BuffData, game string, appid in
 		gredis.Hset(key, "buff_buy_update", time.Now().Unix())
 		gredis.Hset(key, "goods_id", v.Id)
 		gredis.Hset(key, "icon_url", v.GoodsInfo.OriginalIconUrl)
+		gredis.Hset(key, "appid", appid)
 		if len(value) > 0 {
 			//lpush 价格变动队列
 			listKey := rediskey.CheckPriceList()
