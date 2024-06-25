@@ -13,7 +13,7 @@ Database: # 数据库
   DBType: mysql
   Username: buff	# 填写你的数据库账号
   Password: yTaThejCCBd7eJmH # 填写你的数据库密码
-  Host: 47.243.190.164:3306
+  Host: 127.0.0.1:3306
   DBName: buff
   TablePrefix: bf_
   Charset: utf8mb4
