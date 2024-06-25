@@ -18,7 +18,7 @@ type Cookie struct {
 
 const (
 	chromeDriverPathLocal  = "autoGetSteamCookie/chromedriver_local"
-	chromeDriverPathMaster = "/www/wwwroot/go/src/buff-go/autoGetSteamCookie/chromedriver_local"
+	chromeDriverPathMaster = "/www/wwwroot/go/src/buff-go/autoGetSteamCookie/chromedriver"
 	port                   = 8080
 )
 
