@@ -64,7 +64,7 @@ func main() {
 	wg.Add(1)
 
 	// 定义最大协程数量
-	checkPrice := 1
+	checkPrice := 3
 
 	//价格更新队列
 	for i := 0; i < checkPrice; i++ {
