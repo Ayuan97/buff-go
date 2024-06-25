@@ -26,6 +26,7 @@ func processQueue(queueName string, wg *sync.WaitGroup) {
 		for {
 			str, err := gredis.RPop(queueName)
 			if str == "" || err != nil {
+				fmt.Println("拉取队列:", queueName)
 				time.Sleep(time.Second * 5)
 				continue
 			}
