@@ -18,7 +18,7 @@ type Cookie struct {
 
 const (
 	chromeDriverPathLocal  = "autoGetSteamCookie/chromedriver_local"
-	chromeDriverPathMaster = "autoGetSteamCookie/chromedriver"
+	chromeDriverPathMaster = "/www/wwwroot/go/src/buff-go/autoGetSteamCookie/chromedriver_local"
 	port                   = 8080
 )
 
@@ -28,7 +28,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 		//selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
 	//selenium.SetDebug(true)
-	service, err := selenium.NewChromeDriverService(chromeDriverPathLocal, port, opts...)
+	service, err := selenium.NewChromeDriverService(chromeDriverPathMaster, port, opts...)
 	if err != nil {
 		return nil, err
 	}
