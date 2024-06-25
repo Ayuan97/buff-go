@@ -27,7 +27,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	opts := []selenium.ServiceOption{
 		//selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
-	//selenium.SetDebug(true)
+	selenium.SetDebug(true)
 	service, err := selenium.NewChromeDriverService(chromeDriverPathMaster, port, opts...)
 	if err != nil {
 		return nil, err
