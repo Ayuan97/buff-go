@@ -27,8 +27,8 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	opts := []selenium.ServiceOption{
 		//selenium.Output(os.Stderr), // Output debug information to STDERR.
 	}
-	selenium.SetDebug(true)
-	service, err := selenium.NewChromeDriverService(chromeDriverPathMaster, port, opts...)
+	//selenium.SetDebug(true)
+	service, err := selenium.NewChromeDriverService(chromeDriverPathLocal, port, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	}
 	//添加 --headless
 	chromeCaps.Args = append(chromeCaps.Args, "--headless")
-	chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
+	//chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
 	chromeCaps.Args = append(chromeCaps.Args, "--no-sandbox")
 
 	caps.AddChrome(chromeCaps)
@@ -59,8 +59,8 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	}
 	//等待页面加载完成
 	time.Sleep(5 * time.Second)
-	//找到 class 为 newlogindialog_TextInput_2eKVn type 为 text 的元素
-	elem, err := wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_TextInput_2eKVn[type=text]")
+	//找到 class 为 _2eKVn6g5Yysx9JmutQe7WV type 为 text 的元素
+	elem, err := wd.FindElement(selenium.ByCSSSelector, "._2eKVn6g5Yysx9JmutQe7WV[type=text]")
 	if err != nil {
 		return nil, err
 	}
@@ -68,8 +68,8 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	if err := elem.SendKeys(name); err != nil {
 		return nil, err
 	}
-	//找到 class 为 newlogindialog_TextInput_2eKVn type 为 password 的元素
-	elem, err = wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_TextInput_2eKVn[type=password]")
+	//找到 class 为 _2eKVn6g5Yysx9JmutQe7WV type 为 password 的元素
+	elem, err = wd.FindElement(selenium.ByCSSSelector, "._2eKVn6g5Yysx9JmutQe7WV[type=password]")
 	if err != nil {
 		return nil, err
 	}
@@ -77,8 +77,8 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	if err := elem.SendKeys(password); err != nil {
 		return nil, err
 	}
-	//找到 class 为 newlogindialog_SubmitButton_2QgFE type 为 submit 的元素
-	elem, err = wd.FindElement(selenium.ByCSSSelector, ".newlogindialog_SubmitButton_2QgFE[type=submit]")
+	//找到 class 为 _2QgFEj17t677s3x299PNJQ type 为 submit 的元素
+	elem, err = wd.FindElement(selenium.ByCSSSelector, "._2QgFEj17t677s3x299PNJQ[type=submit]")
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 func AutoGetSteamCookie() {
 	go func() {
 		//每五分钟检测一次
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(10 * time.Second)
 		for {
 			select {
 			case <-ticker.C:
