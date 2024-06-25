@@ -17,8 +17,8 @@ type Cookie struct {
 }
 
 const (
-	chromeDriverPathLocal  = "exec/chromedriver_local"
-	chromeDriverPathMaster = "exec/chromedriver"
+	chromeDriverPathLocal  = "autoGetSteamCookie/chromedriver_local"
+	chromeDriverPathMaster = "autoGetSteamCookie/chromedriver"
 	port                   = 8080
 )
 
