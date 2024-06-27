@@ -43,7 +43,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	}
 	//添加 --headless
 	chromeCaps.Args = append(chromeCaps.Args, "--headless")
-	//chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
+	chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
 	chromeCaps.Args = append(chromeCaps.Args, "--no-sandbox")
 
 	caps.AddChrome(chromeCaps)
