@@ -45,6 +45,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	chromeCaps.Args = append(chromeCaps.Args, "--headless")
 	chromeCaps.Args = append(chromeCaps.Args, "--disable-gpu")
 	chromeCaps.Args = append(chromeCaps.Args, "--no-sandbox")
+	chromeCaps.Args = append(chromeCaps.Args, "--disable-dev-shm-usage")
 
 	caps.AddChrome(chromeCaps)
 	wd, err := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port))
