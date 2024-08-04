@@ -61,7 +61,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 	//等待页面加载完成
 	time.Sleep(5 * time.Second)
 	//找到 class 为 _2eKVn6g5Yysx9JmutQe7WV type 为 text 的元素
-	elem, err := wd.FindElement(selenium.ByCSSSelector, "._2eKVn6g5Yysx9JmutQe7WV[type=text]")
+	elem, err := wd.FindElement(selenium.ByCSSSelector, "._2GBWeup5cttgbTw8FM3tfx[type=text]")
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 		return nil, err
 	}
 	//找到 class 为 _2eKVn6g5Yysx9JmutQe7WV type 为 password 的元素
-	elem, err = wd.FindElement(selenium.ByCSSSelector, "._2eKVn6g5Yysx9JmutQe7WV[type=password]")
+	elem, err = wd.FindElement(selenium.ByCSSSelector, "._2GBWeup5cttgbTw8FM3tfx[type=password]")
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func LoginSteam(name string, password string) ([]*Cookie, error) {
 		return nil, err
 	}
 	//找到 class 为 _2QgFEj17t677s3x299PNJQ type 为 submit 的元素
-	elem, err = wd.FindElement(selenium.ByCSSSelector, "._2QgFEj17t677s3x299PNJQ[type=submit]")
+	elem, err = wd.FindElement(selenium.ByCSSSelector, ".DjSvCZoKKfoNSmarsEcTS[type=submit]")
 	if err != nil {
 		return nil, err
 	}
