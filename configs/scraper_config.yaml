@@ -1,0 +1,128 @@
+# 数据抓取系统配置文件
+
+# 服务器配置
+Server:
+  RunMode: debug
+  HttpPort: 8080
+  ReadTimeout: 60
+  WriteTimeout: 60
+
+# 数据库配置
+Database:
+  DBType: mysql
+  Username: root
+  Password: your_password
+  Host: 127.0.0.1:3306
+  DBName: buff_go
+  TablePrefix: ""
+  Charset: utf8mb4
+  ParseTime: true
+  MaxIdleConns: 10
+  MaxOpenConns: 30
+
+# Redis配置
+Redis:
+  Host: 127.0.0.1:6379
+  Password: ""
+  DB: 0
+  MaxIdle: 30
+  MaxActive: 30
+  IdleTimeout: 200
+
+# 日志配置
+Log:
+  LogSavePath: storage/logs
+  LogFileName: app
+  LogFileExt: .log
+  MaxSize: 600
+  MaxAge: 10
+  MaxBackups: 5
+
+# 抓取器配置
+Scraper:
+  # Buff买入抓取器
+  BuffBuy:
+    enabled: true
+    max_concurrency: 5
+    request_delay: 1000  # 毫秒
+    retry_count: 3
+    timeout: 30000      # 毫秒
+    use_proxy: true
+    enable_cache: true
+    cache_ttl: 300      # 秒
+    min_price: 0.0
+    max_price: 10000.0
+    page_num: 10
+    game: csgo
+
+  # Buff卖出抓取器
+  BuffSell:
+    enabled: true
+    max_concurrency: 3
+    request_delay: 2000  # 毫秒
+    retry_count: 3
+    timeout: 30000      # 毫秒
+    use_proxy: true
+    enable_cache: true
+    cache_ttl: 600      # 秒
+    min_price: 0.0
+    max_price: 10000.0
+    page_num: 10
+    game: csgo
+
+  # Steam买入抓取器
+  SteamBuy:
+    enabled: true
+    max_concurrency: 3
+    request_delay: 2000  # 毫秒
+    retry_count: 3
+    timeout: 30000      # 毫秒
+    use_proxy: true
+    enable_cache: true
+    cache_ttl: 600      # 秒
+    app_id: 730         # CSGO
+    page_num: 10
+    currency: 23        # 人民币
+
+  # Steam卖出抓取器
+  SteamSell:
+    enabled: true
+    max_concurrency: 3
+    request_delay: 2000  # 毫秒
+    retry_count: 3
+    timeout: 30000      # 毫秒
+    use_proxy: true
+    enable_cache: true
+    cache_ttl: 600      # 秒
+    app_id: 730         # CSGO
+    page_num: 10
+    currency: 23        # 人民币
+
+# 代理配置
+Proxy:
+  enabled: true
+  max_fail_count: 5
+  health_check_url: "https://httpbin.org/ip"
+  check_interval: 300     # 秒
+  refresh_interval: 1800  # 秒
+  max_usage_time: 600     # 秒
+
+# 价格监控配置
+PriceMonitor:
+  enabled: true
+  check_interval: 60      # 秒
+  price_change_threshold: 0.01  # 价格变化阈值（百分比）
+  notification_enabled: true
+
+# 缓存配置
+Cache:
+  default_ttl: 300        # 秒
+  max_entries: 10000
+  cleanup_interval: 600   # 秒
+
+# 错误处理配置
+ErrorHandler:
+  max_retry_count: 3
+  retry_delay: 1000       # 毫秒
+  exponential_backoff: true
+  max_retry_delay: 30000  # 毫秒
