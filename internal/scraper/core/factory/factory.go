@@ -107,6 +107,13 @@ func (sf *ScraperFactory) createBuffBuyScraper() (interfaces.IScraper, error) {
 		return nil, fmt.Errorf("failed to initialize buff buy scraper: %v", err)
 	}
 
+	// 设置管理器
+	if sf.httpManager != nil && sf.proxyManager != nil && sf.configManager != nil &&
+		sf.cacheManager != nil && sf.errorHandler != nil && sf.taskManager != nil {
+		scraper.SetManagers(sf.httpManager, sf.proxyManager, sf.configManager,
+			sf.cacheManager, sf.errorHandler, sf.taskManager)
+	}
+
 	return scraper, nil
 }
 
