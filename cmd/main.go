@@ -15,12 +15,10 @@ import (
 	"buff-go/internal/service"
 	"buff-go/pkg/logger"
 	"buff-go/pkg/setting"
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -28,13 +26,26 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-var (
-	scraperTypes = flag.String("scrapers", "buff_buy", "Comma-separated list of scrapers to run (buff_buy,buff_sell,steam_buy,steam_sell)")
-)
+// ==================== 抓取器启动配置 ====================
+// 通过注释/取消注释来控制启动哪些抓取器
+// 注释掉不需要的抓取器，取消注释需要的抓取器
+func getEnabledScrapers() []interfaces.ScraperType {
+	var enabledScrapers []interfaces.ScraperType
+
+	// Buff平台抓取器
+	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffBuy)  // Buff买入数据抓取
+	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffSell) // Buff卖出数据抓取
+
+	// Steam平台抓取器
+	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamBuy)  // Steam买入数据抓取
+	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamSell) // Steam卖出数据抓取
+
+	return enabledScrapers
+}
+
+// ========================================================
 
 func main() {
-	flag.Parse()
-
 	fmt.Fprintf(color.Output, "%s\n", color.GreenString("开始初始化统一抓取器框架..."))
 
 	// 初始化基础组件
@@ -63,11 +74,21 @@ func main() {
 
 	scraperManager := factory.NewScraperManager(scraperFactory)
 
-	// 解析要启动的抓取器类型
-	types := parseScraperTypes(*scraperTypes)
+	// 获取启用的抓取器类型
+	enabledScrapers := getEnabledScrapers()
+
+	// 显示启用的抓取器
+	fmt.Printf("启用的抓取器: ")
+	for i, scraperType := range enabledScrapers {
+		if i > 0 {
+			fmt.Printf(", ")
+		}
+		fmt.Printf("%s", scraperType)
+	}
+	fmt.Printf("\n")
 
 	// 启动抓取器
-	for _, scraperType := range types {
+	for _, scraperType := range enabledScrapers {
 		fmt.Printf("启动抓取器: %s\n", scraperType)
 		if err := scraperManager.StartScraper(scraperType); err != nil {
 			log.Printf("启动抓取器 %s 失败: %v", scraperType, err)
@@ -151,21 +172,6 @@ func createManagers() (*Managers, error) {
 		errorHandler:  errorHandler,
 		taskManager:   taskManager,
 	}, nil
-}
-
-// parseScraperTypes 解析抓取器类型
-func parseScraperTypes(typesStr string) []interfaces.ScraperType {
-	var types []interfaces.ScraperType
-
-	parts := strings.Split(typesStr, ",")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			types = append(types, interfaces.ScraperType(part))
-		}
-	}
-
-	return types
 }
 
 // waitForSignal 等待信号
