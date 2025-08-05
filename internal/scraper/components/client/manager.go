@@ -81,12 +81,20 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 	}
 
 	// 如果需要使用代理
-	//if opts.UseProxy && m.proxyMgr != nil {
-	//	proxy, err := m.proxyMgr.GetProxy()
-	//	if err == nil {
-	//		config.ProxyURL = proxy.URL
-	//	}
-	//}
+	if opts.UseProxy && m.proxyMgr != nil {
+		// 从请求上下文中获取平台信息，如果没有则使用默认平台
+		platform := interfaces.PlatformBuff // 默认平台
+		if req.Header.Get("X-Platform") != "" {
+			platform = interfaces.Platform(req.Header.Get("X-Platform"))
+		}
+
+		proxy, err := m.proxyMgr.GetProxyForPlatform(platform)
+		if err == nil {
+			config.ProxyURL = proxy.URL
+			// 在请求头中记录使用的代理ID，用于后续错误处理
+			req.Header.Set("X-Proxy-ID", proxy.ID)
+		}
+	}
 
 	client, err := m.GetClient(config)
 	if err != nil {
@@ -96,6 +104,24 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 	// 执行请求（带重试）
 	var resp *http.Response
 	var lastErr error
+	var currentProxy *interfaces.ProxyInfo
+
+	// 获取当前使用的代理信息
+	proxyID := req.Header.Get("X-Proxy-ID")
+	platform := interfaces.Platform(req.Header.Get("X-Platform"))
+	if platform == "" {
+		platform = interfaces.PlatformBuff
+	}
+
+	// 如果使用代理，先获取代理信息
+	if opts.UseProxy && m.proxyMgr != nil && config.ProxyURL != "" {
+		// 通过代理URL找到对应的代理对象（这里需要改进，应该通过ID查找）
+		// 暂时创建一个临时代理对象
+		currentProxy = &interfaces.ProxyInfo{
+			ID:  proxyID,
+			URL: config.ProxyURL,
+		}
+	}
 
 	for i := 0; i <= opts.RetryCount; i++ {
 		startTime := time.Now()
@@ -119,13 +145,47 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 		m.statsMux.Unlock()
 
 		if lastErr == nil {
+			// 请求成功，释放代理
+			if opts.UseProxy && m.proxyMgr != nil && proxyID != "" {
+				// 通过代理ID找到代理对象并释放
+				if currentProxy != nil {
+					m.proxyMgr.ReleaseProxy(currentProxy)
+				}
+			}
 			return resp, nil
+		}
+
+		// 请求失败，标记代理失败
+		if opts.UseProxy && m.proxyMgr != nil && proxyID != "" {
+			if currentProxy != nil {
+				m.proxyMgr.MarkProxyFailedForPlatform(currentProxy, platform, lastErr.Error())
+			}
 		}
 
 		// 如果不是最后一次重试，等待后重试
 		if i < opts.RetryCount {
 			time.Sleep(opts.RetryDelay)
+
+			// 重试时获取新的代理
+			if opts.UseProxy && m.proxyMgr != nil {
+				newProxy, err := m.proxyMgr.GetProxyForPlatform(platform)
+				if err == nil {
+					// 更新客户端配置使用新代理
+					config.ProxyURL = newProxy.URL
+					client, err = m.GetClient(config)
+					if err != nil {
+						continue
+					}
+					currentProxy = newProxy
+					req.Header.Set("X-Proxy-ID", newProxy.ID)
+				}
+			}
 		}
+	}
+
+	// 所有重试都失败，释放代理
+	if opts.UseProxy && m.proxyMgr != nil && currentProxy != nil {
+		m.proxyMgr.ReleaseProxy(currentProxy)
 	}
 
 	return nil, lastErr

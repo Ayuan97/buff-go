@@ -15,44 +15,46 @@ import (
 
 // ScraperStats 抓取器统计信息
 type ScraperStats struct {
-	StartTime      time.Time     `json:"start_time"`
-	TotalTasks     int64         `json:"total_tasks"`
-	CompletedTasks int64         `json:"completed_tasks"`
-	FailedTasks    int64         `json:"failed_tasks"`
-	AverageLatency time.Duration `json:"average_latency"`
+	StartTime      time.Time     `json:"start_time"`      // 开始时间
+	TotalTasks     int64         `json:"total_tasks"`     // 总任务数
+	CompletedTasks int64         `json:"completed_tasks"` // 完成任务数
+	FailedTasks    int64         `json:"failed_tasks"`    // 失败任务数
+	AverageLatency time.Duration `json:"average_latency"` // 平均延迟
 }
 
 // BaseScraper 基础抓取器实现
 type BaseScraper struct {
-	name          string
-	config        *interfaces.ScraperConfig
-	status        int32 // 使用atomic操作
-	HttpManager   interfaces.IHTTPClientManager
-	ProxyManager  interfaces.IProxyManager
-	ConfigManager interfaces.IConfigManager
-	CacheManager  interfaces.ICacheManager
-	ErrorHandler  interfaces.IErrorHandler
-	TaskManager   interfaces.ITaskManager
+	name          string                        // 抓取器名称
+	config        *interfaces.ScraperConfig     // 抓取器配置
+	status        int32                         // 使用atomic操作
+	platform      interfaces.Platform           // 抓取器对应的平台
+	HttpManager   interfaces.IHTTPClientManager // HTTP客户端管理器
+	ProxyManager  interfaces.IProxyManager      // 代理管理器
+	ConfigManager interfaces.IConfigManager     // 配置管理器
+	CacheManager  interfaces.ICacheManager      // 缓存管理器
+	ErrorHandler  interfaces.IErrorHandler      // 错误处理接口
+	TaskManager   interfaces.ITaskManager       // 任务管理器
 
 	// 控制相关
-	Ctx    context.Context
-	Cancel context.CancelFunc
-	wg     sync.WaitGroup
+	Ctx    context.Context    // 上下文
+	Cancel context.CancelFunc // 取消函数
+	wg     sync.WaitGroup     // 等待组
 
 	// 统计信息
-	stats    *ScraperStats
-	statsMux sync.RWMutex
+	stats    *ScraperStats // 统计信息
+	statsMux sync.RWMutex  // 读写锁
 
 	// 任务处理器接口，用于支持多态调用
-	taskProcessor interfaces.IScraper
+	taskProcessor interfaces.IScraper // 任务处理器接口
 }
 
 // NewBaseScraper 创建基础抓取器
 func NewBaseScraper(name string) *BaseScraper {
 	return &BaseScraper{
-		name:   name,
-		status: int32(interfaces.StatusStopped),
-		stats:  &ScraperStats{},
+		name:     name,                            // 设置抓取器名称
+		platform: interfaces.PlatformBuff,         // 默认平台
+		status:   int32(interfaces.StatusStopped), // 设置抓取器状态
+		stats:    &ScraperStats{},                 // 设置统计信息
 	}
 }
 
@@ -62,8 +64,8 @@ func (bs *BaseScraper) Initialize(config *interfaces.ScraperConfig) error {
 		return fmt.Errorf("config cannot be nil")
 	}
 
-	bs.config = config
-	bs.name = config.Name
+	bs.config = config    // 设置抓取器配置
+	bs.name = config.Name // 设置抓取器名称
 
 	// 初始化统计信息
 	bs.stats.StartTime = time.Now()
@@ -73,24 +75,34 @@ func (bs *BaseScraper) Initialize(config *interfaces.ScraperConfig) error {
 
 // SetManagers 设置管理器
 func (bs *BaseScraper) SetManagers(
-	httpManager interfaces.IHTTPClientManager,
-	proxyManager interfaces.IProxyManager,
-	configManager interfaces.IConfigManager,
-	cacheManager interfaces.ICacheManager,
-	errorHandler interfaces.IErrorHandler,
-	taskManager interfaces.ITaskManager,
+	httpManager interfaces.IHTTPClientManager, // HTTP客户端管理器
+	proxyManager interfaces.IProxyManager, // 代理管理器
+	configManager interfaces.IConfigManager, // 配置管理器
+	cacheManager interfaces.ICacheManager, // 缓存管理器
+	errorHandler interfaces.IErrorHandler, // 错误处理接口
+	taskManager interfaces.ITaskManager, // 任务管理器
 ) {
-	bs.HttpManager = httpManager
-	bs.ProxyManager = proxyManager
-	bs.ConfigManager = configManager
-	bs.CacheManager = cacheManager
-	bs.ErrorHandler = errorHandler
-	bs.TaskManager = taskManager
+	bs.HttpManager = httpManager     // 设置HTTP客户端管理器
+	bs.ProxyManager = proxyManager   // 设置代理管理器
+	bs.ConfigManager = configManager // 设置配置管理器
+	bs.CacheManager = cacheManager   // 设置缓存管理器
+	bs.ErrorHandler = errorHandler   // 设置错误处理接口
+	bs.TaskManager = taskManager     // 设置任务管理器
 }
 
 // SetTaskProcessor 设置任务处理器
 func (bs *BaseScraper) SetTaskProcessor(processor interfaces.IScraper) {
-	bs.taskProcessor = processor
+	bs.taskProcessor = processor // 设置任务处理器
+}
+
+// SetPlatform 设置抓取器平台
+func (bs *BaseScraper) SetPlatform(platform interfaces.Platform) {
+	bs.platform = platform
+}
+
+// GetPlatform 获取抓取器平台
+func (bs *BaseScraper) GetPlatform() interfaces.Platform {
+	return bs.platform
 }
 
 // Start 开始抓取
@@ -99,12 +111,12 @@ func (bs *BaseScraper) Start(ctx context.Context) error {
 		return fmt.Errorf("scraper is already running")
 	}
 
-	bs.Ctx, bs.Cancel = context.WithCancel(ctx)
+	bs.Ctx, bs.Cancel = context.WithCancel(ctx) // 设置上下文和取消函数
 
 	// 启动工作协程
 	for i := 0; i < bs.config.MaxConcurrency; i++ {
-		bs.wg.Add(1)
-		go bs.worker(i)
+		bs.wg.Add(1)    // 添加工作协程
+		go bs.worker(i) // 启动工作协程
 	}
 
 	return nil
@@ -112,11 +124,12 @@ func (bs *BaseScraper) Start(ctx context.Context) error {
 
 // Stop 停止抓取
 func (bs *BaseScraper) Stop() error {
+	// 如果抓取器正在运行，则停止抓取
 	if !atomic.CompareAndSwapInt32(&bs.status, int32(interfaces.StatusRunning), int32(interfaces.StatusStopped)) {
 		return fmt.Errorf("scraper is not running")
 	}
 
-	if bs.Cancel != nil {
+	if bs.Cancel != nil { // 如果取消函数不为空，则调用取消函数
 		bs.Cancel()
 	}
 
@@ -176,14 +189,14 @@ func (bs *BaseScraper) ProcessTask(task *interfaces.ScrapingTask) (*interfaces.S
 
 	// 执行请求
 	options := []interfaces.RequestOption{
-		interfaces.WithTimeout(bs.config.Timeout),
-		interfaces.WithRetry(bs.config.RetryCount, time.Second),
-		interfaces.WithProxy(bs.config.UseProxy),
+		interfaces.WithTimeout(bs.config.Timeout),               // 设置请求超时时间
+		interfaces.WithRetry(bs.config.RetryCount, time.Second), // 设置重试次数和重试间隔
+		interfaces.WithProxy(bs.config.UseProxy),                // 设置是否使用代理
 	}
 
 	if bs.config.EnableCache {
-		cacheKey := fmt.Sprintf("%s:%s", bs.name, task.URL)
-		options = append(options, interfaces.WithCache(cacheKey, bs.config.CacheTTL))
+		cacheKey := fmt.Sprintf("%s:%s", bs.name, task.URL)                           // 设置缓存键
+		options = append(options, interfaces.WithCache(cacheKey, bs.config.CacheTTL)) // 设置缓存时间
 	}
 
 	global.Logger.WithFields(map[string]interface{}{
@@ -271,6 +284,9 @@ func (bs *BaseScraper) createHTTPRequest(task *interfaces.ScrapingTask) (*http.R
 			req.Header.Set(key, value)
 		}
 	}
+
+	// 设置平台信息到请求头，用于代理选择
+	req.Header.Set("X-Platform", string(bs.platform))
 
 	return req, nil
 }

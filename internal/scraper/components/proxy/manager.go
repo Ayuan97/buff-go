@@ -11,20 +11,20 @@ import (
 
 // ProxyManager 代理管理器实现
 type ProxyManager struct {
-	proxies     []*interfaces.ProxyInfo
-	proxiesMux  sync.RWMutex
-	usedProxies map[string]*interfaces.ProxyInfo
-	usedMux     sync.RWMutex
-	config      *ProxyManagerConfig
+	proxies     []*interfaces.ProxyInfo          // 代理列表
+	proxiesMux  sync.RWMutex                     // 代理列表读写锁
+	usedProxies map[string]*interfaces.ProxyInfo // 使用中的代理列表
+	usedMux     sync.RWMutex                     // 使用中的代理列表读写锁
+	config      *ProxyManagerConfig              // 代理管理器配置
 }
 
 // ProxyManagerConfig 代理管理器配置
 type ProxyManagerConfig struct {
-	MaxFailCount        int                                   `json:"max_fail_count"`
-	HealthCheckURL      string                                `json:"health_check_url"`
-	CheckInterval       time.Duration                         `json:"check_interval"`
-	RefreshInterval     time.Duration                         `json:"refresh_interval"`
-	MaxUsageTime        time.Duration                         `json:"max_usage_time"`
+	MaxFailCount        int                                   `json:"max_fail_count"`        // 最大失败次数
+	HealthCheckURL      string                                `json:"health_check_url"`      // 健康检查URL
+	CheckInterval       time.Duration                         `json:"check_interval"`        // 检查间隔
+	RefreshInterval     time.Duration                         `json:"refresh_interval"`      // 刷新间隔
+	MaxUsageTime        time.Duration                         `json:"max_usage_time"`        // 最大使用时间
 	PlatformBanDuration map[interfaces.Platform]time.Duration `json:"platform_ban_duration"` // 各平台封禁时长
 	PlatformMaxFails    map[interfaces.Platform]int           `json:"platform_max_fails"`    // 各平台最大失败次数
 }

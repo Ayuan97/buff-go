@@ -71,7 +71,7 @@ func main() {
 		managers.errorHandler,
 		managers.taskManager,
 	)
-
+	// 创建抓取器管理器
 	scraperManager := factory.NewScraperManager(scraperFactory)
 
 	// 获取启用的抓取器类型
