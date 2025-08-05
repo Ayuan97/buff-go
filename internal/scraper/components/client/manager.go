@@ -90,9 +90,13 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 
 		proxy, err := m.proxyMgr.GetProxyForPlatform(platform)
 		if err == nil {
-			config.ProxyURL = proxy.URL
+			// 如果是本机代理（直连），不设置代理URL
+			if proxy.Type != "direct" && proxy.URL != "" {
+				config.ProxyURL = proxy.URL
+			}
 			// 在请求头中记录使用的代理ID，用于后续错误处理
 			req.Header.Set("X-Proxy-ID", proxy.ID)
+			req.Header.Set("X-Proxy-Type", proxy.Type)
 		}
 	}
 
@@ -108,18 +112,19 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 
 	// 获取当前使用的代理信息
 	proxyID := req.Header.Get("X-Proxy-ID")
+	proxyType := req.Header.Get("X-Proxy-Type")
 	platform := interfaces.Platform(req.Header.Get("X-Platform"))
 	if platform == "" {
 		platform = interfaces.PlatformBuff
 	}
 
 	// 如果使用代理，先获取代理信息
-	if opts.UseProxy && m.proxyMgr != nil && config.ProxyURL != "" {
-		// 通过代理URL找到对应的代理对象（这里需要改进，应该通过ID查找）
-		// 暂时创建一个临时代理对象
+	if opts.UseProxy && m.proxyMgr != nil && proxyID != "" {
+		// 通过代理ID和类型创建临时代理对象
 		currentProxy = &interfaces.ProxyInfo{
-			ID:  proxyID,
-			URL: config.ProxyURL,
+			ID:   proxyID,
+			URL:  config.ProxyURL,
+			Type: proxyType,
 		}
 	}
 
@@ -170,14 +175,19 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 			if opts.UseProxy && m.proxyMgr != nil {
 				newProxy, err := m.proxyMgr.GetProxyForPlatform(platform)
 				if err == nil {
-					// 更新客户端配置使用新代理
-					config.ProxyURL = newProxy.URL
+					// 如果是本机代理（直连），清空代理URL
+					if newProxy.Type == "direct" {
+						config.ProxyURL = ""
+					} else {
+						config.ProxyURL = newProxy.URL
+					}
 					client, err = m.GetClient(config)
 					if err != nil {
 						continue
 					}
 					currentProxy = newProxy
 					req.Header.Set("X-Proxy-ID", newProxy.ID)
+					req.Header.Set("X-Proxy-Type", newProxy.Type)
 				}
 			}
 		}

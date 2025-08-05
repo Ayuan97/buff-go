@@ -27,6 +27,8 @@ type ProxyManagerConfig struct {
 	MaxUsageTime        time.Duration                         `json:"max_usage_time"`        // 最大使用时间
 	PlatformBanDuration map[interfaces.Platform]time.Duration `json:"platform_ban_duration"` // 各平台封禁时长
 	PlatformMaxFails    map[interfaces.Platform]int           `json:"platform_max_fails"`    // 各平台最大失败次数
+	EnableLocalProxy    bool                                  `json:"enable_local_proxy"`    // 启用本机代理作为备用
+	LocalProxyPlatforms []interfaces.Platform                 `json:"local_proxy_platforms"` // 本机代理支持的平台列表
 }
 
 // NewProxyManager 创建代理管理器
@@ -45,6 +47,11 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 				interfaces.PlatformBuff:  3,
 				interfaces.PlatformSteam: 5,
 			},
+			EnableLocalProxy: true, // 默认启用本机代理
+			LocalProxyPlatforms: []interfaces.Platform{
+				interfaces.PlatformBuff,
+				interfaces.PlatformSteam,
+			},
 		}
 	}
 
@@ -61,11 +68,23 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 			interfaces.PlatformSteam: 5,
 		}
 	}
+	// 确保本机代理配置存在
+	if config.LocalProxyPlatforms == nil {
+		config.LocalProxyPlatforms = []interfaces.Platform{
+			interfaces.PlatformBuff,
+			interfaces.PlatformSteam,
+		}
+	}
 
 	pm := &ProxyManager{
 		proxies:     make([]*interfaces.ProxyInfo, 0),
 		usedProxies: make(map[string]*interfaces.ProxyInfo),
 		config:      config,
+	}
+
+	// 如果启用本机代理，添加本机代理到代理池
+	if config.EnableLocalProxy {
+		pm.addLocalProxy()
 	}
 
 	// 启动后台任务
@@ -83,20 +102,31 @@ func (pm *ProxyManager) GetProxyForPlatform(platform interfaces.Platform) (*inte
 		return nil, errors.New("no proxies available")
 	}
 
-	// 过滤适用于指定平台的代理
-	availableProxies := make([]*interfaces.ProxyInfo, 0)
+	// 分别收集外部代理和本机代理
+	externalProxies := make([]*interfaces.ProxyInfo, 0)
+	var localProxy *interfaces.ProxyInfo
+
 	for _, proxy := range pm.proxies {
 		if pm.isProxyAvailableForPlatform(proxy, platform) {
-			availableProxies = append(availableProxies, proxy)
+			if proxy.Region == interfaces.ProxyRegionLocal {
+				localProxy = proxy
+			} else {
+				externalProxies = append(externalProxies, proxy)
+			}
 		}
 	}
 
-	if len(availableProxies) == 0 {
+	var selectedProxy *interfaces.ProxyInfo
+
+	// 优先使用外部代理
+	if len(externalProxies) > 0 {
+		selectedProxy = externalProxies[rand.Intn(len(externalProxies))]
+	} else if localProxy != nil && pm.config.EnableLocalProxy {
+		// 外部代理不可用时，使用本机代理作为备用
+		selectedProxy = localProxy
+	} else {
 		return nil, fmt.Errorf("no available proxies for platform %s", platform)
 	}
-
-	// 随机选择一个代理
-	selectedProxy := availableProxies[rand.Intn(len(availableProxies))]
 
 	// 标记为使用中
 	pm.usedMux.Lock()
@@ -299,6 +329,14 @@ func (pm *ProxyManager) isRegionSupportsPlatform(region interfaces.ProxyRegion, 
 		return platform == interfaces.PlatformBuff || platform == interfaces.PlatformSteam
 	case interfaces.ProxyRegionOverseas:
 		return platform == interfaces.PlatformSteam
+	case interfaces.ProxyRegionLocal:
+		// 本机代理支持配置中指定的平台
+		for _, p := range pm.config.LocalProxyPlatforms {
+			if p == platform {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
@@ -379,4 +417,67 @@ func (pm *ProxyManager) RemoveProxy(proxyID string) {
 	pm.usedMux.Lock()
 	delete(pm.usedProxies, proxyID)
 	pm.usedMux.Unlock()
+}
+
+// addLocalProxy 添加本机代理到代理池
+func (pm *ProxyManager) addLocalProxy() {
+	localProxy := &interfaces.ProxyInfo{
+		ID:                 "local-proxy",
+		URL:                "", // 空URL表示直连
+		Type:               "direct",
+		Username:           "",
+		Password:           "",
+		Country:            "local",
+		Speed:              1000, // 本机代理速度设为最高
+		LastUsed:           time.Time{},
+		FailCount:          0,
+		IsActive:           true,
+		Region:             interfaces.ProxyRegionLocal,
+		SupportedPlatforms: pm.config.LocalProxyPlatforms,
+		PlatformStatuses:   make(map[interfaces.Platform]*interfaces.PlatformStatus),
+	}
+
+	// 为每个支持的平台初始化状态
+	for _, platform := range pm.config.LocalProxyPlatforms {
+		localProxy.PlatformStatuses[platform] = &interfaces.PlatformStatus{
+			IsActive:    true,
+			FailCount:   0,
+			LastFailed:  time.Time{},
+			BannedUntil: time.Time{},
+		}
+	}
+
+	pm.AddProxy(localProxy)
+}
+
+// IsLocalProxyEnabled 检查是否启用了本机代理
+func (pm *ProxyManager) IsLocalProxyEnabled() bool {
+	return pm.config.EnableLocalProxy
+}
+
+// IsLocalProxySupportedForPlatform 检查本机代理是否支持指定平台
+func (pm *ProxyManager) IsLocalProxySupportedForPlatform(platform interfaces.Platform) bool {
+	if !pm.config.EnableLocalProxy {
+		return false
+	}
+
+	for _, p := range pm.config.LocalProxyPlatforms {
+		if p == platform {
+			return true
+		}
+	}
+	return false
+}
+
+// GetLocalProxy 获取本机代理信息
+func (pm *ProxyManager) GetLocalProxy() *interfaces.ProxyInfo {
+	pm.proxiesMux.RLock()
+	defer pm.proxiesMux.RUnlock()
+
+	for _, proxy := range pm.proxies {
+		if proxy.Region == interfaces.ProxyRegionLocal {
+			return proxy
+		}
+	}
+	return nil
 }

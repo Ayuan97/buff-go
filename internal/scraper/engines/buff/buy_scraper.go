@@ -146,21 +146,12 @@ func (bs *BuffBuyScraper) startMultiAccountScraping() {
 	ticker := time.NewTicker(10 * time.Second) // 检查账号状态的间隔
 	defer ticker.Stop()
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":   "buff_buy",
-		"interval":  "10s",
-		"pages":     bs.config.PageNum,
-		"game":      bs.config.Game,
-		"min_price": bs.config.MinPrice,
-		"max_price": bs.config.MaxPrice,
-	}).Info("[BuffBuyScraper] 开始多账号抓取循环")
+	fmt.Println("开始多账号抓取循环 平台：", bs.GetPlatform(), " 游戏：", bs.config.Game, " 最小价格：", bs.config.MinPrice, " 最大价格：", bs.config.MaxPrice, " 页面数量：", bs.config.PageNum)
 
 	for {
 		select {
 		case <-bs.BaseScraper.Ctx.Done():
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper": "buff_buy",
-			}).Info("[BuffBuyScraper] 收到停止信号，停止所有账号抓取任务")
+			fmt.Println("收到停止信号，停止所有账号抓取任务")
 			bs.stopAllAccountTasks()
 			return
 		case <-ticker.C:
@@ -174,18 +165,11 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 	// 获取所有可用账号
 	accounts, err := bs.dao.GetBuffUserList()
 	if err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper": "buff_buy",
-			"error":   err.Error(),
-		}).Error("[BuffBuyScraper] 获取账号列表失败")
+		fmt.Println("获取账号列表失败", err)
 		return
 	}
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":        "buff_buy",
-		"total_accounts": len(accounts),
-	}).Debug("[BuffBuyScraper] 开始管理账号任务")
-
+	fmt.Println("开始管理账号任务 账号数量：", len(accounts))
 	bs.tasksMux.Lock()
 	defer bs.tasksMux.Unlock()
 
@@ -195,12 +179,8 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 			if _, exists := bs.accountTasks[account.ID]; !exists {
 				// 创建新的账号抓取任务
 				if err := bs.createAccountTask(account); err != nil {
-					global.Logger.WithFields(map[string]interface{}{
-						"scraper":    "buff_buy",
-						"account_id": account.ID,
-						"account":    account.Account,
-						"error":      err.Error(),
-					}).Error("[BuffBuyScraper] 创建账号抓取任务失败")
+
+					fmt.Println("创建账号抓取任务失败 平台：", bs.GetPlatform(), " 账号：", account.Account, " 错误：", err)
 				}
 			}
 		}
@@ -215,6 +195,7 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 	// 获取代理
 	proxy, err := bs.proxyManager.GetProxyForPlatform(interfaces.PlatformBuff)
 	if err != nil {
+		fmt.Println("获取代理失败 平台：", bs.GetPlatform(), " 错误：", err)
 		return fmt.Errorf("获取代理失败: %v", err)
 	}
 
@@ -231,12 +212,14 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 	client, err := bs.clientManager.GetClient(clientConfig)
 	if err != nil {
 		bs.proxyManager.ReleaseProxy(proxy)
+		fmt.Println("创建HTTP客户端失败 平台：", bs.GetPlatform(), " 错误：", err)
 		return fmt.Errorf("创建HTTP客户端失败: %v", err)
 	}
 
 	// 设置账号Cookie
 	if err := bs.setAccountCookies(client, account); err != nil {
 		bs.proxyManager.ReleaseProxy(proxy)
+		fmt.Println("设置账号Cookie失败 平台：", bs.GetPlatform(), " 错误：", err)
 		return fmt.Errorf("设置账号Cookie失败: %v", err)
 	}
 
@@ -245,7 +228,11 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 
 	// 生成代理键
 	proxyKey := fmt.Sprintf("buff_proxy_%s_%d", proxy.ID, account.ID)
-	gredis.Set(proxyKey, account.ID, 0)
+	fmt.Println("生成代理键 平台：", bs.GetPlatform(), " 代理ID：", proxy.ID, " 账号ID：", account.ID, " 代理键：", proxyKey)
+	// 设置代理键，过期时间为10分钟，防止键堆积
+	if err := gredis.Set(proxyKey, account.ID, 10*time.Minute); err != nil {
+		fmt.Println("设置代理键失败 平台：", bs.GetPlatform(), " 代理键：", proxyKey, " 错误：", err)
+	}
 
 	// 创建账号任务
 	accountTask := &AccountTask{
@@ -263,23 +250,14 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 
 	// 更新账号状态为使用中
 	if err := bs.dao.UpdateBuffUserStatus(int(account.ID), 1); err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": account.ID,
-			"error":      err.Error(),
-		}).Warn("[BuffBuyScraper] 更新账号状态失败")
+
+		fmt.Println("更新账号状态失败 平台：", bs.GetPlatform(), " 账号ID：", account.ID, " 错误：", err)
 	}
 
 	// 启动账号抓取协程
 	go bs.runAccountTask(taskCtx, accountTask)
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"account_id": account.ID,
-		"account":    account.Account,
-		"proxy":      proxy.URL,
-		"proxy_key":  proxyKey,
-	}).Info("[BuffBuyScraper] 创建账号抓取任务成功")
+	fmt.Println("创建账号抓取任务成功 平台：", bs.GetPlatform(), " 账号ID：", account.ID, " 账号：", account.Account, " 代理：", proxy.URL, " 代理键：", proxyKey)
 
 	return nil
 }
@@ -332,30 +310,17 @@ func (bs *BuffBuyScraper) runAccountTask(ctx context.Context, task *AccountTask)
 	ticker := time.NewTicker(60 * time.Second) // 每60秒抓取一轮
 	defer ticker.Stop()
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"account_id": task.Account.ID,
-		"account":    task.Account.Account,
-		"proxy":      task.ProxyInfo.URL,
-	}).Info("[BuffBuyScraper] 开始账号抓取任务")
+	fmt.Println("开始账号抓取任务 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 代理：", task.ProxyInfo.URL)
 
 	for {
 		select {
 		case <-ctx.Done():
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper":    "buff_buy",
-				"account_id": task.Account.ID,
-				"account":    task.Account.Account,
-			}).Info("[BuffBuyScraper] 账号抓取任务收到停止信号")
+			fmt.Println("账号抓取任务收到停止信号 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account)
 			return
 		case <-ticker.C:
 			// 检查账号状态是否仍然有效
 			if !bs.isAccountTaskValid(task) {
-				global.Logger.WithFields(map[string]interface{}{
-					"scraper":    "buff_buy",
-					"account_id": task.Account.ID,
-					"account":    task.Account.Account,
-				}).Info("[BuffBuyScraper] 账号任务已失效，停止抓取")
+				fmt.Println("账号任务已失效，停止抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account)
 				return
 			}
 
@@ -370,25 +335,43 @@ func (bs *BuffBuyScraper) runAccountTask(ctx context.Context, task *AccountTask)
 func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 	startTime := time.Now()
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"account_id": task.Account.ID,
-		"account":    task.Account.Account,
-		"start_time": startTime.Format("2006-01-02 15:04:05.000"),
-	}).Info("[BuffBuyScraper] 开始账号抓取")
+	fmt.Println("开始账号抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 开始时间：", startTime.Format("2006-01-02 15:04:05.000"))
 
 	// 获取系统配置
 	system := bs.dao.GetOneSystem(1)
 	var config model.Config
 	var game string
 
+	fmt.Println("获取系统配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 系统类型：", system.SystemType)
+
 	if system.SystemType == 1 {
 		config = bs.dao.GetOneSystemConfig(1) // csgo
 		game = "csgo"
-	} else {
+	} else if system.SystemType == 2 {
 		config = bs.dao.GetOneSystemConfig(2) // dota2
 		game = "dota2"
+	} else {
+		// 系统类型异常，使用默认的CSGO配置
+		fmt.Println("系统类型异常，使用默认CSGO配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 系统类型：", system.SystemType)
+		config = bs.dao.GetOneSystemConfig(1) // 默认使用csgo
+		game = "csgo"
 	}
+	fmt.Println("config", config)
+	fmt.Println("系统配置获取完成 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice, " 抓取状态：", config.BuffBuyStatus)
+
+	// 检查抓取功能是否启用
+	if config.BuffBuyStatus == 0 {
+		fmt.Println("Buff买入抓取功能未启用，跳过抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 抓取状态：", config.BuffBuyStatus)
+		return
+	}
+
+	// 检查配置有效性
+	if config.BuffPageNum <= 0 {
+		fmt.Println("页面数量配置无效，跳过抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面数量：", config.BuffPageNum)
+		return
+	}
+
+	fmt.Println("开始并发抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数量：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice)
 
 	// 并发抓取多个页面
 	var wg sync.WaitGroup
@@ -396,50 +379,41 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 		// 检查系统配置是否变更
 		currentSystem := bs.dao.GetOneSystem(1)
 		if currentSystem.SystemType != config.ID {
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper":    "buff_buy",
-				"account_id": task.Account.ID,
-			}).Info("[BuffBuyScraper] 系统配置已变更，停止当前抓取")
+			fmt.Println("系统配置已变更，停止当前抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 当前系统类型：", currentSystem.SystemType, " 配置ID：", config.ID)
 			break
 		}
 
 		wg.Add(1)
 		go func(pageNum int) {
 			defer wg.Done()
+			fmt.Println("开始抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 总页数：", config.BuffPageNum)
 			bs.scrapePageForAccount(task, game, pageNum, config)
 		}(i)
 
 		// 控制并发数，避免过多请求
 		if i%3 == 0 {
-			time.Sleep(1 * time.Second)
+			fmt.Println("并发控制暂停 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 已启动页面：", i, " 暂停2秒")
+			time.Sleep(2 * time.Second)
 		}
 	}
 
 	wg.Wait()
 
 	duration := time.Since(startTime)
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"account_id": task.Account.ID,
-		"account":    task.Account.Account,
-		"duration":   duration.String(),
-		"end_time":   time.Now().Format("2006-01-02 15:04:05.000"),
-	}).Info("[BuffBuyScraper] 账号抓取完成")
+	fmt.Println("账号抓取完成 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 持续时间：", duration.String(), " 结束时间：", time.Now().Format("2006-01-02 15:04:05.000"))
 }
 
 // scrapePageForAccount 为指定账号抓取单个页面
 func (bs *BuffBuyScraper) scrapePageForAccount(task *AccountTask, game string, pageNum int, config model.Config) {
+	startTime := time.Now()
 	url := fmt.Sprintf("https://buff.163.com/api/market/goods/buying?game=%s&page_num=%d&min_price=%v&max_price=%v&sort_by=price.desc&page_size=80&use_suggestion=0&_=%d",
 		game, pageNum, config.MinPrice, config.MaxPrice, time.Now().UnixNano()/1e6)
 
+	fmt.Println("准备抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " URL：", url)
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": task.Account.ID,
-			"page":       pageNum,
-			"error":      err.Error(),
-		}).Error("[BuffBuyScraper] 创建HTTP请求失败")
+		fmt.Println("创建HTTP请求失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 错误：", err)
 		return
 	}
 
@@ -447,9 +421,13 @@ func (bs *BuffBuyScraper) scrapePageForAccount(task *AccountTask, game string, p
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	req.Header.Set("Referer", "https://buff.163.com/")
 
+	fmt.Println("HTTP请求已创建 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 代理：", task.ProxyInfo.URL)
+
 	// 执行请求
+	fmt.Println("开始执行HTTP请求 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum)
 	resp, err := task.Client.Do(req)
 	if err != nil {
+		fmt.Println("HTTP请求失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 错误：", err)
 		global.Logger.WithFields(map[string]interface{}{
 			"scraper":    "buff_buy",
 			"account_id": task.Account.ID,
@@ -465,15 +443,12 @@ func (bs *BuffBuyScraper) scrapePageForAccount(task *AccountTask, game string, p
 	}
 	defer resp.Body.Close()
 
+	fmt.Println("HTTP请求成功 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 状态码：", resp.StatusCode, " 耗时：", time.Since(startTime))
+
 	// 读取响应
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": task.Account.ID,
-			"page":       pageNum,
-			"error":      err.Error(),
-		}).Error("[BuffBuyScraper] 读取响应失败")
+		fmt.Println("读取响应失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 错误：", err)
 		return
 	}
 
@@ -488,20 +463,9 @@ func (bs *BuffBuyScraper) scrapePageForAccount(task *AccountTask, game string, p
 	}
 
 	if err := bs.processResponse(result); err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": task.Account.ID,
-			"page":       pageNum,
-			"error":      err.Error(),
-		}).Error("[BuffBuyScraper] 处理响应数据失败")
+		fmt.Println("处理响应数据失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 错误：", err)
 	} else {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": task.Account.ID,
-			"account":    task.Account.Account,
-			"page":       pageNum,
-			"status":     resp.StatusCode,
-		}).Debug("[BuffBuyScraper] 页面抓取成功")
+		fmt.Println("页面抓取成功 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 状态：", resp.StatusCode)
 	}
 }
 
@@ -510,25 +474,36 @@ func (bs *BuffBuyScraper) isAccountTaskValid(task *AccountTask) bool {
 	// 检查代理键是否仍然存在
 	value := gredis.Get(task.ProxyKey)
 	if value == "" {
+		fmt.Println("代理键不存在，任务失效 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 代理键：", task.ProxyKey)
 		return false
 	}
 
-	// 检查账号状态
-	account, err := bs.dao.GetOneBuffUser()
-	if err != nil || account.ID != task.Account.ID || account.Status != 1 {
+	// 检查当前账号的状态（应该通过ID查询特定账号，而不是查询状态为0的账号）
+	accounts, err := bs.dao.GetBuffUserList()
+	if err != nil {
+		fmt.Println("获取账号列表失败，任务失效 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 错误：", err)
 		return false
 	}
 
-	return true
+	// 查找当前任务对应的账号
+	for _, account := range accounts {
+		if account.ID == task.Account.ID {
+			if account.Status != 1 {
+				fmt.Println("账号状态不是使用中，任务失效 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 当前状态：", account.Status, " 期望状态：1")
+				return false
+			}
+			// 账号状态正常
+			return true
+		}
+	}
+
+	fmt.Println("未找到对应账号，任务失效 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID)
+	return false
 }
 
 // cleanupAccountTask 清理账号任务资源
 func (bs *BuffBuyScraper) cleanupAccountTask(task *AccountTask) {
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"account_id": task.Account.ID,
-		"account":    task.Account.Account,
-	}).Info("[BuffBuyScraper] 清理账号任务资源")
+	fmt.Println("清理账号任务资源 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account)
 
 	// 删除代理键
 	if task.ProxyKey != "" {
@@ -542,11 +517,7 @@ func (bs *BuffBuyScraper) cleanupAccountTask(task *AccountTask) {
 
 	// 更新账号状态为空闲
 	if err := bs.dao.UpdateBuffUserStatus(int(task.Account.ID), 0); err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"account_id": task.Account.ID,
-			"error":      err.Error(),
-		}).Warn("[BuffBuyScraper] 更新账号状态失败")
+		fmt.Println("更新账号状态失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 错误：", err)
 	}
 
 	// 取消任务上下文
@@ -576,12 +547,7 @@ func (bs *BuffBuyScraper) cleanupInactiveTasks() {
 
 	// 清理不活跃的任务
 	for _, task := range inactiveTasks {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":     "buff_buy",
-			"account_id":  task.Account.ID,
-			"account":     task.Account.Account,
-			"last_active": task.LastActive.Format("2006-01-02 15:04:05"),
-		}).Info("[BuffBuyScraper] 清理不活跃的账号任务")
+		fmt.Println("清理不活跃的账号任务 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 最后活跃时间：", task.LastActive.Format("2006-01-02 15:04:05"))
 
 		bs.cleanupAccountTask(task)
 	}
@@ -592,10 +558,7 @@ func (bs *BuffBuyScraper) stopAllAccountTasks() {
 	bs.tasksMux.Lock()
 	defer bs.tasksMux.Unlock()
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"task_count": len(bs.accountTasks),
-	}).Info("[BuffBuyScraper] 停止所有账号抓取任务")
+	fmt.Println("停止所有账号抓取任务 平台：", bs.GetPlatform(), " 任务数量：", len(bs.accountTasks))
 
 	for _, task := range bs.accountTasks {
 		if task.Cancel != nil {
@@ -611,81 +574,38 @@ func (bs *BuffBuyScraper) stopAllAccountTasks() {
 func (bs *BuffBuyScraper) processResponse(result *interfaces.ScrapingResult) error {
 	startTime := time.Now()
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":     "buff_buy",
-		"task_id":     result.TaskID,
-		"status_code": result.StatusCode,
-		"body_size":   len(result.Body),
-	}).Info("[BuffBuyScraper] 开始处理响应数据")
+	fmt.Println("开始处理响应数据 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 状态码：", result.StatusCode, " 响应体大小：", len(result.Body))
 
 	if result.StatusCode != http.StatusOK {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":     "buff_buy",
-			"task_id":     result.TaskID,
-			"status_code": result.StatusCode,
-		}).Error("[BuffBuyScraper] HTTP状态码错误")
+		fmt.Println("HTTP状态码错误 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 状态码：", result.StatusCode)
 		return fmt.Errorf("HTTP error: %d", result.StatusCode)
 	}
 
 	var buffData BuffBuyData
 	if err := json.Unmarshal(result.Body, &buffData); err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":      "buff_buy",
-			"task_id":      result.TaskID,
-			"error":        err.Error(),
-			"body_preview": string(result.Body[:min(len(result.Body), 200)]),
-		}).Error("[BuffBuyScraper] JSON解析失败")
+		fmt.Println("JSON解析失败 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 错误：", err)
 		return fmt.Errorf("JSON解析失败: %v", err)
 	}
 
 	if buffData.Code != "OK" {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":  "buff_buy",
-			"task_id":  result.TaskID,
-			"api_code": buffData.Code,
-			"body":     string(result.Body),
-		}).Error("[BuffBuyScraper] API返回错误")
+		fmt.Println("API返回错误 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " API码：", buffData.Code)
 		return fmt.Errorf("API返回错误: %s", buffData.Code)
 	}
 
 	itemCount := len(buffData.Result.Items)
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":    "buff_buy",
-		"task_id":    result.TaskID,
-		"item_count": itemCount,
-		"api_code":   buffData.Code,
-	}).Info("[BuffBuyScraper] 响应数据解析成功")
+	fmt.Println("响应数据解析成功 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 商品数量：", itemCount, " API码：", buffData.Code)
 
 	// 处理商品数据
 	err := bs.processItems(buffData.Result.Items)
 
 	duration := time.Since(startTime)
 	if err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"task_id":    result.TaskID,
-			"item_count": itemCount,
-			"duration":   duration.String(),
-			"error":      err.Error(),
-		}).Error("[BuffBuyScraper] 处理商品数据失败")
+		fmt.Println("处理商品数据失败 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 商品数量：", itemCount, " 持续时间：", duration.String(), " 错误：", err)
 	} else {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":    "buff_buy",
-			"task_id":    result.TaskID,
-			"item_count": itemCount,
-			"duration":   duration.String(),
-		}).Info("[BuffBuyScraper] 响应数据处理完成")
+		fmt.Println("响应数据处理完成 平台：", bs.GetPlatform(), " 任务ID：", result.TaskID, " 商品数量：", itemCount, " 持续时间：", duration.String())
 	}
 
 	return err
-}
-
-// min 辅助函数
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // processItems 处理商品数据
@@ -693,16 +613,10 @@ func (bs *BuffBuyScraper) processItems(items []BuffBuyItem) error {
 	startTime := time.Now()
 	itemCount := len(items)
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":     "buff_buy",
-		"item_count":  itemCount,
-		"concurrency": 10,
-	}).Info("[BuffBuyScraper] 开始处理商品数据")
+	fmt.Println("开始处理商品数据 平台：", bs.GetPlatform(), " 商品数量：", itemCount, " 并发数：", 10)
 
 	if itemCount == 0 {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper": "buff_buy",
-		}).Warn("[BuffBuyScraper] 没有商品数据需要处理")
+		fmt.Println("没有商品数据需要处理 平台：", bs.GetPlatform())
 		return nil
 	}
 
@@ -717,30 +631,14 @@ func (bs *BuffBuyScraper) processItems(items []BuffBuyItem) error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper":   "buff_buy",
-				"item_id":   item.Id,
-				"item_name": item.Name,
-				"index":     index + 1,
-				"total":     itemCount,
-				"price":     item.BuyMaxPrice,
-			}).Debug("[BuffBuyScraper] 开始处理单个商品")
+			fmt.Println("开始处理单个商品 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 索引：", index+1, " 总数：", itemCount, " 价格：", item.BuyMaxPrice)
 
 			if err := bs.processItem(item); err != nil {
 				atomic.AddInt32(&failCount, 1)
-				global.Logger.WithFields(map[string]interface{}{
-					"scraper":   "buff_buy",
-					"item_id":   item.Id,
-					"item_name": item.Name,
-					"error":     err.Error(),
-				}).Error("[BuffBuyScraper] 处理商品失败")
+				fmt.Println("处理商品失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 错误：", err)
 			} else {
 				atomic.AddInt32(&successCount, 1)
-				global.Logger.WithFields(map[string]interface{}{
-					"scraper":   "buff_buy",
-					"item_id":   item.Id,
-					"item_name": item.Name,
-				}).Debug("[BuffBuyScraper] 商品处理成功")
+				fmt.Println("商品处理成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name)
 			}
 		}(i, item)
 	}
@@ -748,14 +646,7 @@ func (bs *BuffBuyScraper) processItems(items []BuffBuyItem) error {
 	wg.Wait()
 
 	duration := time.Since(startTime)
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":       "buff_buy",
-		"total_items":   itemCount,
-		"success_count": int(successCount),
-		"fail_count":    int(failCount),
-		"duration":      duration.String(),
-		"items_per_sec": float64(itemCount) / duration.Seconds(),
-	}).Info("[BuffBuyScraper] 商品数据处理完成")
+	fmt.Println("商品数据处理完成 平台：", bs.GetPlatform(), " 商品数量：", itemCount, " 成功数：", successCount, " 失败数：", failCount, " 持续时间：", duration.String(), " 每秒处理数：", float64(itemCount)/duration.Seconds())
 
 	return nil
 }
@@ -767,13 +658,7 @@ func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
 	// 转换价格
 	price, err := strconv.ParseFloat(item.BuyMaxPrice, 64)
 	if err != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper":   "buff_buy",
-			"item_id":   item.Id,
-			"item_name": item.Name,
-			"price_str": item.BuyMaxPrice,
-			"error":     err.Error(),
-		}).Error("[BuffBuyScraper] 价格转换失败")
+		fmt.Println("价格转换失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 价格：", item.BuyMaxPrice, " 错误：", err)
 		return fmt.Errorf("价格转换失败: %v", err)
 	}
 
@@ -789,14 +674,7 @@ func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
 		"modified_on":      time.Now().Unix(),
 	}
 
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":   "buff_buy",
-		"item_id":   item.Id,
-		"item_name": item.Name,
-		"price":     price,
-		"buy_num":   item.BuyNum,
-		"appid":     item.Appid,
-	}).Debug("[BuffBuyScraper] 商品数据创建成功")
+	fmt.Println("商品数据创建成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 价格：", price, " 购买数量：", item.BuyNum, " AppID：", item.Appid)
 
 	// 这里可以实现具体的数据库保存逻辑
 	_ = itemData // 暂时忽略，避免编译错误
@@ -805,35 +683,16 @@ func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
 	cacheKey := fmt.Sprintf("buff_buy:%d", item.Id)
 	if data, err := json.Marshal(itemData); err == nil {
 		if err := gredis.Set(cacheKey, string(data), 10*time.Minute); err != nil {
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper":   "buff_buy",
-				"item_id":   item.Id,
-				"cache_key": cacheKey,
-				"error":     err.Error(),
-			}).Warn("[BuffBuyScraper] Redis缓存保存失败")
+			fmt.Println("Redis缓存保存失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 缓存键：", cacheKey, " 错误：", err)
 		} else {
-			global.Logger.WithFields(map[string]interface{}{
-				"scraper":   "buff_buy",
-				"item_id":   item.Id,
-				"cache_key": cacheKey,
-				"ttl":       "10m",
-			}).Debug("[BuffBuyScraper] 商品数据已缓存到Redis")
+			fmt.Println("商品数据已缓存到Redis 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 缓存键：", cacheKey, " TTL：", 10*time.Minute)
 		}
 	} else {
-		global.Logger.WithFields(map[string]interface{}{
-			"scraper": "buff_buy",
-			"item_id": item.Id,
-			"error":   err.Error(),
-		}).Error("[BuffBuyScraper] 商品数据JSON序列化失败")
+		fmt.Println("商品数据JSON序列化失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 错误：", err)
 	}
 
 	duration := time.Since(startTime)
-	global.Logger.WithFields(map[string]interface{}{
-		"scraper":   "buff_buy",
-		"item_id":   item.Id,
-		"item_name": item.Name,
-		"duration":  duration.String(),
-	}).Debug("[BuffBuyScraper] 单个商品处理完成")
+	fmt.Println("单个商品处理完成 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 持续时间：", duration.String())
 
 	return nil
 }

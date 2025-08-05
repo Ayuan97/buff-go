@@ -147,15 +147,21 @@ func initialize() error {
 func createManagers() (*Managers, error) {
 	// 创建DAO
 	daoInstance := dao.New(global.DBEngine)
-	ProxyManagerConfig := proxy.ProxyManagerConfig{
-		MaxFailCount:    5,
-		HealthCheckURL:  "",
-		CheckInterval:   5 * time.Minute,  // 每5分钟检查一次代理健康状态
-		RefreshInterval: 10 * time.Minute, // 每10分钟刷新一次代理池
-		MaxUsageTime:    30 * time.Minute, // 代理最大使用时间30分钟
+	// 使用默认配置，并根据环境调整
+	var proxyConfig *proxy.ProxyManagerConfig
+	if os.Getenv("ENV") == "production" {
+		proxyConfig = proxy.ProductionProxyConfig()
+	} else {
+		proxyConfig = proxy.DevelopmentProxyConfig()
 	}
+
+	// 可以根据需要进一步自定义配置
+	proxyConfig = proxy.NewProxyManagerWithOptions(proxyConfig,
+		proxy.WithTimings(5*time.Minute, 10*time.Minute, 30*time.Minute),
+		proxy.WithLocalProxy(true, interfaces.PlatformBuff, interfaces.PlatformSteam),
+	)
 	// 创建各种管理器
-	proxyManager := proxy.NewProxyManager(&ProxyManagerConfig)
+	proxyManager := proxy.NewProxyManager(proxyConfig)
 	errorHandler := errorhandler.NewErrorHandler()
 	httpManager := client.NewHTTPClientManager(proxyManager, errorHandler)
 	configManager := config.NewConfigManager()

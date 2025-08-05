@@ -107,6 +107,7 @@ const (
 	ProxyRegionDomestic ProxyRegion = iota + 1 // 国内代理
 	ProxyRegionHongKong                        // 香港代理
 	ProxyRegionOverseas                        // 海外代理
+	ProxyRegionLocal                           // 本机代理（直连）
 )
 
 // PlatformStatus 平台状态

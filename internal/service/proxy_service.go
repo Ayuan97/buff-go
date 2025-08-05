@@ -31,6 +31,11 @@ func NewProxyService() *ProxyService {
 			interfaces.PlatformBuff:  3,
 			interfaces.PlatformSteam: 5,
 		},
+		EnableLocalProxy: true, // 启用本机代理作为备用
+		LocalProxyPlatforms: []interfaces.Platform{
+			interfaces.PlatformBuff,
+			interfaces.PlatformSteam,
+		},
 	}
 
 	return &ProxyService{
@@ -65,6 +70,21 @@ func (ps *ProxyService) GetProxyForPlatformLegacy(platform model.Platform) (*mod
 		}
 	}
 	return nil, "", "", fmt.Errorf("no available proxy for platform %s", platform)
+}
+
+// IsLocalProxyEnabled 检查是否启用了本机代理
+func (ps *ProxyService) IsLocalProxyEnabled() bool {
+	return ps.manager.IsLocalProxyEnabled()
+}
+
+// IsLocalProxySupportedForPlatform 检查本机代理是否支持指定平台
+func (ps *ProxyService) IsLocalProxySupportedForPlatform(platform interfaces.Platform) bool {
+	return ps.manager.IsLocalProxySupportedForPlatform(platform)
+}
+
+// GetLocalProxy 获取本机代理信息
+func (ps *ProxyService) GetLocalProxy() *interfaces.ProxyInfo {
+	return ps.manager.GetLocalProxy()
 }
 
 // MarkProxyFailedForPlatform 标记代理在指定平台失败
