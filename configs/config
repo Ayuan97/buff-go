@@ -11,10 +11,10 @@ Log: # 日志
   LogFileExt: .log
 Database: # 数据库
   DBType: mysql
-  Username: buff	# 填写你的数据库账号
-  Password: yTaThejCCBd7eJmH # 填写你的数据库密码
+  Username: root	# 填写你的数据库账号
+  Password: root # 填写你的数据库密码
   Host: 127.0.0.1:3306
-  DBName: buff
+  DBName: buff_go
   TablePrefix: bf_
   Charset: utf8mb4
   ParseTime: True
@@ -24,5 +24,5 @@ Database: # 数据库
 Redis:
   Host: 127.0.0.1:6379
   Password: zhaochengyuan
-  DB: 1
+  DB: 3
   Prefix: buff-

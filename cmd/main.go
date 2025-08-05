@@ -4,7 +4,14 @@ import (
 	"buff-go/global"
 	"buff-go/internal/dao"
 	"buff-go/internal/model"
-	"buff-go/internal/scraper/core"
+	"buff-go/internal/scraper/components/cache"
+	"buff-go/internal/scraper/components/client"
+	"buff-go/internal/scraper/components/config"
+	errorhandler "buff-go/internal/scraper/components/error"
+	"buff-go/internal/scraper/components/proxy"
+	"buff-go/internal/scraper/components/task"
+	"buff-go/internal/scraper/core/factory"
+	"buff-go/internal/scraper/interfaces"
 	"buff-go/internal/service"
 	"buff-go/pkg/logger"
 	"buff-go/pkg/setting"
@@ -23,7 +30,6 @@ import (
 
 var (
 	scraperTypes = flag.String("scrapers", "buff_buy", "Comma-separated list of scrapers to run (buff_buy,buff_sell,steam_buy,steam_sell)")
-	configFile   = flag.String("config", "", "Path to config file")
 )
 
 func main() {
@@ -45,7 +51,7 @@ func main() {
 	}
 
 	// 创建抓取器工厂和管理器
-	scraperFactory := core.NewScraperFactory(managers.dao)
+	scraperFactory := factory.NewScraperFactory(managers.dao)
 	scraperFactory.SetManagers(
 		managers.httpManager,
 		managers.proxyManager,
@@ -55,7 +61,7 @@ func main() {
 		managers.taskManager,
 	)
 
-	scraperManager := core.NewScraperManager(scraperFactory)
+	scraperManager := factory.NewScraperManager(scraperFactory)
 
 	// 解析要启动的抓取器类型
 	types := parseScraperTypes(*scraperTypes)
@@ -86,12 +92,12 @@ func main() {
 // Managers 管理器集合
 type Managers struct {
 	dao           *dao.Dao
-	httpManager   core.IHTTPClientManager
-	proxyManager  core.IProxyManager
-	configManager core.IConfigManager
-	cacheManager  core.ICacheManager
-	errorHandler  core.IErrorHandler
-	taskManager   core.ITaskManager
+	httpManager   interfaces.IHTTPClientManager
+	proxyManager  interfaces.IProxyManager
+	configManager interfaces.IConfigManager
+	cacheManager  interfaces.ICacheManager
+	errorHandler  interfaces.IErrorHandler
+	taskManager   interfaces.ITaskManager
 }
 
 // initialize 初始化基础组件
@@ -121,14 +127,20 @@ func initialize() error {
 func createManagers() (*Managers, error) {
 	// 创建DAO
 	daoInstance := dao.New(global.DBEngine)
-
+	ProxyManagerConfig := proxy.ProxyManagerConfig{
+		MaxFailCount:    5,
+		HealthCheckURL:  "",
+		CheckInterval:   5 * time.Minute,  // 每5分钟检查一次代理健康状态
+		RefreshInterval: 10 * time.Minute, // 每10分钟刷新一次代理池
+		MaxUsageTime:    30 * time.Minute, // 代理最大使用时间30分钟
+	}
 	// 创建各种管理器
-	proxyManager := core.NewProxyManager()
-	errorHandler := core.NewErrorHandler()
-	httpManager := core.NewHTTPClientManager(proxyManager, errorHandler)
-	configManager := core.NewConfigManager()
-	cacheManager := core.NewCacheManager()
-	taskManager := core.NewTaskManager()
+	proxyManager := proxy.NewProxyManager(&ProxyManagerConfig)
+	errorHandler := errorhandler.NewErrorHandler()
+	httpManager := client.NewHTTPClientManager(proxyManager, errorHandler)
+	configManager := config.NewConfigManager()
+	cacheManager := cache.NewCacheManager("scraper")
+	taskManager := task.NewTaskManager()
 
 	return &Managers{
 		dao:           daoInstance,
@@ -142,14 +154,14 @@ func createManagers() (*Managers, error) {
 }
 
 // parseScraperTypes 解析抓取器类型
-func parseScraperTypes(typesStr string) []core.ScraperType {
-	var types []core.ScraperType
+func parseScraperTypes(typesStr string) []interfaces.ScraperType {
+	var types []interfaces.ScraperType
 
 	parts := strings.Split(typesStr, ",")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {
-			types = append(types, core.ScraperType(part))
+			types = append(types, interfaces.ScraperType(part))
 		}
 	}
 
@@ -157,7 +169,7 @@ func parseScraperTypes(typesStr string) []core.ScraperType {
 }
 
 // waitForSignal 等待信号
-func waitForSignal(scraperManager *core.ScraperManager) {
+func waitForSignal(scraperManager *factory.ScraperManager) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 

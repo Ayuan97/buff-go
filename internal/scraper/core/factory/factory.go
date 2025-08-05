@@ -1,31 +1,24 @@
-package core
+package factory
 
 import (
 	"buff-go/internal/dao"
+	"buff-go/internal/scraper/engines/buff"
+	"buff-go/internal/scraper/engines/steam"
+	"buff-go/internal/scraper/interfaces"
 	"context"
 	"fmt"
 	"time"
 )
 
-// ScraperType 抓取器类型
-type ScraperType string
-
-const (
-	ScraperTypeBuffBuy   ScraperType = "buff_buy"
-	ScraperTypeBuffSell  ScraperType = "buff_sell"
-	ScraperTypeSteamBuy  ScraperType = "steam_buy"
-	ScraperTypeSteamSell ScraperType = "steam_sell"
-)
-
 // ScraperFactory 抓取器工厂
 type ScraperFactory struct {
 	dao           *dao.Dao
-	httpManager   IHTTPClientManager
-	proxyManager  IProxyManager
-	configManager IConfigManager
-	cacheManager  ICacheManager
-	errorHandler  IErrorHandler
-	taskManager   ITaskManager
+	httpManager   interfaces.IHTTPClientManager
+	proxyManager  interfaces.IProxyManager
+	configManager interfaces.IConfigManager
+	cacheManager  interfaces.ICacheManager
+	errorHandler  interfaces.IErrorHandler
+	taskManager   interfaces.ITaskManager
 }
 
 // NewScraperFactory 创建抓取器工厂
@@ -37,12 +30,12 @@ func NewScraperFactory(dao *dao.Dao) *ScraperFactory {
 
 // SetManagers 设置管理器
 func (sf *ScraperFactory) SetManagers(
-	httpManager IHTTPClientManager,
-	proxyManager IProxyManager,
-	configManager IConfigManager,
-	cacheManager ICacheManager,
-	errorHandler IErrorHandler,
-	taskManager ITaskManager,
+	httpManager interfaces.IHTTPClientManager,
+	proxyManager interfaces.IProxyManager,
+	configManager interfaces.IConfigManager,
+	cacheManager interfaces.ICacheManager,
+	errorHandler interfaces.IErrorHandler,
+	taskManager interfaces.ITaskManager,
 ) {
 	sf.httpManager = httpManager
 	sf.proxyManager = proxyManager
@@ -53,18 +46,18 @@ func (sf *ScraperFactory) SetManagers(
 }
 
 // CreateScraper 创建抓取器
-func (sf *ScraperFactory) CreateScraper(scraperType ScraperType) (IScraper, error) {
-	var scraper IScraper
+func (sf *ScraperFactory) CreateScraper(scraperType interfaces.ScraperType) (interfaces.IScraper, error) {
+	var scraper interfaces.IScraper
 	var err error
 
 	switch scraperType {
-	case ScraperTypeBuffBuy:
+	case interfaces.ScraperTypeBuffBuy:
 		scraper, err = sf.createBuffBuyScraper()
-	case ScraperTypeBuffSell:
+	case interfaces.ScraperTypeBuffSell:
 		scraper, err = sf.createBuffSellScraper()
-	case ScraperTypeSteamBuy:
+	case interfaces.ScraperTypeSteamBuy:
 		scraper, err = sf.createSteamBuyScraper()
-	case ScraperTypeSteamSell:
+	case interfaces.ScraperTypeSteamSell:
 		scraper, err = sf.createSteamSellScraper()
 	default:
 		return nil, fmt.Errorf("unknown scraper type: %s", scraperType)
@@ -76,7 +69,7 @@ func (sf *ScraperFactory) CreateScraper(scraperType ScraperType) (IScraper, erro
 
 	// 设置管理器（通过接口设置）
 	if manageable, ok := scraper.(interface {
-		SetManagers(IHTTPClientManager, IProxyManager, IConfigManager, ICacheManager, IErrorHandler, ITaskManager)
+		SetManagers(interfaces.IHTTPClientManager, interfaces.IProxyManager, interfaces.IConfigManager, interfaces.ICacheManager, interfaces.IErrorHandler, interfaces.ITaskManager)
 	}); ok {
 		manageable.SetManagers(
 			sf.httpManager,
@@ -92,13 +85,13 @@ func (sf *ScraperFactory) CreateScraper(scraperType ScraperType) (IScraper, erro
 }
 
 // createBuffBuyScraper 创建Buff买入抓取器
-func (sf *ScraperFactory) createBuffBuyScraper() (IScraper, error) {
-	scraper := NewBuffBuyScraper(sf.dao)
+func (sf *ScraperFactory) createBuffBuyScraper() (interfaces.IScraper, error) {
+	scraper := buff.NewBuffBuyScraper(sf.dao)
 
 	// 获取配置
-	var config *ScraperConfig
+	var config *interfaces.ScraperConfig
 	// 使用默认配置
-	config = &ScraperConfig{
+	config = &interfaces.ScraperConfig{
 		Name:           "buff_buy",
 		MaxConcurrency: 5,
 		RequestDelay:   time.Second,
@@ -118,13 +111,13 @@ func (sf *ScraperFactory) createBuffBuyScraper() (IScraper, error) {
 }
 
 // createBuffSellScraper 创建Buff卖出抓取器
-func (sf *ScraperFactory) createBuffSellScraper() (IScraper, error) {
-	scraper := NewBuffSellScraper(sf.dao)
+func (sf *ScraperFactory) createBuffSellScraper() (interfaces.IScraper, error) {
+	scraper := buff.NewBuffSellScraper(sf.dao)
 
 	// 获取配置
-	var config *ScraperConfig
+	var config *interfaces.ScraperConfig
 	// 使用默认配置
-	config = &ScraperConfig{
+	config = &interfaces.ScraperConfig{
 		Name:           "buff_sell",
 		MaxConcurrency: 3,
 		RequestDelay:   2 * time.Second,
@@ -144,10 +137,10 @@ func (sf *ScraperFactory) createBuffSellScraper() (IScraper, error) {
 }
 
 // createSteamBuyScraper 创建Steam买入抓取器
-func (sf *ScraperFactory) createSteamBuyScraper() (IScraper, error) {
-	baseScraper := NewBaseScraper("steam_buy")
+func (sf *ScraperFactory) createSteamBuyScraper() (interfaces.IScraper, error) {
+	scraper := steam.NewSteamBuyScraper()
 
-	config := &ScraperConfig{
+	config := &interfaces.ScraperConfig{
 		Name:           "steam_buy",
 		MaxConcurrency: 3,
 		RequestDelay:   2 * time.Second,
@@ -158,18 +151,18 @@ func (sf *ScraperFactory) createSteamBuyScraper() (IScraper, error) {
 		CacheTTL:       10 * time.Minute,
 	}
 
-	if err := baseScraper.Initialize(config); err != nil {
+	if err := scraper.Initialize(config); err != nil {
 		return nil, fmt.Errorf("failed to initialize steam buy scraper: %v", err)
 	}
 
-	return baseScraper, nil
+	return scraper, nil
 }
 
 // createSteamSellScraper 创建Steam卖出抓取器
-func (sf *ScraperFactory) createSteamSellScraper() (IScraper, error) {
-	baseScraper := NewBaseScraper("steam_sell")
+func (sf *ScraperFactory) createSteamSellScraper() (interfaces.IScraper, error) {
+	scraper := steam.NewSteamSellScraper()
 
-	config := &ScraperConfig{
+	config := &interfaces.ScraperConfig{
 		Name:           "steam_sell",
 		MaxConcurrency: 3,
 		RequestDelay:   2 * time.Second,
@@ -180,25 +173,25 @@ func (sf *ScraperFactory) createSteamSellScraper() (IScraper, error) {
 		CacheTTL:       10 * time.Minute,
 	}
 
-	if err := baseScraper.Initialize(config); err != nil {
+	if err := scraper.Initialize(config); err != nil {
 		return nil, fmt.Errorf("failed to initialize steam sell scraper: %v", err)
 	}
 
-	return baseScraper, nil
+	return scraper, nil
 }
 
 // GetAvailableScraperTypes 获取可用的抓取器类型
-func (sf *ScraperFactory) GetAvailableScraperTypes() []ScraperType {
-	return []ScraperType{
-		ScraperTypeBuffBuy,
-		ScraperTypeBuffSell,
-		ScraperTypeSteamBuy,
-		ScraperTypeSteamSell,
+func (sf *ScraperFactory) GetAvailableScraperTypes() []interfaces.ScraperType {
+	return []interfaces.ScraperType{
+		interfaces.ScraperTypeBuffBuy,
+		interfaces.ScraperTypeBuffSell,
+		interfaces.ScraperTypeSteamBuy,
+		interfaces.ScraperTypeSteamSell,
 	}
 }
 
 // ValidateScraperType 验证抓取器类型
-func (sf *ScraperFactory) ValidateScraperType(scraperType ScraperType) bool {
+func (sf *ScraperFactory) ValidateScraperType(scraperType interfaces.ScraperType) bool {
 	availableTypes := sf.GetAvailableScraperTypes()
 	for _, t := range availableTypes {
 		if t == scraperType {
@@ -211,22 +204,22 @@ func (sf *ScraperFactory) ValidateScraperType(scraperType ScraperType) bool {
 // ScraperManager 抓取器管理器
 type ScraperManager struct {
 	factory  *ScraperFactory
-	scrapers map[ScraperType]IScraper
+	scrapers map[interfaces.ScraperType]interfaces.IScraper
 }
 
 // NewScraperManager 创建抓取器管理器
 func NewScraperManager(factory *ScraperFactory) *ScraperManager {
 	return &ScraperManager{
 		factory:  factory,
-		scrapers: make(map[ScraperType]IScraper),
+		scrapers: make(map[interfaces.ScraperType]interfaces.IScraper),
 	}
 }
 
 // StartScraper 启动抓取器
-func (sm *ScraperManager) StartScraper(scraperType ScraperType) error {
+func (sm *ScraperManager) StartScraper(scraperType interfaces.ScraperType) error {
 	// 检查抓取器是否已经在运行
 	if scraper, exists := sm.scrapers[scraperType]; exists {
-		if scraper.GetStatus() == StatusRunning {
+		if scraper.GetStatus() == interfaces.StatusRunning {
 			return fmt.Errorf("scraper %s is already running", scraperType)
 		}
 	}
@@ -247,7 +240,7 @@ func (sm *ScraperManager) StartScraper(scraperType ScraperType) error {
 }
 
 // StopScraper 停止抓取器
-func (sm *ScraperManager) StopScraper(scraperType ScraperType) error {
+func (sm *ScraperManager) StopScraper(scraperType interfaces.ScraperType) error {
 	scraper, exists := sm.scrapers[scraperType]
 	if !exists {
 		return fmt.Errorf("scraper %s not found", scraperType)
@@ -262,18 +255,18 @@ func (sm *ScraperManager) StopScraper(scraperType ScraperType) error {
 }
 
 // GetScraperStatus 获取抓取器状态
-func (sm *ScraperManager) GetScraperStatus(scraperType ScraperType) (ScraperStatus, error) {
+func (sm *ScraperManager) GetScraperStatus(scraperType interfaces.ScraperType) (interfaces.ScraperStatus, error) {
 	scraper, exists := sm.scrapers[scraperType]
 	if !exists {
-		return StatusStopped, nil
+		return interfaces.StatusStopped, nil
 	}
 
 	return scraper.GetStatus(), nil
 }
 
 // GetAllScraperStatus 获取所有抓取器状态
-func (sm *ScraperManager) GetAllScraperStatus() map[ScraperType]ScraperStatus {
-	status := make(map[ScraperType]ScraperStatus)
+func (sm *ScraperManager) GetAllScraperStatus() map[interfaces.ScraperType]interfaces.ScraperStatus {
+	status := make(map[interfaces.ScraperType]interfaces.ScraperStatus)
 
 	for scraperType, scraper := range sm.scrapers {
 		status[scraperType] = scraper.GetStatus()
@@ -297,37 +290,4 @@ func (sm *ScraperManager) StopAllScrapers() error {
 	}
 
 	return nil
-}
-
-// 临时构造函数，用于解决循环导入问题
-
-// NewProxyManager 创建代理管理器
-func NewProxyManager() IProxyManager {
-	// 返回一个简单的实现
-	return &simpleProxyManager{}
-}
-
-// NewErrorHandler 创建错误处理器
-func NewErrorHandler() IErrorHandler {
-	return &simpleErrorHandler{}
-}
-
-// NewHTTPClientManager 创建HTTP客户端管理器
-func NewHTTPClientManager(proxyMgr IProxyManager, errorHandler IErrorHandler) IHTTPClientManager {
-	return &simpleHTTPClientManager{}
-}
-
-// NewConfigManager 创建配置管理器
-func NewConfigManager() IConfigManager {
-	return &simpleConfigManager{}
-}
-
-// NewCacheManager 创建缓存管理器
-func NewCacheManager() ICacheManager {
-	return &simpleCacheManager{}
-}
-
-// NewTaskManager 创建任务管理器
-func NewTaskManager() ITaskManager {
-	return &simpleTaskManager{}
 }

@@ -1,11 +1,10 @@
-package framework
+package error
 
 import (
-	"buff-go/global"
-	"context"
+	"buff-go/internal/scraper/interfaces"
 	"fmt"
+	"log"
 	"net"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -13,46 +12,33 @@ import (
 
 // ErrorHandler 错误处理器实现
 type ErrorHandler struct {
-	maxRetryCount int
+	maxRetryDelay time.Duration
 	baseDelay     time.Duration
 }
 
 // NewErrorHandler 创建错误处理器
 func NewErrorHandler() *ErrorHandler {
 	return &ErrorHandler{
-		maxRetryCount: 3,
+		maxRetryDelay: 5 * time.Minute,
 		baseDelay:     time.Second,
 	}
 }
 
 // HandleError 处理错误
-func (eh *ErrorHandler) HandleError(err error, context map[string]interface{}) *ScrapingError {
+func (eh *ErrorHandler) HandleError(err error, context map[string]interface{}) *interfaces.ScrapingError {
 	if err == nil {
 		return nil
 	}
 
-	scrapingErr := &ScrapingError{
+	scrapingErr := &interfaces.ScrapingError{
 		Message:   err.Error(),
+		Details:   fmt.Sprintf("Context: %+v", context),
 		Timestamp: time.Now(),
 		Retryable: eh.IsRetryable(err),
 	}
 
-	// 根据错误类型分类
-	scrapingErr.Type = eh.classifyError(err)
-	scrapingErr.Code = eh.getErrorCode(scrapingErr.Type)
-
-	// 添加上下文信息
-	if context != nil {
-		if url, ok := context["url"].(string); ok {
-			scrapingErr.Details = fmt.Sprintf("URL: %s", url)
-		}
-		if proxy, ok := context["proxy"].(string); ok {
-			scrapingErr.Details += fmt.Sprintf(", Proxy: %s", proxy)
-		}
-	}
-
-	// 记录错误
-	eh.LogError(scrapingErr)
+	// 根据错误类型设置错误代码和类型
+	scrapingErr.Type, scrapingErr.Code = eh.classifyError(err)
 
 	return scrapingErr
 }
@@ -63,22 +49,46 @@ func (eh *ErrorHandler) IsRetryable(err error) bool {
 		return false
 	}
 
-	errorType := eh.classifyError(err)
+	errStr := strings.ToLower(err.Error())
 
-	switch errorType {
-	case ErrorTypeNetwork, ErrorTypeTimeout, ErrorTypeProxy:
+	// 网络相关错误通常可重试
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "temporary failure") {
 		return true
-	case ErrorTypeRateLimit:
+	}
+
+	// 检查是否是网络错误
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Temporary() || netErr.Timeout()
+	}
+
+	// URL错误通常不可重试
+	if _, ok := err.(*url.Error); ok {
+		return eh.IsRetryable(err.(*url.Error).Err)
+	}
+
+	// HTTP状态码相关
+	if strings.Contains(errStr, "500") ||
+		strings.Contains(errStr, "502") ||
+		strings.Contains(errStr, "503") ||
+		strings.Contains(errStr, "504") ||
+		strings.Contains(errStr, "429") { // Too Many Requests
 		return true
-	case ErrorTypeAuth:
-		return false // 认证错误通常不可重试
-	case ErrorTypeParsing, ErrorTypeValidation:
-		return false // 解析和验证错误通常不可重试
-	case ErrorTypeSystem:
-		return false // 系统错误通常不可重试
-	default:
+	}
+
+	// 4xx错误通常不可重试（除了429）
+	if strings.Contains(errStr, "400") ||
+		strings.Contains(errStr, "401") ||
+		strings.Contains(errStr, "403") ||
+		strings.Contains(errStr, "404") {
 		return false
 	}
+
+	return false
 }
 
 // GetRetryDelay 获取重试延迟
@@ -87,78 +97,74 @@ func (eh *ErrorHandler) GetRetryDelay(retryCount int) time.Duration {
 		return eh.baseDelay
 	}
 
-	// 指数退避策略
+	// 指数退避算法
 	delay := eh.baseDelay
-	for i := 0; i < retryCount && i < 5; i++ {
+	for i := 0; i < retryCount; i++ {
 		delay *= 2
-	}
-
-	// 最大延迟不超过30秒
-	if delay > 30*time.Second {
-		delay = 30 * time.Second
+		if delay > eh.maxRetryDelay {
+			delay = eh.maxRetryDelay
+			break
+		}
 	}
 
 	return delay
 }
 
 // LogError 记录错误
-func (eh *ErrorHandler) LogError(err *ScrapingError) {
-	if global.Logger != nil {
-		global.Logger.WithFields(map[string]interface{}{
-			"type":      err.Type,
-			"code":      err.Code,
-			"retryable": err.Retryable,
-			"details":   err.Details,
-		}).Error(err.Message)
-	} else {
-		fmt.Printf("[ERROR] %s - %s (Type: %d, Code: %s, Retryable: %t)\n",
-			err.Timestamp.Format("2006-01-02 15:04:05"),
-			err.Message,
-			err.Type,
-			err.Code,
-			err.Retryable)
+func (eh *ErrorHandler) LogError(err *interfaces.ScrapingError) {
+	if err == nil {
+		return
 	}
+
+	logMsg := fmt.Sprintf("[%s] %s - %s (Code: %s, Retryable: %v)",
+		eh.errorTypeToString(err.Type),
+		err.Message,
+		err.Details,
+		err.Code,
+		err.Retryable,
+	)
+
+	log.Printf("ERROR: %s", logMsg)
 }
 
 // classifyError 分类错误
-func (eh *ErrorHandler) classifyError(err error) ErrorType {
+func (eh *ErrorHandler) classifyError(err error) (interfaces.ErrorType, string) {
 	if err == nil {
-		return ErrorTypeSystem
+		return interfaces.ErrorTypeSystem, "UNKNOWN"
 	}
 
 	errStr := strings.ToLower(err.Error())
 
-	// 网络相关错误
-	if strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "network is unreachable") ||
-		strings.Contains(errStr, "no route to host") {
-		return ErrorTypeNetwork
+	// 网络错误
+	if strings.Contains(errStr, "timeout") {
+		return interfaces.ErrorTypeTimeout, "TIMEOUT"
 	}
 
-	// 超时错误
-	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") {
-		return ErrorTypeTimeout
+	if strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "network") ||
+		strings.Contains(errStr, "host") {
+		return interfaces.ErrorTypeNetwork, "NETWORK"
 	}
 
-	// 代理相关错误
+	// 代理错误
 	if strings.Contains(errStr, "proxy") ||
 		strings.Contains(errStr, "socks") {
-		return ErrorTypeProxy
+		return interfaces.ErrorTypeProxy, "PROXY"
 	}
 
 	// 认证错误
-	if strings.Contains(errStr, "unauthorized") ||
+	if strings.Contains(errStr, "401") ||
+		strings.Contains(errStr, "unauthorized") ||
 		strings.Contains(errStr, "forbidden") ||
-		strings.Contains(errStr, "authentication") {
-		return ErrorTypeAuth
+		strings.Contains(errStr, "403") {
+		return interfaces.ErrorTypeAuth, "AUTH"
 	}
 
 	// 限流错误
-	if strings.Contains(errStr, "rate limit") ||
+	if strings.Contains(errStr, "429") ||
+		strings.Contains(errStr, "rate limit") ||
 		strings.Contains(errStr, "too many requests") {
-		return ErrorTypeRateLimit
+		return interfaces.ErrorTypeRateLimit, "RATE_LIMIT"
 	}
 
 	// 解析错误
@@ -166,143 +172,67 @@ func (eh *ErrorHandler) classifyError(err error) ErrorType {
 		strings.Contains(errStr, "xml") ||
 		strings.Contains(errStr, "parse") ||
 		strings.Contains(errStr, "unmarshal") {
-		return ErrorTypeParsing
+		return interfaces.ErrorTypeParsing, "PARSING"
 	}
 
 	// 验证错误
 	if strings.Contains(errStr, "validation") ||
-		strings.Contains(errStr, "invalid") {
-		return ErrorTypeValidation
-	}
-
-	// 检查具体的错误类型
-	switch err.(type) {
-	case *net.DNSError:
-		return ErrorTypeNetwork
-	case *net.OpError:
-		return ErrorTypeNetwork
-	case *url.Error:
-		if urlErr, ok := err.(*url.Error); ok {
-			return eh.classifyError(urlErr.Err)
-		}
-		return ErrorTypeNetwork
-	case *http.ProtocolError:
-		return ErrorTypeNetwork
-	}
-
-	// 检查context错误
-	if err == context.DeadlineExceeded {
-		return ErrorTypeTimeout
-	}
-	if err == context.Canceled {
-		return ErrorTypeSystem
+		strings.Contains(errStr, "invalid") ||
+		strings.Contains(errStr, "bad request") ||
+		strings.Contains(errStr, "400") {
+		return interfaces.ErrorTypeValidation, "VALIDATION"
 	}
 
 	// 默认为系统错误
-	return ErrorTypeSystem
+	return interfaces.ErrorTypeSystem, "SYSTEM"
 }
 
-// getErrorCode 获取错误代码
-func (eh *ErrorHandler) getErrorCode(errorType ErrorType) string {
-	switch errorType {
-	case ErrorTypeNetwork:
-		return "NETWORK_ERROR"
-	case ErrorTypeTimeout:
-		return "TIMEOUT_ERROR"
-	case ErrorTypeProxy:
-		return "PROXY_ERROR"
-	case ErrorTypeAuth:
-		return "AUTH_ERROR"
-	case ErrorTypeRateLimit:
-		return "RATE_LIMIT_ERROR"
-	case ErrorTypeParsing:
-		return "PARSING_ERROR"
-	case ErrorTypeValidation:
-		return "VALIDATION_ERROR"
-	case ErrorTypeSystem:
-		return "SYSTEM_ERROR"
+// errorTypeToString 将错误类型转换为字符串
+func (eh *ErrorHandler) errorTypeToString(et interfaces.ErrorType) string {
+	switch et {
+	case interfaces.ErrorTypeNetwork:
+		return "NETWORK"
+	case interfaces.ErrorTypeTimeout:
+		return "TIMEOUT"
+	case interfaces.ErrorTypeProxy:
+		return "PROXY"
+	case interfaces.ErrorTypeAuth:
+		return "AUTH"
+	case interfaces.ErrorTypeRateLimit:
+		return "RATE_LIMIT"
+	case interfaces.ErrorTypeParsing:
+		return "PARSING"
+	case interfaces.ErrorTypeValidation:
+		return "VALIDATION"
+	case interfaces.ErrorTypeSystem:
+		return "SYSTEM"
 	default:
-		return "UNKNOWN_ERROR"
+		return "UNKNOWN"
 	}
 }
 
-// CreateNetworkError 创建网络错误
-func (eh *ErrorHandler) CreateNetworkError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeNetwork,
-		Code:      "NETWORK_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: true,
+// GetErrorStats 获取错误统计信息
+func (eh *ErrorHandler) GetErrorStats() map[string]int {
+	// 这里可以实现错误统计的逻辑
+	// 目前返回空的统计信息
+	return map[string]int{
+		"network":    0,
+		"timeout":    0,
+		"proxy":      0,
+		"auth":       0,
+		"rate_limit": 0,
+		"parsing":    0,
+		"validation": 0,
+		"system":     0,
 	}
 }
 
-// CreateTimeoutError 创建超时错误
-func (eh *ErrorHandler) CreateTimeoutError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeTimeout,
-		Code:      "TIMEOUT_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: true,
-	}
+// SetMaxRetryDelay 设置最大重试延迟
+func (eh *ErrorHandler) SetMaxRetryDelay(delay time.Duration) {
+	eh.maxRetryDelay = delay
 }
 
-// CreateProxyError 创建代理错误
-func (eh *ErrorHandler) CreateProxyError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeProxy,
-		Code:      "PROXY_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: true,
-	}
-}
-
-// CreateAuthError 创建认证错误
-func (eh *ErrorHandler) CreateAuthError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeAuth,
-		Code:      "AUTH_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: false,
-	}
-}
-
-// CreateRateLimitError 创建限流错误
-func (eh *ErrorHandler) CreateRateLimitError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeRateLimit,
-		Code:      "RATE_LIMIT_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: true,
-	}
-}
-
-// CreateParsingError 创建解析错误
-func (eh *ErrorHandler) CreateParsingError(message string, details string) *ScrapingError {
-	return &ScrapingError{
-		Type:      ErrorTypeParsing,
-		Code:      "PARSING_ERROR",
-		Message:   message,
-		Details:   details,
-		Timestamp: time.Now(),
-		Retryable: false,
-	}
-}
-
-// ShouldRetry 判断是否应该重试
-func (eh *ErrorHandler) ShouldRetry(err error, retryCount int) bool {
-	if retryCount >= eh.maxRetryCount {
-		return false
-	}
-
-	return eh.IsRetryable(err)
+// SetBaseDelay 设置基础延迟
+func (eh *ErrorHandler) SetBaseDelay(delay time.Duration) {
+	eh.baseDelay = delay
 }

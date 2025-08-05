@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"buff-go/internal/scraper/core"
+	"buff-go/internal/scraper/interfaces"
 	"buff-go/pkg/gredis"
 	"encoding/json"
 	"fmt"
@@ -11,9 +11,9 @@ import (
 
 // CacheManager 缓存管理器实现
 type CacheManager struct {
-	localCache map[string]*core.CacheItem
+	localCache map[string]*interfaces.CacheItem
 	localMux   sync.RWMutex
-	stats      *core.CacheStats
+	stats      *interfaces.CacheStats
 	statsMux   sync.RWMutex
 	prefix     string
 }
@@ -21,8 +21,8 @@ type CacheManager struct {
 // NewCacheManager 创建缓存管理器
 func NewCacheManager(prefix string) *CacheManager {
 	cm := &CacheManager{
-		localCache: make(map[string]*core.CacheItem),
-		stats:      &core.CacheStats{},
+		localCache: make(map[string]*interfaces.CacheItem),
+		stats:      &interfaces.CacheStats{},
 		prefix:     prefix,
 	}
 
@@ -66,19 +66,20 @@ func (cm *CacheManager) Get(key string) (interface{}, error) {
 		return nil, fmt.Errorf("cache miss for key: %s", key)
 	}
 
-	// 解析缓存值
-	var cacheValue interface{}
-	if err := json.Unmarshal([]byte(value), &cacheValue); err != nil {
+	// 反序列化值
+	var result interface{}
+	if err := json.Unmarshal([]byte(value), &result); err != nil {
 		cm.updateStats(false)
 		return nil, fmt.Errorf("failed to unmarshal cache value: %v", err)
 	}
 
 	// 更新本地缓存
-	item := &core.CacheItem{
+	item := &interfaces.CacheItem{
 		Key:       key,
-		Value:     cacheValue,
+		Value:     result,
+		TTL:       5 * time.Minute, // 默认TTL
 		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(5 * time.Minute), // 本地缓存5分钟
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 
 	cm.localMux.Lock()
@@ -86,7 +87,7 @@ func (cm *CacheManager) Get(key string) (interface{}, error) {
 	cm.localMux.Unlock()
 
 	cm.updateStats(true)
-	return cacheValue, nil
+	return result, nil
 }
 
 // Set 设置缓存值
@@ -110,7 +111,7 @@ func (cm *CacheManager) Set(key string, value interface{}, ttl time.Duration) er
 	}()
 
 	// 更新本地缓存
-	item := &core.CacheItem{
+	item := &interfaces.CacheItem{
 		Key:       key,
 		Value:     value,
 		TTL:       ttl,
@@ -120,6 +121,9 @@ func (cm *CacheManager) Set(key string, value interface{}, ttl time.Duration) er
 
 	cm.localMux.Lock()
 	cm.localCache[key] = item
+	cm.statsMux.Lock()
+	cm.stats.TotalKeys++
+	cm.statsMux.Unlock()
 	cm.localMux.Unlock()
 
 	return nil
@@ -129,7 +133,7 @@ func (cm *CacheManager) Set(key string, value interface{}, ttl time.Duration) er
 func (cm *CacheManager) Delete(key string) error {
 	fullKey := cm.getFullKey(key)
 
-	// 尝试从Redis删除（如果Redis可用）
+	// 从Redis删除（如果Redis可用）
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -141,7 +145,12 @@ func (cm *CacheManager) Delete(key string) error {
 
 	// 从本地缓存删除
 	cm.localMux.Lock()
-	delete(cm.localCache, key)
+	if _, exists := cm.localCache[key]; exists {
+		delete(cm.localCache, key)
+		cm.statsMux.Lock()
+		cm.stats.TotalKeys--
+		cm.statsMux.Unlock()
+	}
 	cm.localMux.Unlock()
 
 	return nil
@@ -180,7 +189,10 @@ func (cm *CacheManager) Exists(key string) bool {
 func (cm *CacheManager) Clear() error {
 	// 清空本地缓存
 	cm.localMux.Lock()
-	cm.localCache = make(map[string]*core.CacheItem)
+	cm.localCache = make(map[string]*interfaces.CacheItem)
+	cm.statsMux.Lock()
+	cm.stats.TotalKeys = 0
+	cm.statsMux.Unlock()
 	cm.localMux.Unlock()
 
 	// 这里可以实现清空Redis中特定前缀的缓存
@@ -190,110 +202,18 @@ func (cm *CacheManager) Clear() error {
 }
 
 // GetStats 获取缓存统计信息
-func (cm *CacheManager) GetStats() *core.CacheStats {
+func (cm *CacheManager) GetStats() *interfaces.CacheStats {
 	cm.statsMux.RLock()
 	defer cm.statsMux.RUnlock()
 
+	stats := *cm.stats
+
 	// 计算命中率
-	hitRate := float64(0)
-	if cm.stats.HitCount+cm.stats.MissCount > 0 {
-		hitRate = float64(cm.stats.HitCount) / float64(cm.stats.HitCount+cm.stats.MissCount)
+	if stats.HitCount+stats.MissCount > 0 {
+		stats.HitRate = float64(stats.HitCount) / float64(stats.HitCount+stats.MissCount)
 	}
 
-	return &core.CacheStats{
-		TotalKeys:   cm.stats.TotalKeys,
-		HitCount:    cm.stats.HitCount,
-		MissCount:   cm.stats.MissCount,
-		HitRate:     hitRate,
-		MemoryUsage: cm.stats.MemoryUsage,
-	}
-}
-
-// GetWithTTL 获取缓存值和TTL
-func (cm *CacheManager) GetWithTTL(key string) (interface{}, time.Duration, error) {
-	value, err := cm.Get(key)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// 从本地缓存获取TTL
-	cm.localMux.RLock()
-	if item, exists := cm.localCache[key]; exists {
-		ttl := time.Until(item.ExpiresAt)
-		cm.localMux.RUnlock()
-		return value, ttl, nil
-	}
-	cm.localMux.RUnlock()
-
-	// 如果本地缓存没有，返回默认TTL
-	return value, 5 * time.Minute, nil
-}
-
-// SetNX 仅当key不存在时设置
-func (cm *CacheManager) SetNX(key string, value interface{}, ttl time.Duration) (bool, error) {
-	if cm.Exists(key) {
-		return false, nil
-	}
-
-	err := cm.Set(key, value, ttl)
-	return err == nil, err
-}
-
-// Increment 递增数值
-func (cm *CacheManager) Increment(key string, delta int64) (int64, error) {
-	fullKey := cm.getFullKey(key)
-
-	// 使用Redis的INCR命令（只能递增1，如果需要递增delta，需要多次调用）
-	var result int64
-	var err error
-
-	if delta == 1 {
-		result, err = gredis.Incr(fullKey)
-	} else {
-		// 对于非1的增量，我们需要使用其他方法
-		// 这里简化处理，直接返回错误
-		return 0, fmt.Errorf("increment by %d not supported, only increment by 1 is supported", delta)
-	}
-
-	if err != nil {
-		return 0, err
-	}
-
-	// 更新本地缓存
-	cm.localMux.Lock()
-	cm.localCache[key] = &core.CacheItem{
-		Key:       key,
-		Value:     result,
-		CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	}
-	cm.localMux.Unlock()
-
-	return result, nil
-}
-
-// GetMulti 批量获取缓存
-func (cm *CacheManager) GetMulti(keys []string) (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-
-	for _, key := range keys {
-		if value, err := cm.Get(key); err == nil {
-			result[key] = value
-		}
-	}
-
-	return result, nil
-}
-
-// SetMulti 批量设置缓存
-func (cm *CacheManager) SetMulti(items map[string]interface{}, ttl time.Duration) error {
-	for key, value := range items {
-		if err := cm.Set(key, value, ttl); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return &stats
 }
 
 // getFullKey 获取完整的缓存键
@@ -305,7 +225,7 @@ func (cm *CacheManager) getFullKey(key string) string {
 }
 
 // isExpired 检查缓存项是否过期
-func (cm *CacheManager) isExpired(item *core.CacheItem) bool {
+func (cm *CacheManager) isExpired(item *interfaces.CacheItem) bool {
 	return time.Now().After(item.ExpiresAt)
 }
 
@@ -323,7 +243,7 @@ func (cm *CacheManager) updateStats(hit bool) {
 
 // startCleanupTask 启动清理任务
 func (cm *CacheManager) startCleanupTask() {
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -331,20 +251,22 @@ func (cm *CacheManager) startCleanupTask() {
 	}
 }
 
-// cleanup 清理过期的本地缓存
+// cleanup 清理过期的缓存项
 func (cm *CacheManager) cleanup() {
 	cm.localMux.Lock()
 	defer cm.localMux.Unlock()
 
-	now := time.Now()
+	expiredKeys := make([]string, 0)
 	for key, item := range cm.localCache {
-		if now.After(item.ExpiresAt) {
-			delete(cm.localCache, key)
+		if cm.isExpired(item) {
+			expiredKeys = append(expiredKeys, key)
 		}
 	}
 
-	// 更新统计信息
-	cm.statsMux.Lock()
-	cm.stats.TotalKeys = int64(len(cm.localCache))
-	cm.statsMux.Unlock()
+	for _, key := range expiredKeys {
+		delete(cm.localCache, key)
+		cm.statsMux.Lock()
+		cm.stats.TotalKeys--
+		cm.statsMux.Unlock()
+	}
 }

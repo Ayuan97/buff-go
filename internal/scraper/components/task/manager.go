@@ -1,6 +1,7 @@
-package framework
+package task
 
 import (
+	"buff-go/internal/scraper/interfaces"
 	"container/heap"
 	"fmt"
 	"sync"
@@ -8,7 +9,7 @@ import (
 )
 
 // TaskQueue 任务队列（优先级队列）
-type TaskQueue []*ScrapingTask
+type TaskQueue []*interfaces.ScrapingTask
 
 func (tq TaskQueue) Len() int { return len(tq) }
 
@@ -22,7 +23,7 @@ func (tq TaskQueue) Swap(i, j int) {
 }
 
 func (tq *TaskQueue) Push(x interface{}) {
-	*tq = append(*tq, x.(*ScrapingTask))
+	*tq = append(*tq, x.(*interfaces.ScrapingTask))
 }
 
 func (tq *TaskQueue) Pop() interface{} {
@@ -35,77 +36,50 @@ func (tq *TaskQueue) Pop() interface{} {
 
 // TaskManager 任务管理器实现
 type TaskManager struct {
-	queue        *TaskQueue
-	queueMux     sync.Mutex
-	tasks        map[string]*TaskInfo
-	tasksMux     sync.RWMutex
-	maxQueueSize int
-}
-
-// TaskInfo 任务信息
-type TaskInfo struct {
-	Task      *ScrapingTask   `json:"task"`
-	Status    TaskStatus      `json:"status"`
-	Result    *ScrapingResult `json:"result"`
-	Error     error           `json:"error"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
+	queue       *TaskQueue
+	queueMux    sync.Mutex
+	taskStatus  map[string]interfaces.TaskStatus
+	statusMux   sync.RWMutex
+	taskResults map[string]*interfaces.ScrapingResult
+	resultsMux  sync.RWMutex
 }
 
 // NewTaskManager 创建任务管理器
-func NewTaskManager(maxQueueSize int) *TaskManager {
-	if maxQueueSize <= 0 {
-		maxQueueSize = 10000
+func NewTaskManager() *TaskManager {
+	tm := &TaskManager{
+		queue:       &TaskQueue{},
+		taskStatus:  make(map[string]interfaces.TaskStatus),
+		taskResults: make(map[string]*interfaces.ScrapingResult),
 	}
 
-	queue := make(TaskQueue, 0)
-	heap.Init(&queue)
-
-	return &TaskManager{
-		queue:        &queue,
-		tasks:        make(map[string]*TaskInfo),
-		maxQueueSize: maxQueueSize,
-	}
+	heap.Init(tm.queue)
+	return tm
 }
 
 // AddTask 添加任务
-func (tm *TaskManager) AddTask(task *ScrapingTask) error {
+func (tm *TaskManager) AddTask(task *interfaces.ScrapingTask) error {
 	if task == nil {
 		return fmt.Errorf("task cannot be nil")
 	}
 
 	if task.ID == "" {
-		task.ID = tm.generateTaskID()
+		return fmt.Errorf("task ID cannot be empty")
 	}
 
 	tm.queueMux.Lock()
-	defer tm.queueMux.Unlock()
-
-	// 检查队列大小
-	if tm.queue.Len() >= tm.maxQueueSize {
-		return fmt.Errorf("task queue is full")
-	}
-
-	// 添加到队列
 	heap.Push(tm.queue, task)
+	tm.queueMux.Unlock()
 
-	// 记录任务信息
-	taskInfo := &TaskInfo{
-		Task:      task,
-		Status:    TaskStatusPending,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-
-	tm.tasksMux.Lock()
-	tm.tasks[task.ID] = taskInfo
-	tm.tasksMux.Unlock()
+	// 设置任务状态
+	tm.statusMux.Lock()
+	tm.taskStatus[task.ID] = interfaces.TaskStatusPending
+	tm.statusMux.Unlock()
 
 	return nil
 }
 
 // GetTask 获取任务
-func (tm *TaskManager) GetTask() (*ScrapingTask, error) {
+func (tm *TaskManager) GetTask() (*interfaces.ScrapingTask, error) {
 	tm.queueMux.Lock()
 	defer tm.queueMux.Unlock()
 
@@ -113,209 +87,203 @@ func (tm *TaskManager) GetTask() (*ScrapingTask, error) {
 		return nil, fmt.Errorf("no tasks available")
 	}
 
-	task := heap.Pop(tm.queue).(*ScrapingTask)
+	task := heap.Pop(tm.queue).(*interfaces.ScrapingTask)
 
 	// 更新任务状态
-	tm.tasksMux.Lock()
-	if taskInfo, exists := tm.tasks[task.ID]; exists {
-		taskInfo.Status = TaskStatusRunning
-		taskInfo.UpdatedAt = time.Now()
-	}
-	tm.tasksMux.Unlock()
+	tm.statusMux.Lock()
+	tm.taskStatus[task.ID] = interfaces.TaskStatusRunning
+	tm.statusMux.Unlock()
 
 	return task, nil
 }
 
 // CompleteTask 完成任务
-func (tm *TaskManager) CompleteTask(taskID string, result *ScrapingResult) error {
-	tm.tasksMux.Lock()
-	defer tm.tasksMux.Unlock()
-
-	taskInfo, exists := tm.tasks[taskID]
-	if !exists {
-		return fmt.Errorf("task not found: %s", taskID)
+func (tm *TaskManager) CompleteTask(taskID string, result *interfaces.ScrapingResult) error {
+	if taskID == "" {
+		return fmt.Errorf("task ID cannot be empty")
 	}
 
-	taskInfo.Status = TaskStatusCompleted
-	taskInfo.Result = result
-	taskInfo.UpdatedAt = time.Now()
+	// 更新任务状态
+	tm.statusMux.Lock()
+	tm.taskStatus[taskID] = interfaces.TaskStatusCompleted
+	tm.statusMux.Unlock()
+
+	// 保存结果
+	if result != nil {
+		tm.resultsMux.Lock()
+		tm.taskResults[taskID] = result
+		tm.resultsMux.Unlock()
+	}
 
 	return nil
 }
 
 // FailTask 任务失败
 func (tm *TaskManager) FailTask(taskID string, err error) error {
-	tm.tasksMux.Lock()
-	defer tm.tasksMux.Unlock()
-
-	taskInfo, exists := tm.tasks[taskID]
-	if !exists {
-		return fmt.Errorf("task not found: %s", taskID)
+	if taskID == "" {
+		return fmt.Errorf("task ID cannot be empty")
 	}
 
-	// 检查是否需要重试
-	if taskInfo.Task.RetryCount > 0 {
-		taskInfo.Task.RetryCount--
-		taskInfo.Status = TaskStatusRetrying
-		taskInfo.Error = err
-		taskInfo.UpdatedAt = time.Now()
+	// 更新任务状态
+	tm.statusMux.Lock()
+	tm.taskStatus[taskID] = interfaces.TaskStatusFailed
+	tm.statusMux.Unlock()
 
-		// 重新添加到队列
-		tm.queueMux.Lock()
-		heap.Push(tm.queue, taskInfo.Task)
-		tm.queueMux.Unlock()
+	// 保存错误结果
+	if err != nil {
+		result := &interfaces.ScrapingResult{
+			TaskID:      taskID,
+			Error:       err,
+			CompletedAt: time.Now(),
+		}
 
-		return nil
+		tm.resultsMux.Lock()
+		tm.taskResults[taskID] = result
+		tm.resultsMux.Unlock()
 	}
-
-	taskInfo.Status = TaskStatusFailed
-	taskInfo.Error = err
-	taskInfo.UpdatedAt = time.Now()
 
 	return nil
 }
 
 // GetTaskStatus 获取任务状态
-func (tm *TaskManager) GetTaskStatus(taskID string) (TaskStatus, error) {
-	tm.tasksMux.RLock()
-	defer tm.tasksMux.RUnlock()
-
-	taskInfo, exists := tm.tasks[taskID]
-	if !exists {
-		return TaskStatusPending, fmt.Errorf("task not found: %s", taskID)
+func (tm *TaskManager) GetTaskStatus(taskID string) (interfaces.TaskStatus, error) {
+	if taskID == "" {
+		return interfaces.TaskStatusPending, fmt.Errorf("task ID cannot be empty")
 	}
 
-	return taskInfo.Status, nil
+	tm.statusMux.RLock()
+	status, exists := tm.taskStatus[taskID]
+	tm.statusMux.RUnlock()
+
+	if !exists {
+		return interfaces.TaskStatusPending, fmt.Errorf("task not found: %s", taskID)
+	}
+
+	return status, nil
 }
 
 // GetQueueSize 获取队列大小
 func (tm *TaskManager) GetQueueSize() int {
 	tm.queueMux.Lock()
 	defer tm.queueMux.Unlock()
-
 	return tm.queue.Len()
 }
 
 // Clear 清空任务队列
 func (tm *TaskManager) Clear() error {
 	tm.queueMux.Lock()
-	tm.tasksMux.Lock()
-	defer tm.queueMux.Unlock()
-	defer tm.tasksMux.Unlock()
-
-	// 清空队列
-	*tm.queue = (*tm.queue)[:0]
+	tm.queue = &TaskQueue{}
 	heap.Init(tm.queue)
+	tm.queueMux.Unlock()
 
-	// 清空任务记录
-	tm.tasks = make(map[string]*TaskInfo)
+	tm.statusMux.Lock()
+	tm.taskStatus = make(map[string]interfaces.TaskStatus)
+	tm.statusMux.Unlock()
+
+	tm.resultsMux.Lock()
+	tm.taskResults = make(map[string]*interfaces.ScrapingResult)
+	tm.resultsMux.Unlock()
 
 	return nil
 }
 
-// GetTaskInfo 获取任务信息
-func (tm *TaskManager) GetTaskInfo(taskID string) (*TaskInfo, error) {
-	tm.tasksMux.RLock()
-	defer tm.tasksMux.RUnlock()
+// GetTaskResult 获取任务结果
+func (tm *TaskManager) GetTaskResult(taskID string) (*interfaces.ScrapingResult, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("task ID cannot be empty")
+	}
 
-	taskInfo, exists := tm.tasks[taskID]
+	tm.resultsMux.RLock()
+	result, exists := tm.taskResults[taskID]
+	tm.resultsMux.RUnlock()
+
 	if !exists {
-		return nil, fmt.Errorf("task not found: %s", taskID)
+		return nil, fmt.Errorf("task result not found: %s", taskID)
 	}
 
-	// 返回副本
-	return &TaskInfo{
-		Task:      taskInfo.Task,
-		Status:    taskInfo.Status,
-		Result:    taskInfo.Result,
-		Error:     taskInfo.Error,
-		CreatedAt: taskInfo.CreatedAt,
-		UpdatedAt: taskInfo.UpdatedAt,
-	}, nil
+	return result, nil
 }
 
-// GetAllTasks 获取所有任务信息
-func (tm *TaskManager) GetAllTasks() map[string]*TaskInfo {
-	tm.tasksMux.RLock()
-	defer tm.tasksMux.RUnlock()
+// GetAllTaskStatus 获取所有任务状态
+func (tm *TaskManager) GetAllTaskStatus() map[string]interfaces.TaskStatus {
+	tm.statusMux.RLock()
+	defer tm.statusMux.RUnlock()
 
-	result := make(map[string]*TaskInfo)
-	for id, taskInfo := range tm.tasks {
-		result[id] = &TaskInfo{
-			Task:      taskInfo.Task,
-			Status:    taskInfo.Status,
-			Result:    taskInfo.Result,
-			Error:     taskInfo.Error,
-			CreatedAt: taskInfo.CreatedAt,
-			UpdatedAt: taskInfo.UpdatedAt,
-		}
+	result := make(map[string]interfaces.TaskStatus)
+	for taskID, status := range tm.taskStatus {
+		result[taskID] = status
 	}
 
 	return result
 }
 
-// GetTasksByStatus 根据状态获取任务
-func (tm *TaskManager) GetTasksByStatus(status TaskStatus) []*TaskInfo {
-	tm.tasksMux.RLock()
-	defer tm.tasksMux.RUnlock()
-
-	var result []*TaskInfo
-	for _, taskInfo := range tm.tasks {
-		if taskInfo.Status == status {
-			result = append(result, &TaskInfo{
-				Task:      taskInfo.Task,
-				Status:    taskInfo.Status,
-				Result:    taskInfo.Result,
-				Error:     taskInfo.Error,
-				CreatedAt: taskInfo.CreatedAt,
-				UpdatedAt: taskInfo.UpdatedAt,
-			})
-		}
+// RetryTask 重试任务
+func (tm *TaskManager) RetryTask(taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("task ID cannot be empty")
 	}
 
-	return result
+	// 更新任务状态
+	tm.statusMux.Lock()
+	if _, exists := tm.taskStatus[taskID]; !exists {
+		tm.statusMux.Unlock()
+		return fmt.Errorf("task not found: %s", taskID)
+	}
+	tm.taskStatus[taskID] = interfaces.TaskStatusRetrying
+	tm.statusMux.Unlock()
+
+	return nil
 }
 
 // CancelTask 取消任务
 func (tm *TaskManager) CancelTask(taskID string) error {
-	tm.tasksMux.Lock()
-	defer tm.tasksMux.Unlock()
+	if taskID == "" {
+		return fmt.Errorf("task ID cannot be empty")
+	}
 
-	taskInfo, exists := tm.tasks[taskID]
-	if !exists {
+	// 更新任务状态
+	tm.statusMux.Lock()
+	if _, exists := tm.taskStatus[taskID]; !exists {
+		tm.statusMux.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-
-	if taskInfo.Status == TaskStatusRunning {
-		return fmt.Errorf("cannot cancel running task")
-	}
-
-	taskInfo.Status = TaskStatusCancelled
-	taskInfo.UpdatedAt = time.Now()
+	tm.taskStatus[taskID] = interfaces.TaskStatusCancelled
+	tm.statusMux.Unlock()
 
 	return nil
 }
 
-// CleanupCompletedTasks 清理已完成的任务
-func (tm *TaskManager) CleanupCompletedTasks(olderThan time.Duration) int {
-	tm.tasksMux.Lock()
-	defer tm.tasksMux.Unlock()
+// GetStats 获取任务管理器统计信息
+func (tm *TaskManager) GetStats() map[string]int {
+	tm.statusMux.RLock()
+	defer tm.statusMux.RUnlock()
 
-	cutoff := time.Now().Add(-olderThan)
-	cleaned := 0
+	stats := map[string]int{
+		"pending":   0,
+		"running":   0,
+		"completed": 0,
+		"failed":    0,
+		"retrying":  0,
+		"cancelled": 0,
+	}
 
-	for id, taskInfo := range tm.tasks {
-		if (taskInfo.Status == TaskStatusCompleted || taskInfo.Status == TaskStatusFailed) &&
-			taskInfo.UpdatedAt.Before(cutoff) {
-			delete(tm.tasks, id)
-			cleaned++
+	for _, status := range tm.taskStatus {
+		switch status {
+		case interfaces.TaskStatusPending:
+			stats["pending"]++
+		case interfaces.TaskStatusRunning:
+			stats["running"]++
+		case interfaces.TaskStatusCompleted:
+			stats["completed"]++
+		case interfaces.TaskStatusFailed:
+			stats["failed"]++
+		case interfaces.TaskStatusRetrying:
+			stats["retrying"]++
+		case interfaces.TaskStatusCancelled:
+			stats["cancelled"]++
 		}
 	}
 
-	return cleaned
-}
-
-// generateTaskID 生成任务ID
-func (tm *TaskManager) generateTaskID() string {
-	return fmt.Sprintf("task_%d", time.Now().UnixNano())
+	stats["queue_size"] = tm.GetQueueSize()
+	return stats
 }
