@@ -1,11 +1,12 @@
 package base
 
 import (
+	"buff-go/global"
 	"buff-go/internal/scraper/interfaces"
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,9 @@ type BaseScraper struct {
 	// 统计信息
 	stats    *ScraperStats
 	statsMux sync.RWMutex
+
+	// 任务处理器接口，用于支持多态调用
+	taskProcessor interfaces.IScraper
 }
 
 // NewBaseScraper 创建基础抓取器
@@ -82,6 +86,11 @@ func (bs *BaseScraper) SetManagers(
 	bs.CacheManager = cacheManager
 	bs.ErrorHandler = errorHandler
 	bs.TaskManager = taskManager
+}
+
+// SetTaskProcessor 设置任务处理器
+func (bs *BaseScraper) SetTaskProcessor(processor interfaces.IScraper) {
+	bs.taskProcessor = processor
 }
 
 // Start 开始抓取
@@ -132,6 +141,16 @@ func (bs *BaseScraper) ProcessTask(task *interfaces.ScrapingTask) (*interfaces.S
 	}
 
 	startTime := time.Now()
+
+	// 记录任务开始处理
+	global.Logger.WithFields(map[string]interface{}{
+		"scraper":    bs.name,
+		"task_id":    task.ID,
+		"url":        task.URL,
+		"method":     task.Method,
+		"start_time": startTime.Format("2006-01-02 15:04:05.000"),
+	}).Info("[BaseScraper] 开始处理任务")
+
 	result := &interfaces.ScrapingResult{
 		TaskID:      task.ID,
 		CompletedAt: time.Now(),
@@ -145,6 +164,13 @@ func (bs *BaseScraper) ProcessTask(task *interfaces.ScrapingTask) (*interfaces.S
 	if err != nil {
 		result.Error = err
 		atomic.AddInt64(&bs.stats.FailedTasks, 1)
+
+		global.Logger.WithFields(map[string]interface{}{
+			"scraper": bs.name,
+			"task_id": task.ID,
+			"error":   err.Error(),
+		}).Error("[BaseScraper] 创建HTTP请求失败")
+
 		return result, err
 	}
 
@@ -160,19 +186,45 @@ func (bs *BaseScraper) ProcessTask(task *interfaces.ScrapingTask) (*interfaces.S
 		options = append(options, interfaces.WithCache(cacheKey, bs.config.CacheTTL))
 	}
 
+	global.Logger.WithFields(map[string]interface{}{
+		"scraper":     bs.name,
+		"task_id":     task.ID,
+		"url":         task.URL,
+		"timeout":     bs.config.Timeout.String(),
+		"retry_count": bs.config.RetryCount,
+		"use_proxy":   bs.config.UseProxy,
+		"use_cache":   bs.config.EnableCache,
+	}).Info("[BaseScraper] 发送HTTP请求")
+
 	resp, err := bs.HttpManager.DoRequest(req, options...)
 	if err != nil {
 		result.Error = err
 		atomic.AddInt64(&bs.stats.FailedTasks, 1)
+
+		global.Logger.WithFields(map[string]interface{}{
+			"scraper":  bs.name,
+			"task_id":  task.ID,
+			"url":      task.URL,
+			"error":    err.Error(),
+			"duration": time.Since(startTime).String(),
+		}).Error("[BaseScraper] HTTP请求失败")
+
 		return result, err
 	}
 	defer resp.Body.Close()
 
 	// 读取响应体
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		result.Error = err
 		atomic.AddInt64(&bs.stats.FailedTasks, 1)
+
+		global.Logger.WithFields(map[string]interface{}{
+			"scraper": bs.name,
+			"task_id": task.ID,
+			"error":   err.Error(),
+		}).Error("[BaseScraper] 读取响应体失败")
+
 		return result, err
 	}
 
@@ -181,14 +233,25 @@ func (bs *BaseScraper) ProcessTask(task *interfaces.ScrapingTask) (*interfaces.S
 	result.Body = body
 	result.Duration = time.Since(startTime)
 
+	// 记录请求成功
+	global.Logger.WithFields(map[string]interface{}{
+		"scraper":     bs.name,
+		"task_id":     task.ID,
+		"url":         task.URL,
+		"status_code": resp.StatusCode,
+		"body_size":   len(body),
+		"duration":    result.Duration.String(),
+		"end_time":    time.Now().Format("2006-01-02 15:04:05.000"),
+	}).Info("[BaseScraper] 任务处理完成")
+
 	atomic.AddInt64(&bs.stats.CompletedTasks, 1)
 	return result, nil
 }
 
 // createHTTPRequest 创建HTTP请求
 func (bs *BaseScraper) createHTTPRequest(task *interfaces.ScrapingTask) (*http.Request, error) {
-	var body *bytes.Reader
-	if task.Body != nil {
+	var body io.Reader
+	if len(task.Body) > 0 {
 		body = bytes.NewReader(task.Body)
 	}
 
@@ -203,8 +266,10 @@ func (bs *BaseScraper) createHTTPRequest(task *interfaces.ScrapingTask) (*http.R
 	}
 
 	// 设置配置中的自定义请求头
-	for key, value := range bs.config.CustomHeaders {
-		req.Header.Set(key, value)
+	if bs.config != nil && bs.config.CustomHeaders != nil {
+		for key, value := range bs.config.CustomHeaders {
+			req.Header.Set(key, value)
+		}
 	}
 
 	return req, nil
@@ -226,8 +291,13 @@ func (bs *BaseScraper) worker(workerID int) {
 				continue
 			}
 
-			// 处理任务
-			result, err := bs.ProcessTask(task)
+			// 处理任务 - 使用taskProcessor来支持多态调用
+			var result *interfaces.ScrapingResult
+			if bs.taskProcessor != nil {
+				result, err = bs.taskProcessor.ProcessTask(task)
+			} else {
+				result, err = bs.ProcessTask(task)
+			}
 
 			// 处理结果
 			if err != nil {

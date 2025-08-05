@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"buff-go/global"
 	"buff-go/pkg/setting"
+
 	"github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/resty.v1"
@@ -68,15 +70,21 @@ func New(s *setting.LoggerSettingS) (*logrus.Logger, error) {
 
 	switch s.LogType {
 	case setting.LogFileType:
-		log.Out = &lumberjack.Logger{
+		// 创建文件输出
+		fileWriter := &lumberjack.Logger{
 			Filename:  s.LogFileSavePath + "/" + s.LogFileName + s.LogFileExt,
 			MaxSize:   100,
 			MaxAge:    10,
 			LocalTime: true,
 		}
+		// 同时输出到控制台和文件
+		log.Out = io.MultiWriter(os.Stdout, fileWriter)
 	case setting.LogZincType:
 		log.Out = io.Discard
 		log.AddHook(&ZincLogHook{})
+	default:
+		// 默认输出到控制台
+		log.Out = os.Stdout
 	}
 
 	return log, nil
