@@ -33,12 +33,12 @@ func getEnabledScrapers() []interfaces.ScraperType {
 	var enabledScrapers []interfaces.ScraperType
 
 	// Buff平台抓取器
-	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffBuy)  // Buff买入数据抓取
-	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffSell) // Buff卖出数据抓取
+	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffBuy) // Buff买入数据抓取
+	//enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeBuffSell) // Buff卖出数据抓取
 
 	// Steam平台抓取器
-	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamBuy)  // Steam买入数据抓取
-	enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamSell) // Steam卖出数据抓取
+	//enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamBuy)  // Steam买入数据抓取
+	//enabledScrapers = append(enabledScrapers, interfaces.ScraperTypeSteamSell) // Steam卖出数据抓取
 
 	return enabledScrapers
 }
