@@ -122,6 +122,16 @@ func (bs *BaseScraper) Start(ctx context.Context) error {
 	return nil
 }
 
+// StartWithoutWorkers 开始抓取但不启动worker协程（用于自定义任务处理逻辑的抓取器）
+func (bs *BaseScraper) StartWithoutWorkers(ctx context.Context) error {
+	if !atomic.CompareAndSwapInt32(&bs.status, int32(interfaces.StatusStopped), int32(interfaces.StatusRunning)) {
+		return fmt.Errorf("scraper is already running")
+	}
+
+	bs.Ctx, bs.Cancel = context.WithCancel(ctx) // 设置上下文和取消函数
+	return nil
+}
+
 // Stop 停止抓取
 func (bs *BaseScraper) Stop() error {
 	// 如果抓取器正在运行，则停止抓取

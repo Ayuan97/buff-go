@@ -3,9 +3,10 @@ package gredis
 import (
 	"buff-go/global"
 	"context"
-	"github.com/go-redis/redis/v8"
 	"strconv"
 	"time"
+
+	"github.com/go-redis/redis/v8"
 )
 
 var ctx = context.Background()
@@ -267,4 +268,25 @@ func Srem(key string, name string) int64 {
 	key = global.RedisSetting.Prefix + key
 	result := global.Redis.SRem(ctx, key, name)
 	return result.Val()
+}
+
+// Publish 发布消息到指定频道
+func Publish(channel string, message interface{}) error {
+	channel = global.RedisSetting.Prefix + channel
+	err := global.Redis.Publish(ctx, channel, message).Err()
+	if err != nil {
+		global.Logger.Errorf("redis publish failed %v", err)
+		return err
+	}
+	return nil
+}
+
+// Subscribe 订阅指定频道
+func Subscribe(channels ...string) *redis.PubSub {
+	// 添加前缀
+	prefixedChannels := make([]string, len(channels))
+	for i, channel := range channels {
+		prefixedChannels[i] = global.RedisSetting.Prefix + channel
+	}
+	return global.Redis.Subscribe(ctx, prefixedChannels...)
 }

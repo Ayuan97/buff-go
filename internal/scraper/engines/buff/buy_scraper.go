@@ -6,6 +6,7 @@ import (
 	"buff-go/internal/model"
 	"buff-go/internal/scraper/core/base"
 	"buff-go/internal/scraper/interfaces"
+	"buff-go/internal/service"
 	"buff-go/pkg/gredis"
 	"context"
 	"encoding/json"
@@ -72,7 +73,7 @@ type BuffBuyConfig struct {
 // NewBuffBuyScraper 创建Buff买入抓取器
 func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 	baseScraper := base.NewBaseScraper("buff_buy")
-	return &BuffBuyScraper{
+	scraper := &BuffBuyScraper{
 		BaseScraper:  baseScraper,
 		dao:          dao,
 		accountTasks: make(map[int64]*AccountTask),
@@ -84,6 +85,80 @@ func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 			PageNum:  10,
 		},
 	}
+
+	// 注册配置变更监听器
+	scraper.setupConfigListener()
+
+	return scraper
+}
+
+// setupConfigListener 设置配置变更监听器
+func (bs *BuffBuyScraper) setupConfigListener() {
+	fmt.Println("配置变更监听器已设置 平台：", bs.GetPlatform())
+
+	// 注册CSGO配置变更监听器
+	configManager := service.GetConfigManager()
+	configManager.AddConfigChangeListener(1, func(configID int64) {
+		fmt.Printf("收到CSGO配置变更通知 平台：%s 配置ID：%d\n", bs.GetPlatform(), configID)
+		bs.onConfigChanged(configID)
+	})
+
+	// 注册DOTA2配置变更监听器
+	configManager.AddConfigChangeListener(2, func(configID int64) {
+		fmt.Printf("收到DOTA2配置变更通知 平台：%s 配置ID：%d\n", bs.GetPlatform(), configID)
+		bs.onConfigChanged(configID)
+	})
+}
+
+// onConfigChanged 处理配置变更事件
+func (bs *BuffBuyScraper) onConfigChanged(configID int64) {
+	fmt.Printf("开始处理配置变更 平台：%s 配置ID：%d\n", bs.GetPlatform(), configID)
+
+	// 获取变更的具体配置
+	configManager := service.GetConfigManager()
+	changedConfig := configManager.GetConfig(configID)
+
+	// 验证配置有效性
+	if err := service.ValidateConfig(changedConfig); err != nil {
+		fmt.Printf("配置验证失败 平台：%s 错误：%v\n", bs.GetPlatform(), err)
+		return
+	}
+
+	// 获取当前活跃配置
+	activeConfig, activeGame, err := service.GetCurrentGameConfig()
+	if err != nil {
+		fmt.Printf("获取当前活跃配置失败 平台：%s 错误：%v\n", bs.GetPlatform(), err)
+		return
+	}
+
+	// 更新本地配置为当前活跃配置
+	bs.updateLocalConfig(activeConfig, activeGame)
+
+	// 如果当前活跃配置的Buff买入功能被禁用，停止所有任务
+	if activeConfig.BuffBuyStatus == 0 {
+		fmt.Printf("当前活跃配置的Buff买入功能已禁用，停止所有抓取任务 平台：%s 游戏：%s\n", bs.GetPlatform(), activeGame)
+		bs.stopAllAccountTasks()
+	} else {
+		fmt.Printf("配置已更新，抓取任务将使用新配置 平台：%s 游戏：%s 配置ID：%d\n", bs.GetPlatform(), activeGame, activeConfig.ID)
+	}
+}
+
+// updateLocalConfig 更新本地配置
+func (bs *BuffBuyScraper) updateLocalConfig(config model.Config, game string) {
+	bs.config.Game = game
+	bs.config.MinPrice = config.MinPrice
+	bs.config.MaxPrice = config.MaxPrice
+	bs.config.PageNum = config.BuffPageNum
+
+	// 根据游戏类型设置AppID
+	if game == "csgo" {
+		bs.config.AppID = 730
+	} else if game == "dota2" {
+		bs.config.AppID = 570
+	}
+
+	fmt.Printf("本地配置已更新 平台：%s 游戏：%s 页面数：%d 价格范围：%.2f-%.2f\n",
+		bs.GetPlatform(), game, bs.config.PageNum, bs.config.MinPrice, bs.config.MaxPrice)
 }
 
 // Initialize 初始化抓取器
@@ -115,7 +190,8 @@ func (bs *BuffBuyScraper) SetManagers(
 
 // Start 开始抓取
 func (bs *BuffBuyScraper) Start(ctx context.Context) error {
-	if err := bs.BaseScraper.Start(ctx); err != nil {
+	// 使用StartWithoutWorkers避免启动无用的worker协程
+	if err := bs.BaseScraper.StartWithoutWorkers(ctx); err != nil {
 		return err
 	}
 
@@ -162,27 +238,41 @@ func (bs *BuffBuyScraper) startMultiAccountScraping() {
 
 // manageAccountTasks 管理账号抓取任务
 func (bs *BuffBuyScraper) manageAccountTasks() {
+	fmt.Printf("开始管理账号任务检查 平台：%s 时间：%s\n", bs.GetPlatform(), time.Now().Format("2006-01-02 15:04:05.000"))
+
 	// 获取所有可用账号
 	accounts, err := bs.dao.GetBuffUserList()
 	if err != nil {
-		fmt.Println("获取账号列表失败", err)
+		fmt.Printf("获取账号列表失败 平台：%s 错误：%v\n", bs.GetPlatform(), err)
 		return
 	}
 
-	fmt.Println("开始管理账号任务 账号数量：", len(accounts))
+	fmt.Printf("开始管理账号任务 平台：%s 账号数量：%d 时间：%s\n", bs.GetPlatform(), len(accounts), time.Now().Format("2006-01-02 15:04:05.000"))
+
 	bs.tasksMux.Lock()
 	defer bs.tasksMux.Unlock()
 
+	// 显示当前活跃任务数量
+	fmt.Printf("当前活跃任务数量：%d\n", len(bs.accountTasks))
+
 	// 为每个状态为0（空闲）的账号创建抓取任务
-	for _, account := range accounts {
+	for i, account := range accounts {
+		fmt.Printf("检查账号 %d/%d ID：%d 账号：%s 状态：%d\n", i+1, len(accounts), account.ID, account.Account, account.Status)
+
 		if account.Status == 0 { // 账号空闲
 			if _, exists := bs.accountTasks[account.ID]; !exists {
+				fmt.Printf("为空闲账号创建任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 				// 创建新的账号抓取任务
 				if err := bs.createAccountTask(account); err != nil {
-
-					fmt.Println("创建账号抓取任务失败 平台：", bs.GetPlatform(), " 账号：", account.Account, " 错误：", err)
+					fmt.Printf("创建账号抓取任务失败 平台：%s 账号ID：%d 账号：%s 错误：%v\n", bs.GetPlatform(), account.ID, account.Account, err)
+				} else {
+					fmt.Printf("成功创建账号抓取任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 				}
+			} else {
+				fmt.Printf("账号已有活跃任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 			}
+		} else {
+			fmt.Printf("账号状态非空闲，跳过 平台：%s 账号ID：%d 账号：%s 状态：%d\n", bs.GetPlatform(), account.ID, account.Account, account.Status)
 		}
 	}
 
@@ -192,12 +282,34 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 
 // createAccountTask 创建账号抓取任务
 func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
-	// 获取代理
-	proxy, err := bs.proxyManager.GetProxyForPlatform(interfaces.PlatformBuff)
-	if err != nil {
-		fmt.Println("获取代理失败 平台：", bs.GetPlatform(), " 错误：", err)
-		return fmt.Errorf("获取代理失败: %v", err)
+	fmt.Printf("开始为账号创建任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
+
+	// 获取代理（添加超时机制）
+	proxyCtx, proxyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer proxyCancel()
+
+	var proxy *interfaces.ProxyInfo
+	var err error
+
+	// 在goroutine中获取代理，支持超时
+	done := make(chan bool, 1)
+	go func() {
+		proxy, err = bs.proxyManager.GetProxyForPlatform(interfaces.PlatformBuff)
+		done <- true
+	}()
+
+	select {
+	case <-done:
+		if err != nil {
+			fmt.Printf("获取代理失败 平台：%s 账号ID：%d 错误：%v\n", bs.GetPlatform(), account.ID, err)
+			return fmt.Errorf("获取代理失败: %v", err)
+		}
+	case <-proxyCtx.Done():
+		fmt.Printf("获取代理超时 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
+		return fmt.Errorf("获取代理超时")
 	}
+
+	fmt.Printf("成功获取代理 平台：%s 账号ID：%d 代理：%s\n", bs.GetPlatform(), account.ID, proxy.URL)
 
 	// 创建HTTP客户端配置
 	clientConfig := &interfaces.ClientConfig{
@@ -208,13 +320,33 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 		FollowRedirect:  true,
 	}
 
-	// 获取HTTP客户端
-	client, err := bs.clientManager.GetClient(clientConfig)
-	if err != nil {
+	// 获取HTTP客户端（添加超时机制）
+	fmt.Printf("开始创建HTTP客户端 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer clientCancel()
+
+	var client *http.Client
+	clientDone := make(chan bool, 1)
+	go func() {
+		client, err = bs.clientManager.GetClient(clientConfig)
+		clientDone <- true
+	}()
+
+	select {
+	case <-clientDone:
+		if err != nil {
+			bs.proxyManager.ReleaseProxy(proxy)
+			fmt.Printf("创建HTTP客户端失败 平台：%s 账号ID：%d 错误：%v\n", bs.GetPlatform(), account.ID, err)
+			return fmt.Errorf("创建HTTP客户端失败: %v", err)
+		}
+	case <-clientCtx.Done():
 		bs.proxyManager.ReleaseProxy(proxy)
-		fmt.Println("创建HTTP客户端失败 平台：", bs.GetPlatform(), " 错误：", err)
-		return fmt.Errorf("创建HTTP客户端失败: %v", err)
+		fmt.Printf("创建HTTP客户端超时 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
+		return fmt.Errorf("创建HTTP客户端超时")
 	}
+
+	fmt.Printf("成功创建HTTP客户端 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
 
 	// 设置账号Cookie
 	if err := bs.setAccountCookies(client, account); err != nil {
@@ -337,25 +469,16 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 
 	fmt.Println("开始账号抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 开始时间：", startTime.Format("2006-01-02 15:04:05.000"))
 
-	// 获取系统配置
-	system := bs.dao.GetOneSystem(1)
-	var config model.Config
-	var game string
-
-	fmt.Println("获取系统配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 系统类型：", system.SystemType)
-
-	if system.SystemType == 1 {
-		config = bs.dao.GetOneSystemConfig(1) // csgo
-		game = "csgo"
-	} else if system.SystemType == 2 {
-		config = bs.dao.GetOneSystemConfig(2) // dota2
-		game = "dota2"
-	} else {
-		// 系统类型异常，使用默认的CSGO配置
-		fmt.Println("系统类型异常，使用默认CSGO配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 系统类型：", system.SystemType)
-		config = bs.dao.GetOneSystemConfig(1) // 默认使用csgo
+	// 获取当前活跃的游戏配置
+	config, game, err := service.GetCurrentGameConfig()
+	if err != nil {
+		fmt.Println("获取当前游戏配置失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 错误：", err)
+		// 使用默认CSGO配置
+		config = bs.dao.GetOneSystemConfig(1)
 		game = "csgo"
 	}
+
+	fmt.Println("获取游戏配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏类型：", game, " 配置ID：", config.ID)
 	fmt.Println("config", config)
 	fmt.Println("系统配置获取完成 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice, " 抓取状态：", config.BuffBuyStatus)
 
@@ -376,10 +499,10 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 	// 并发抓取多个页面
 	var wg sync.WaitGroup
 	for i := 1; i <= config.BuffPageNum; i++ {
-		// 检查系统配置是否变更
-		currentSystem := bs.dao.GetOneSystem(1)
-		if currentSystem.SystemType != config.ID {
-			fmt.Println("系统配置已变更，停止当前抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 当前系统类型：", currentSystem.SystemType, " 配置ID：", config.ID)
+		// 检查当前活跃配置是否变更
+		currentConfig, currentGame, err := service.GetCurrentGameConfig()
+		if err == nil && (currentConfig.ID != config.ID || currentGame != game) {
+			fmt.Println("活跃配置已变更，停止当前抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 当前游戏：", currentGame, " 当前配置ID：", currentConfig.ID, " 原配置ID：", config.ID)
 			break
 		}
 

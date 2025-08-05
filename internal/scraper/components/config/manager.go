@@ -8,24 +8,25 @@ import (
 	"time"
 )
 
-// ConfigManager 配置管理器实现
-type ConfigManager struct {
+// RuntimeConfigManager 运行时配置管理器实现
+// 用于管理scraper组件的运行时配置，支持内存存储和实时变更监听
+type RuntimeConfigManager struct {
 	configs   map[string]*interfaces.ConfigItem
 	configMux sync.RWMutex
 	watchers  map[string][]func(oldValue, newValue interface{})
 	watchMux  sync.RWMutex
 }
 
-// NewConfigManager 创建配置管理器
-func NewConfigManager() *ConfigManager {
-	return &ConfigManager{
+// NewRuntimeConfigManager 创建运行时配置管理器
+func NewRuntimeConfigManager() *RuntimeConfigManager {
+	return &RuntimeConfigManager{
 		configs:  make(map[string]*interfaces.ConfigItem),
 		watchers: make(map[string][]func(oldValue, newValue interface{})),
 	}
 }
 
 // Get 获取配置值
-func (cm *ConfigManager) Get(key string) (interface{}, error) {
+func (cm *RuntimeConfigManager) Get(key string) (interface{}, error) {
 	cm.configMux.RLock()
 	defer cm.configMux.RUnlock()
 
@@ -38,7 +39,7 @@ func (cm *ConfigManager) Get(key string) (interface{}, error) {
 }
 
 // GetString 获取字符串配置
-func (cm *ConfigManager) GetString(key string) (string, error) {
+func (cm *RuntimeConfigManager) GetString(key string) (string, error) {
 	value, err := cm.Get(key)
 	if err != nil {
 		return "", err
@@ -52,7 +53,7 @@ func (cm *ConfigManager) GetString(key string) (string, error) {
 }
 
 // GetInt 获取整数配置
-func (cm *ConfigManager) GetInt(key string) (int, error) {
+func (cm *RuntimeConfigManager) GetInt(key string) (int, error) {
 	value, err := cm.Get(key)
 	if err != nil {
 		return 0, err
@@ -73,7 +74,7 @@ func (cm *ConfigManager) GetInt(key string) (int, error) {
 }
 
 // GetBool 获取布尔配置
-func (cm *ConfigManager) GetBool(key string) (bool, error) {
+func (cm *RuntimeConfigManager) GetBool(key string) (bool, error) {
 	value, err := cm.Get(key)
 	if err != nil {
 		return false, err
@@ -94,7 +95,7 @@ func (cm *ConfigManager) GetBool(key string) (bool, error) {
 }
 
 // GetFloat64 获取浮点数配置
-func (cm *ConfigManager) GetFloat64(key string) (float64, error) {
+func (cm *RuntimeConfigManager) GetFloat64(key string) (float64, error) {
 	value, err := cm.Get(key)
 	if err != nil {
 		return 0, err
@@ -117,7 +118,7 @@ func (cm *ConfigManager) GetFloat64(key string) (float64, error) {
 }
 
 // GetDuration 获取时间间隔配置
-func (cm *ConfigManager) GetDuration(key string) (time.Duration, error) {
+func (cm *RuntimeConfigManager) GetDuration(key string) (time.Duration, error) {
 	value, err := cm.Get(key)
 	if err != nil {
 		return 0, err
@@ -140,7 +141,7 @@ func (cm *ConfigManager) GetDuration(key string) (time.Duration, error) {
 }
 
 // Set 设置配置值
-func (cm *ConfigManager) Set(key string, value interface{}) error {
+func (cm *RuntimeConfigManager) Set(key string, value interface{}) error {
 	cm.configMux.Lock()
 	defer cm.configMux.Unlock()
 
@@ -165,7 +166,7 @@ func (cm *ConfigManager) Set(key string, value interface{}) error {
 }
 
 // Watch 监听配置变化
-func (cm *ConfigManager) Watch(key string, callback func(oldValue, newValue interface{})) error {
+func (cm *RuntimeConfigManager) Watch(key string, callback func(oldValue, newValue interface{})) error {
 	cm.watchMux.Lock()
 	defer cm.watchMux.Unlock()
 
@@ -178,14 +179,14 @@ func (cm *ConfigManager) Watch(key string, callback func(oldValue, newValue inte
 }
 
 // Reload 重新加载配置
-func (cm *ConfigManager) Reload() error {
+func (cm *RuntimeConfigManager) Reload() error {
 	// 这里可以实现从文件或其他源重新加载配置的逻辑
 	// 目前只是一个占位实现
 	return nil
 }
 
 // notifyWatchers 通知监听器
-func (cm *ConfigManager) notifyWatchers(key string, oldValue, newValue interface{}) {
+func (cm *RuntimeConfigManager) notifyWatchers(key string, oldValue, newValue interface{}) {
 	cm.watchMux.RLock()
 	watchers := cm.watchers[key]
 	cm.watchMux.RUnlock()
@@ -203,7 +204,7 @@ func (cm *ConfigManager) notifyWatchers(key string, oldValue, newValue interface
 }
 
 // GetAllConfigs 获取所有配置
-func (cm *ConfigManager) GetAllConfigs() map[string]*interfaces.ConfigItem {
+func (cm *RuntimeConfigManager) GetAllConfigs() map[string]*interfaces.ConfigItem {
 	cm.configMux.RLock()
 	defer cm.configMux.RUnlock()
 
@@ -222,7 +223,7 @@ func (cm *ConfigManager) GetAllConfigs() map[string]*interfaces.ConfigItem {
 }
 
 // DeleteConfig 删除配置
-func (cm *ConfigManager) DeleteConfig(key string) error {
+func (cm *RuntimeConfigManager) DeleteConfig(key string) error {
 	cm.configMux.Lock()
 	defer cm.configMux.Unlock()
 
@@ -235,7 +236,7 @@ func (cm *ConfigManager) DeleteConfig(key string) error {
 }
 
 // SetDescription 设置配置描述
-func (cm *ConfigManager) SetDescription(key, description string) error {
+func (cm *RuntimeConfigManager) SetDescription(key, description string) error {
 	cm.configMux.Lock()
 	defer cm.configMux.Unlock()
 
@@ -250,7 +251,7 @@ func (cm *ConfigManager) SetDescription(key, description string) error {
 }
 
 // LoadFromMap 从map加载配置
-func (cm *ConfigManager) LoadFromMap(configs map[string]interface{}) error {
+func (cm *RuntimeConfigManager) LoadFromMap(configs map[string]interface{}) error {
 	for key, value := range configs {
 		if err := cm.Set(key, value); err != nil {
 			return fmt.Errorf("failed to set config %s: %v", key, err)
@@ -260,7 +261,7 @@ func (cm *ConfigManager) LoadFromMap(configs map[string]interface{}) error {
 }
 
 // ToMap 转换为map
-func (cm *ConfigManager) ToMap() map[string]interface{} {
+func (cm *RuntimeConfigManager) ToMap() map[string]interface{} {
 	cm.configMux.RLock()
 	defer cm.configMux.RUnlock()
 
@@ -270,4 +271,10 @@ func (cm *ConfigManager) ToMap() map[string]interface{} {
 	}
 
 	return result
+}
+
+// NewConfigManager 创建配置管理器（兼容性函数）
+// 已弃用：请使用 NewRuntimeConfigManager
+func NewConfigManager() *RuntimeConfigManager {
+	return NewRuntimeConfigManager()
 }

@@ -164,7 +164,7 @@ func createManagers() (*Managers, error) {
 	proxyManager := proxy.NewProxyManager(proxyConfig)
 	errorHandler := errorhandler.NewErrorHandler()
 	httpManager := client.NewHTTPClientManager(proxyManager, errorHandler)
-	configManager := config.NewConfigManager()
+	configManager := config.NewRuntimeConfigManager()
 	cacheManager := cache.NewCacheManager("scraper")
 	taskManager := task.NewTaskManager()
 
