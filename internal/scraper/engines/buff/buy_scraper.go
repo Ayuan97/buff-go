@@ -77,19 +77,37 @@ func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 		BaseScraper:  baseScraper,
 		dao:          dao,
 		accountTasks: make(map[int64]*AccountTask),
-		config: &BuffBuyConfig{
-			Game:     "csgo",
-			AppID:    730,
-			MinPrice: 0.01,
-			MaxPrice: 1000.0,
-			PageNum:  10,
-		},
+		config:       &BuffBuyConfig{}, // 初始化空配置，稍后从系统配置加载
 	}
+
+	// 从系统配置加载初始配置
+	scraper.loadInitialConfig()
 
 	// 注册配置变更监听器
 	scraper.setupConfigListener()
 
 	return scraper
+}
+
+// loadInitialConfig 加载初始配置
+func (bs *BuffBuyScraper) loadInitialConfig() {
+	// 获取当前活跃的游戏配置
+	config, game, err := service.GetCurrentGameConfig()
+	if err != nil {
+		fmt.Printf("获取系统配置失败，使用默认CSGO配置 平台：%s 错误：%v\n", bs.GetPlatform(), err)
+		// 使用默认CSGO配置作为fallback
+		bs.config.Game = "csgo"
+		bs.config.AppID = 730
+		bs.config.MinPrice = 0.01
+		bs.config.MaxPrice = 1000.0
+		bs.config.PageNum = 10
+		return
+	}
+
+	// 使用系统配置更新本地配置
+	bs.updateLocalConfig(config, game)
+	fmt.Printf("初始配置加载完成 平台：%s 游戏：%s 页面数：%d 价格范围：%.2f-%.2f\n",
+		bs.GetPlatform(), game, bs.config.PageNum, bs.config.MinPrice, bs.config.MaxPrice)
 }
 
 // setupConfigListener 设置配置变更监听器
@@ -238,7 +256,7 @@ func (bs *BuffBuyScraper) startMultiAccountScraping() {
 
 // manageAccountTasks 管理账号抓取任务
 func (bs *BuffBuyScraper) manageAccountTasks() {
-	fmt.Printf("开始管理账号任务检查 平台：%s 时间：%s\n", bs.GetPlatform(), time.Now().Format("2006-01-02 15:04:05.000"))
+	// fmt.Printf("开始管理账号任务检查 平台：%s 时间：%s\n", bs.GetPlatform(), time.Now().Format("2006-01-02 15:04:05.000"))
 
 	// 获取所有可用账号
 	accounts, err := bs.dao.GetBuffUserList()
@@ -247,7 +265,7 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 		return
 	}
 
-	fmt.Printf("开始管理账号任务 平台：%s 账号数量：%d 时间：%s\n", bs.GetPlatform(), len(accounts), time.Now().Format("2006-01-02 15:04:05.000"))
+	// fmt.Printf("开始管理账号任务 平台：%s 账号数量：%d 时间：%s\n", bs.GetPlatform(), len(accounts), time.Now().Format("2006-01-02 15:04:05.000"))
 
 	bs.tasksMux.Lock()
 	defer bs.tasksMux.Unlock()
@@ -256,23 +274,23 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 	fmt.Printf("当前活跃任务数量：%d\n", len(bs.accountTasks))
 
 	// 为每个状态为0（空闲）的账号创建抓取任务
-	for i, account := range accounts {
-		fmt.Printf("检查账号 %d/%d ID：%d 账号：%s 状态：%d\n", i+1, len(accounts), account.ID, account.Account, account.Status)
+	for _, account := range accounts {
+		// fmt.Printf("检查账号 %d/%d ID：%d 账号：%s 状态：%d\n", i+1, len(accounts), account.ID, account.Account, account.Status)
 
 		if account.Status == 0 { // 账号空闲
 			if _, exists := bs.accountTasks[account.ID]; !exists {
-				fmt.Printf("为空闲账号创建任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
+				fmt.Printf("为空闲账号创建任务 平台：%s s账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 				// 创建新的账号抓取任务
 				if err := bs.createAccountTask(account); err != nil {
 					fmt.Printf("创建账号抓取任务失败 平台：%s 账号ID：%d 账号：%s 错误：%v\n", bs.GetPlatform(), account.ID, account.Account, err)
 				} else {
-					fmt.Printf("成功创建账号抓取任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
+					// fmt.Printf("成功创建账号抓取任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 				}
 			} else {
 				fmt.Printf("账号已有活跃任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 			}
 		} else {
-			fmt.Printf("账号状态非空闲，跳过 平台：%s 账号ID：%d 账号：%s 状态：%d\n", bs.GetPlatform(), account.ID, account.Account, account.Status)
+			// fmt.Printf("账号状态非空闲，跳过 平台：%s 账号ID：%d 账号：%s 状态：%d\n", bs.GetPlatform(), account.ID, account.Account, account.Status)
 		}
 	}
 
@@ -282,7 +300,7 @@ func (bs *BuffBuyScraper) manageAccountTasks() {
 
 // createAccountTask 创建账号抓取任务
 func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
-	fmt.Printf("开始为账号创建任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
+	// fmt.Printf("开始为账号创建任务 平台：%s 账号ID：%d 账号：%s\n", bs.GetPlatform(), account.ID, account.Account)
 
 	// 获取代理（添加超时机制）
 	proxyCtx, proxyCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -321,7 +339,7 @@ func (bs *BuffBuyScraper) createAccountTask(account *model.BuffUser) error {
 	}
 
 	// 获取HTTP客户端（添加超时机制）
-	fmt.Printf("开始创建HTTP客户端 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
+	// fmt.Printf("开始创建HTTP客户端 平台：%s 账号ID：%d\n", bs.GetPlatform(), account.ID)
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer clientCancel()
@@ -494,10 +512,9 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 		return
 	}
 
-	fmt.Println("开始并发抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数量：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice)
+	fmt.Println("开始顺序抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数量：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice, " 延迟间隔：", config.BuffBuyDelay, "秒")
 
-	// 并发抓取多个页面
-	var wg sync.WaitGroup
+	// 顺序抓取多个页面，使用配置的延迟时间
 	for i := 1; i <= config.BuffPageNum; i++ {
 		// 检查当前活跃配置是否变更
 		currentConfig, currentGame, err := service.GetCurrentGameConfig()
@@ -506,21 +523,16 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 			break
 		}
 
-		wg.Add(1)
-		go func(pageNum int) {
-			defer wg.Done()
-			fmt.Println("开始抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", pageNum, " 总页数：", config.BuffPageNum)
-			bs.scrapePageForAccount(task, game, pageNum, config)
-		}(i)
+		fmt.Println("开始抓取页面 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", i, " 总页数：", config.BuffPageNum)
+		bs.scrapePageForAccount(task, game, i, config)
 
-		// 控制并发数，避免过多请求
-		if i%3 == 0 {
-			fmt.Println("并发控制暂停 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 已启动页面：", i, " 暂停2秒")
-			time.Sleep(2 * time.Second)
+		// 如果不是最后一页，则等待配置的延迟时间
+		if i < config.BuffPageNum {
+			delay := time.Duration(config.BuffBuyDelay) * time.Second
+			fmt.Println("页面抓取间隔等待 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 页面：", i, " 延迟时间：", delay)
+			time.Sleep(delay)
 		}
 	}
-
-	wg.Wait()
 
 	duration := time.Since(startTime)
 	fmt.Println("账号抓取完成 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 持续时间：", duration.String(), " 结束时间：", time.Now().Format("2006-01-02 15:04:05.000"))
@@ -733,7 +745,7 @@ func (bs *BuffBuyScraper) processResponse(result *interfaces.ScrapingResult) err
 
 // processItems 处理商品数据
 func (bs *BuffBuyScraper) processItems(items []BuffBuyItem) error {
-	startTime := time.Now()
+	// startTime := time.Now()
 	itemCount := len(items)
 
 	fmt.Println("开始处理商品数据 平台：", bs.GetPlatform(), " 商品数量：", itemCount, " 并发数：", 10)
@@ -761,22 +773,22 @@ func (bs *BuffBuyScraper) processItems(items []BuffBuyItem) error {
 				fmt.Println("处理商品失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 错误：", err)
 			} else {
 				atomic.AddInt32(&successCount, 1)
-				fmt.Println("商品处理成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name)
+				// fmt.Println("商品处理成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name)
 			}
 		}(i, item)
 	}
 
 	wg.Wait()
 
-	duration := time.Since(startTime)
-	fmt.Println("商品数据处理完成 平台：", bs.GetPlatform(), " 商品数量：", itemCount, " 成功数：", successCount, " 失败数：", failCount, " 持续时间：", duration.String(), " 每秒处理数：", float64(itemCount)/duration.Seconds())
+	// duration := time.Since(startTime)
+	// fmt.Println("商品数据处理完成 平台：", bs.GetPlatform(), " 商品数量：", itemCount, " 成功数：", successCount, " 失败数：", failCount, " 持续时间：", duration.String(), " 每秒处理数：", float64(itemCount)/duration.Seconds())
 
 	return nil
 }
 
 // processItem 处理单个商品
 func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
-	startTime := time.Now()
+	// startTime := time.Now()
 
 	// 转换价格
 	price, err := strconv.ParseFloat(item.BuyMaxPrice, 64)
@@ -797,7 +809,7 @@ func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
 		"modified_on":      time.Now().Unix(),
 	}
 
-	fmt.Println("商品数据创建成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 价格：", price, " 购买数量：", item.BuyNum, " AppID：", item.Appid)
+	// fmt.Println("商品数据创建成功 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 价格：", price, " 购买数量：", item.BuyNum, " AppID：", item.Appid)
 
 	// 这里可以实现具体的数据库保存逻辑
 	_ = itemData // 暂时忽略，避免编译错误
@@ -808,14 +820,14 @@ func (bs *BuffBuyScraper) processItem(item BuffBuyItem) error {
 		if err := gredis.Set(cacheKey, string(data), 10*time.Minute); err != nil {
 			fmt.Println("Redis缓存保存失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 缓存键：", cacheKey, " 错误：", err)
 		} else {
-			fmt.Println("商品数据已缓存到Redis 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 缓存键：", cacheKey, " TTL：", 10*time.Minute)
+			// fmt.Println("商品数据已缓存到Redis 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 缓存键：", cacheKey, " TTL：", 10*time.Minute)
 		}
 	} else {
 		fmt.Println("商品数据JSON序列化失败 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 错误：", err)
 	}
 
-	duration := time.Since(startTime)
-	fmt.Println("单个商品处理完成 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 持续时间：", duration.String())
+	// duration := time.Since(startTime)
+	// fmt.Println("单个商品处理完成 平台：", bs.GetPlatform(), " 商品ID：", item.Id, " 商品名称：", item.Name, " 持续时间：", duration.String())
 
 	return nil
 }

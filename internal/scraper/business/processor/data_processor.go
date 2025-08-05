@@ -2,7 +2,7 @@ package processor
 
 import (
 	"buff-go/internal/dao"
-	"buff-go/internal/scraper_new/interfaces"
+	"buff-go/internal/scraper/interfaces"
 	"sync"
 	"time"
 )
