@@ -6,20 +6,29 @@ import (
 
 // IProxyManager 代理管理器接口
 type IProxyManager interface {
-	// GetProxy 获取可用代理
-	GetProxy() (*ProxyInfo, error)
+	// GetProxyForPlatform 获取指定平台的可用代理
+	GetProxyForPlatform(platform Platform) (*ProxyInfo, error)
 
 	// ReleaseProxy 释放代理
 	ReleaseProxy(proxy *ProxyInfo)
 
-	// MarkProxyFailed 标记代理失效
-	MarkProxyFailed(proxy *ProxyInfo, reason string)
+	// MarkProxyFailedForPlatform 标记代理在指定平台失效
+	MarkProxyFailedForPlatform(proxy *ProxyInfo, platform Platform, reason string)
 
-	// GetPoolStatus 获取代理池状态
-	GetPoolStatus() *ProxyPoolStatus
+	// RecoverProxyForPlatform 恢复代理在指定平台的状态
+	RecoverProxyForPlatform(proxy *ProxyInfo, platform Platform) error
+
+	// GetPoolStatusForPlatform 获取指定平台的代理池状态
+	GetPoolStatusForPlatform(platform Platform) *ProxyPoolStatus
 
 	// RefreshProxies 刷新代理池
 	RefreshProxies() error
+
+	// AddProxy 添加代理
+	AddProxy(proxy *ProxyInfo)
+
+	// RemoveProxy 移除代理
+	RemoveProxy(proxyID string)
 }
 
 // IConfigManager 配置管理器接口

@@ -250,16 +250,21 @@ func ClearSteamSell() {
 	fmt.Println("清楚config缓存")
 }
 
-// 获取一个没有在用的代理
-// 1->buff 2->steam
-func GetOneProxy(source string) (*model.Ip, string, string, error) {
-	ips, err := myDao.GetBuffIps()
+// GetOneProxyForPlatform 获取指定平台的可用代理
+func GetOneProxyForPlatform(platform model.Platform) (*model.Ip, string, string, error) {
+	ips, err := myDao.GetProxiesForPlatform(platform)
 	if err != nil {
 		return nil, "", "", err
 	}
+
 	for _, ip := range ips {
+		// 检查代理是否可用于该平台
+		if !ip.IsAvailableForPlatform(platform) {
+			continue
+		}
+
 		address := ip.Ip + ":" + strconv.Itoa(ip.Port)
-		key := rediskey.GetProxyMapKey(address, source)
+		key := rediskey.GetProxyMapKey(address, string(platform))
 		value := gredis.Get(key)
 		fmt.Println("key:", key, "value:", value)
 		if value == "" {
@@ -267,4 +272,35 @@ func GetOneProxy(source string) (*model.Ip, string, string, error) {
 		}
 	}
 	return nil, "", "", nil
+}
+
+// MarkProxyFailedForPlatform 标记代理在指定平台失败
+func MarkProxyFailedForPlatform(ip *model.Ip, platform model.Platform, reason string) error {
+	if ip == nil {
+		return fmt.Errorf("ip is nil")
+	}
+
+	// 标记平台失败，使用默认配置
+	err := ip.MarkPlatformFailed(platform, 3, 30*time.Minute)
+	if err != nil {
+		return err
+	}
+
+	// 更新数据库
+	return myDao.UpdateProxyPlatformStatus(ip)
+}
+
+// RecoverProxyForPlatform 恢复代理在指定平台的状态
+func RecoverProxyForPlatform(ip *model.Ip, platform model.Platform) error {
+	if ip == nil {
+		return fmt.Errorf("ip is nil")
+	}
+
+	err := ip.RecoverPlatformStatus(platform)
+	if err != nil {
+		return err
+	}
+
+	// 更新数据库
+	return myDao.UpdateProxyPlatformStatus(ip)
 }

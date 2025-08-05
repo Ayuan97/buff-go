@@ -81,12 +81,12 @@ func (m *HTTPClientManager) DoRequest(req *http.Request, options ...interfaces.R
 	}
 
 	// 如果需要使用代理
-	if opts.UseProxy && m.proxyMgr != nil {
-		proxy, err := m.proxyMgr.GetProxy()
-		if err == nil {
-			config.ProxyURL = proxy.URL
-		}
-	}
+	//if opts.UseProxy && m.proxyMgr != nil {
+	//	proxy, err := m.proxyMgr.GetProxy()
+	//	if err == nil {
+	//		config.ProxyURL = proxy.URL
+	//	}
+	//}
 
 	client, err := m.GetClient(config)
 	if err != nil {

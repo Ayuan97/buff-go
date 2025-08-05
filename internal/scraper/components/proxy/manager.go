@@ -3,6 +3,7 @@ package proxy
 import (
 	"buff-go/internal/scraper/interfaces"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -19,11 +20,13 @@ type ProxyManager struct {
 
 // ProxyManagerConfig 代理管理器配置
 type ProxyManagerConfig struct {
-	MaxFailCount    int           `json:"max_fail_count"`
-	HealthCheckURL  string        `json:"health_check_url"`
-	CheckInterval   time.Duration `json:"check_interval"`
-	RefreshInterval time.Duration `json:"refresh_interval"`
-	MaxUsageTime    time.Duration `json:"max_usage_time"`
+	MaxFailCount        int                                   `json:"max_fail_count"`
+	HealthCheckURL      string                                `json:"health_check_url"`
+	CheckInterval       time.Duration                         `json:"check_interval"`
+	RefreshInterval     time.Duration                         `json:"refresh_interval"`
+	MaxUsageTime        time.Duration                         `json:"max_usage_time"`
+	PlatformBanDuration map[interfaces.Platform]time.Duration `json:"platform_ban_duration"` // 各平台封禁时长
+	PlatformMaxFails    map[interfaces.Platform]int           `json:"platform_max_fails"`    // 各平台最大失败次数
 }
 
 // NewProxyManager 创建代理管理器
@@ -34,6 +37,28 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 			CheckInterval:   5 * time.Minute,
 			RefreshInterval: 30 * time.Minute,
 			MaxUsageTime:    10 * time.Minute,
+			PlatformBanDuration: map[interfaces.Platform]time.Duration{
+				interfaces.PlatformBuff:  30 * time.Minute,
+				interfaces.PlatformSteam: 60 * time.Minute,
+			},
+			PlatformMaxFails: map[interfaces.Platform]int{
+				interfaces.PlatformBuff:  3,
+				interfaces.PlatformSteam: 5,
+			},
+		}
+	}
+
+	// 确保平台配置存在
+	if config.PlatformBanDuration == nil {
+		config.PlatformBanDuration = map[interfaces.Platform]time.Duration{
+			interfaces.PlatformBuff:  30 * time.Minute,
+			interfaces.PlatformSteam: 60 * time.Minute,
+		}
+	}
+	if config.PlatformMaxFails == nil {
+		config.PlatformMaxFails = map[interfaces.Platform]int{
+			interfaces.PlatformBuff:  3,
+			interfaces.PlatformSteam: 5,
 		}
 	}
 
@@ -49,8 +74,8 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 	return pm
 }
 
-// GetProxy 获取可用代理
-func (pm *ProxyManager) GetProxy() (*interfaces.ProxyInfo, error) {
+// GetProxyForPlatform 获取指定平台的可用代理
+func (pm *ProxyManager) GetProxyForPlatform(platform interfaces.Platform) (*interfaces.ProxyInfo, error) {
 	pm.proxiesMux.RLock()
 	defer pm.proxiesMux.RUnlock()
 
@@ -58,16 +83,16 @@ func (pm *ProxyManager) GetProxy() (*interfaces.ProxyInfo, error) {
 		return nil, errors.New("no proxies available")
 	}
 
-	// 过滤可用代理
+	// 过滤适用于指定平台的代理
 	availableProxies := make([]*interfaces.ProxyInfo, 0)
 	for _, proxy := range pm.proxies {
-		if pm.isProxyAvailable(proxy) {
+		if pm.isProxyAvailableForPlatform(proxy, platform) {
 			availableProxies = append(availableProxies, proxy)
 		}
 	}
 
 	if len(availableProxies) == 0 {
-		return nil, errors.New("no available proxies")
+		return nil, fmt.Errorf("no available proxies for platform %s", platform)
 	}
 
 	// 随机选择一个代理
@@ -93,8 +118,8 @@ func (pm *ProxyManager) ReleaseProxy(proxy *interfaces.ProxyInfo) {
 	pm.usedMux.Unlock()
 }
 
-// MarkProxyFailed 标记代理失效
-func (pm *ProxyManager) MarkProxyFailed(proxy *interfaces.ProxyInfo, reason string) {
+// MarkProxyFailedForPlatform 标记代理在指定平台失效
+func (pm *ProxyManager) MarkProxyFailedForPlatform(proxy *interfaces.ProxyInfo, platform interfaces.Platform, reason string) {
 	if proxy == nil {
 		return
 	}
@@ -104,10 +129,37 @@ func (pm *ProxyManager) MarkProxyFailed(proxy *interfaces.ProxyInfo, reason stri
 
 	for _, p := range pm.proxies {
 		if p.ID == proxy.ID {
-			p.FailCount++
-			if p.FailCount >= pm.config.MaxFailCount {
-				p.IsActive = false
+			// 更新平台状态
+			if p.PlatformStatuses == nil {
+				p.PlatformStatuses = make(map[interfaces.Platform]*interfaces.PlatformStatus)
 			}
+
+			status, exists := p.PlatformStatuses[platform]
+			if !exists {
+				status = &interfaces.PlatformStatus{IsActive: true}
+				p.PlatformStatuses[platform] = status
+			}
+
+			status.FailCount++
+			status.LastFailed = time.Now()
+
+			// 获取平台配置
+			maxFails, exists := pm.config.PlatformMaxFails[platform]
+			if !exists {
+				maxFails = pm.config.MaxFailCount
+			}
+
+			banDuration, exists := pm.config.PlatformBanDuration[platform]
+			if !exists {
+				banDuration = 30 * time.Minute
+			}
+
+			// 如果失败次数超过阈值，临时封禁
+			if status.FailCount >= maxFails {
+				status.IsActive = false
+				status.BannedUntil = time.Now().Add(banDuration)
+			}
+
 			break
 		}
 	}
@@ -116,23 +168,58 @@ func (pm *ProxyManager) MarkProxyFailed(proxy *interfaces.ProxyInfo, reason stri
 	pm.ReleaseProxy(proxy)
 }
 
-// GetPoolStatus 获取代理池状态
-func (pm *ProxyManager) GetPoolStatus() *interfaces.ProxyPoolStatus {
+// RecoverProxyForPlatform 恢复代理在指定平台的状态
+func (pm *ProxyManager) RecoverProxyForPlatform(proxy *interfaces.ProxyInfo, platform interfaces.Platform) error {
+	if proxy == nil {
+		return errors.New("proxy is nil")
+	}
+
+	pm.proxiesMux.Lock()
+	defer pm.proxiesMux.Unlock()
+
+	for _, p := range pm.proxies {
+		if p.ID == proxy.ID {
+			if p.PlatformStatuses == nil {
+				p.PlatformStatuses = make(map[interfaces.Platform]*interfaces.PlatformStatus)
+			}
+
+			status, exists := p.PlatformStatuses[platform]
+			if !exists {
+				status = &interfaces.PlatformStatus{IsActive: true}
+				p.PlatformStatuses[platform] = status
+			}
+
+			status.IsActive = true
+			status.FailCount = 0
+			status.BannedUntil = time.Time{}
+
+			return nil
+		}
+	}
+
+	return fmt.Errorf("proxy with ID %s not found", proxy.ID)
+}
+
+// GetPoolStatusForPlatform 获取指定平台的代理池状态
+func (pm *ProxyManager) GetPoolStatusForPlatform(platform interfaces.Platform) *interfaces.ProxyPoolStatus {
 	pm.proxiesMux.RLock()
 	defer pm.proxiesMux.RUnlock()
 
 	status := &interfaces.ProxyPoolStatus{
-		TotalProxies: len(pm.proxies),
+		TotalProxies: 0,
 	}
 
 	for _, proxy := range pm.proxies {
-		if proxy.IsActive {
-			status.ActiveProxies++
-			if pm.isProxyAvailable(proxy) {
+		// 检查代理是否支持该平台
+		if pm.isProxySupportsPlatform(proxy, platform) {
+			status.TotalProxies++
+
+			if proxy.IsActive && pm.isProxyAvailableForPlatform(proxy, platform) {
+				status.ActiveProxies++
 				status.AvailableProxies++
+			} else {
+				status.FailedProxies++
 			}
-		} else {
-			status.FailedProxies++
 		}
 	}
 
@@ -146,14 +233,44 @@ func (pm *ProxyManager) RefreshProxies() error {
 	return nil
 }
 
-// isProxyAvailable 检查代理是否可用
-func (pm *ProxyManager) isProxyAvailable(proxy *interfaces.ProxyInfo) bool {
+// isProxySupportsPlatform 检查代理是否支持指定平台
+func (pm *ProxyManager) isProxySupportsPlatform(proxy *interfaces.ProxyInfo, platform interfaces.Platform) bool {
+	if len(proxy.SupportedPlatforms) == 0 {
+		// 如果没有明确指定支持的平台，根据地区判断
+		return pm.isRegionSupportsPlatform(proxy.Region, platform)
+	}
+
+	for _, p := range proxy.SupportedPlatforms {
+		if p == platform {
+			return true
+		}
+	}
+	return false
+}
+
+// isProxyAvailableForPlatform 检查代理是否可用于指定平台
+func (pm *ProxyManager) isProxyAvailableForPlatform(proxy *interfaces.ProxyInfo, platform interfaces.Platform) bool {
 	if !proxy.IsActive {
 		return false
 	}
 
-	if proxy.FailCount >= pm.config.MaxFailCount {
+	// 检查是否支持该平台
+	if !pm.isProxySupportsPlatform(proxy, platform) {
 		return false
+	}
+
+	// 检查平台状态
+	if proxy.PlatformStatuses != nil {
+		status, exists := proxy.PlatformStatuses[platform]
+		if exists {
+			// 检查是否被封禁
+			if !status.BannedUntil.IsZero() && time.Now().Before(status.BannedUntil) {
+				return false
+			}
+			if !status.IsActive {
+				return false
+			}
+		}
 	}
 
 	// 检查是否正在使用中
@@ -171,6 +288,20 @@ func (pm *ProxyManager) isProxyAvailable(proxy *interfaces.ProxyInfo) bool {
 	}
 
 	return true
+}
+
+// isRegionSupportsPlatform 检查地区是否支持指定平台
+func (pm *ProxyManager) isRegionSupportsPlatform(region interfaces.ProxyRegion, platform interfaces.Platform) bool {
+	switch region {
+	case interfaces.ProxyRegionDomestic:
+		return platform == interfaces.PlatformBuff
+	case interfaces.ProxyRegionHongKong:
+		return platform == interfaces.PlatformBuff || platform == interfaces.PlatformSteam
+	case interfaces.ProxyRegionOverseas:
+		return platform == interfaces.PlatformSteam
+	default:
+		return false
+	}
 }
 
 // startBackgroundTasks 启动后台任务

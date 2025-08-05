@@ -88,18 +88,50 @@ type ClientStats struct {
 	AverageLatency  time.Duration `json:"average_latency"`
 }
 
+// Platform 平台类型
+type Platform string
+
+const (
+	PlatformBuff  Platform = "buff"
+	PlatformSteam Platform = "steam"
+	// 为未来扩展预留
+	PlatformC5Game   Platform = "c5game"
+	PlatformIGXE     Platform = "igxe"
+	PlatformUUYouPin Platform = "uuyoupin"
+)
+
+// ProxyRegion 代理地区类型
+type ProxyRegion int
+
+const (
+	ProxyRegionDomestic ProxyRegion = iota + 1 // 国内代理
+	ProxyRegionHongKong                        // 香港代理
+	ProxyRegionOverseas                        // 海外代理
+)
+
+// PlatformStatus 平台状态
+type PlatformStatus struct {
+	IsActive    bool      `json:"is_active"`    // 在该平台是否可用
+	FailCount   int       `json:"fail_count"`   // 在该平台的失败次数
+	LastFailed  time.Time `json:"last_failed"`  // 最后失败时间
+	BannedUntil time.Time `json:"banned_until"` // 封禁到期时间
+}
+
 // ProxyInfo 代理信息
 type ProxyInfo struct {
-	ID        string    `json:"id"`
-	URL       string    `json:"url"`
-	Type      string    `json:"type"` // http, https, socks5
-	Username  string    `json:"username"`
-	Password  string    `json:"password"`
-	Country   string    `json:"country"`
-	Speed     int       `json:"speed"`
-	LastUsed  time.Time `json:"last_used"`
-	FailCount int       `json:"fail_count"`
-	IsActive  bool      `json:"is_active"`
+	ID                 string                       `json:"id"`
+	URL                string                       `json:"url"`
+	Type               string                       `json:"type"` // http, https, socks5
+	Username           string                       `json:"username"`
+	Password           string                       `json:"password"`
+	Country            string                       `json:"country"`
+	Speed              int                          `json:"speed"`
+	LastUsed           time.Time                    `json:"last_used"`
+	FailCount          int                          `json:"fail_count"`
+	IsActive           bool                         `json:"is_active"`
+	Region             ProxyRegion                  `json:"region"`              // 代理地区
+	SupportedPlatforms []Platform                   `json:"supported_platforms"` // 支持的平台列表
+	PlatformStatuses   map[Platform]*PlatformStatus `json:"platform_statuses"`   // 各平台状态
 }
 
 // ProxyPoolStatus 代理池状态

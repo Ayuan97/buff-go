@@ -86,7 +86,6 @@ func main() {
 		fmt.Printf("%s", scraperType)
 	}
 	fmt.Printf("\n")
-
 	// 启动抓取器
 	for _, scraperType := range enabledScrapers {
 		fmt.Printf("启动抓取器: %s\n", scraperType)

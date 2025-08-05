@@ -50,7 +50,7 @@ func GetBuffBuy() {
 		}
 		//获取一个代理
 		fmt.Println("user", buffUser)
-		ip, address, key, _ := GetOneProxy("buff")
+		ip, address, key, _ := GetOneProxyForPlatform(model.PlatformBuff)
 		if address != "" {
 			myDao.UpdateBuffUserStatus(int(buffUser.ID), 1)
 			fmt.Println("账号", buffUser.Account)

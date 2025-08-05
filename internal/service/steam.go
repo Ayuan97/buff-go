@@ -7,7 +7,6 @@ import (
 	"buff-go/pkg/util"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/proxy"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 var itemChan = make(chan *model.Info, 20000)
@@ -48,7 +49,7 @@ func GetSteamSell() {
 			continue
 		}
 		//获取一个代理
-		ip, address, key, _ := GetOneProxy("steam")
+		ip, address, key, _ := GetOneProxyForPlatform(model.PlatformSteam)
 		if address != "" {
 			myDao.UpdateSteamUserStatus(int(steamUser.ID), 1)
 			fmt.Println("账号", steamUser.Account)
