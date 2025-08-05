@@ -1,4 +1,4 @@
-package framework
+package core
 
 import (
 	"buff-go/internal/dao"
@@ -97,24 +97,16 @@ func (sf *ScraperFactory) createBuffBuyScraper() (IScraper, error) {
 
 	// 获取配置
 	var config *ScraperConfig
-	var err error
-	if configMgr, ok := sf.configManager.(*ConfigManager); ok {
-		config, err = configMgr.GetScraperConfig("buff_buy")
-		if err != nil {
-			return nil, fmt.Errorf("failed to get buff buy config: %v", err)
-		}
-	} else {
-		// 使用默认配置
-		config = &ScraperConfig{
-			Name:           "buff_buy",
-			MaxConcurrency: 5,
-			RequestDelay:   time.Second,
-			RetryCount:     3,
-			Timeout:        30 * time.Second,
-			UseProxy:       true,
-			EnableCache:    true,
-			CacheTTL:       5 * time.Minute,
-		}
+	// 使用默认配置
+	config = &ScraperConfig{
+		Name:           "buff_buy",
+		MaxConcurrency: 5,
+		RequestDelay:   time.Second,
+		RetryCount:     3,
+		Timeout:        30 * time.Second,
+		UseProxy:       true,
+		EnableCache:    true,
+		CacheTTL:       5 * time.Minute,
 	}
 
 	// 初始化抓取器
@@ -127,8 +119,28 @@ func (sf *ScraperFactory) createBuffBuyScraper() (IScraper, error) {
 
 // createBuffSellScraper 创建Buff卖出抓取器
 func (sf *ScraperFactory) createBuffSellScraper() (IScraper, error) {
-	// TODO: 实现Buff卖出抓取器
-	return nil, fmt.Errorf("buff sell scraper not implemented yet")
+	scraper := NewBuffSellScraper(sf.dao)
+
+	// 获取配置
+	var config *ScraperConfig
+	// 使用默认配置
+	config = &ScraperConfig{
+		Name:           "buff_sell",
+		MaxConcurrency: 3,
+		RequestDelay:   2 * time.Second,
+		RetryCount:     3,
+		Timeout:        30 * time.Second,
+		UseProxy:       true,
+		EnableCache:    true,
+		CacheTTL:       10 * time.Minute,
+	}
+
+	// 初始化抓取器
+	if err := scraper.Initialize(config); err != nil {
+		return nil, fmt.Errorf("failed to initialize buff sell scraper: %v", err)
+	}
+
+	return scraper, nil
 }
 
 // createSteamBuyScraper 创建Steam买入抓取器
@@ -285,4 +297,37 @@ func (sm *ScraperManager) StopAllScrapers() error {
 	}
 
 	return nil
+}
+
+// 临时构造函数，用于解决循环导入问题
+
+// NewProxyManager 创建代理管理器
+func NewProxyManager() IProxyManager {
+	// 返回一个简单的实现
+	return &simpleProxyManager{}
+}
+
+// NewErrorHandler 创建错误处理器
+func NewErrorHandler() IErrorHandler {
+	return &simpleErrorHandler{}
+}
+
+// NewHTTPClientManager 创建HTTP客户端管理器
+func NewHTTPClientManager(proxyMgr IProxyManager, errorHandler IErrorHandler) IHTTPClientManager {
+	return &simpleHTTPClientManager{}
+}
+
+// NewConfigManager 创建配置管理器
+func NewConfigManager() IConfigManager {
+	return &simpleConfigManager{}
+}
+
+// NewCacheManager 创建缓存管理器
+func NewCacheManager() ICacheManager {
+	return &simpleCacheManager{}
+}
+
+// NewTaskManager 创建任务管理器
+func NewTaskManager() ITaskManager {
+	return &simpleTaskManager{}
 }

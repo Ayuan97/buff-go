@@ -3,7 +3,7 @@ package business
 import (
 	"buff-go/internal/dao"
 	"buff-go/internal/model"
-	"buff-go/internal/scraper/framework"
+	"buff-go/internal/scraper/core"
 	"buff-go/pkg/gredis"
 	"buff-go/pkg/rediskey"
 	"buff-go/pkg/util"
@@ -15,7 +15,7 @@ import (
 // DataProcessor 数据处理器
 type DataProcessor struct {
 	dao          *dao.Dao
-	cacheManager framework.ICacheManager
+	cacheManager core.ICacheManager
 	priceMonitor *PriceMonitor
 	mu           sync.RWMutex
 }
@@ -30,7 +30,7 @@ type ProcessingResult struct {
 }
 
 // NewDataProcessor 创建数据处理器
-func NewDataProcessor(dao *dao.Dao, cacheManager framework.ICacheManager, priceMonitor *PriceMonitor) *DataProcessor {
+func NewDataProcessor(dao *dao.Dao, cacheManager core.ICacheManager, priceMonitor *PriceMonitor) *DataProcessor {
 	return &DataProcessor{
 		dao:          dao,
 		cacheManager: cacheManager,
@@ -99,8 +99,8 @@ func (dp *DataProcessor) processBuffBuyItem(item BuffBuyItem, game string, appid
 				BuffBuyUpdate:  int(time.Now().Unix()),
 			}
 
-			if err := dp.dao.CreateInfo(&info); err != nil {
-				return fmt.Errorf("创建商品信息失败: %v", err)
+			if !dp.dao.CreateInfo(&info) {
+				return fmt.Errorf("创建商品信息失败")
 			}
 		} else {
 			// 数据库存在，更新数据
@@ -382,7 +382,7 @@ func (dp *DataProcessor) updateSteamSellCache(key string, info *model.Info) {
 // 适配新框架接口的方法
 
 // ProcessSteamBuyDataFramework 处理Steam买入数据（框架接口适配）
-func (dp *DataProcessor) ProcessSteamBuyDataFramework(items []framework.SteamBuyItemData, game string, appid int) *framework.ProcessingResult {
+func (dp *DataProcessor) ProcessSteamBuyDataFramework(items []core.SteamBuyItemData, game string, appid int) *core.ProcessingResult {
 	// 转换数据格式
 	businessItems := make([]SteamBuyItem, len(items))
 	for i, item := range items {
@@ -402,7 +402,7 @@ func (dp *DataProcessor) ProcessSteamBuyDataFramework(items []framework.SteamBuy
 	result := dp.ProcessSteamBuyData(businessItems, game, appid)
 
 	// 转换返回结果格式
-	return &framework.ProcessingResult{
+	return &core.ProcessingResult{
 		Success:     result.Success,
 		ProcessedAt: result.ProcessedAt,
 		ItemCount:   result.ItemCount,
@@ -412,7 +412,7 @@ func (dp *DataProcessor) ProcessSteamBuyDataFramework(items []framework.SteamBuy
 }
 
 // ProcessSteamSellDataFramework 处理Steam卖出数据（框架接口适配）
-func (dp *DataProcessor) ProcessSteamSellDataFramework(items []framework.SteamSellItemData, game string, appid int) *framework.ProcessingResult {
+func (dp *DataProcessor) ProcessSteamSellDataFramework(items []core.SteamSellItemData, game string, appid int) *core.ProcessingResult {
 	// 转换数据格式
 	businessItems := make([]SteamSellItem, len(items))
 	for i, item := range items {
@@ -432,7 +432,7 @@ func (dp *DataProcessor) ProcessSteamSellDataFramework(items []framework.SteamSe
 	result := dp.ProcessSteamSellData(businessItems, game, appid)
 
 	// 转换返回结果格式
-	return &framework.ProcessingResult{
+	return &core.ProcessingResult{
 		Success:     result.Success,
 		ProcessedAt: result.ProcessedAt,
 		ItemCount:   result.ItemCount,

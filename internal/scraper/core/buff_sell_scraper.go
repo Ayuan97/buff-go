@@ -1,13 +1,13 @@
-package implementations
+package core
 
 import (
 	"buff-go/internal/dao"
-	"buff-go/internal/scraper/business"
-	"buff-go/internal/scraper/framework"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -31,10 +31,9 @@ type BuffSellItem struct {
 
 // BuffSellScraper Buff卖出抓取器
 type BuffSellScraper struct {
-	*framework.BaseScraper
-	dao           *dao.Dao
-	dataProcessor *business.DataProcessor
-	config        *BuffSellConfig
+	*BaseScraper
+	dao    *dao.Dao
+	config *BuffSellConfig
 }
 
 // BuffSellConfig Buff卖出抓取器配置
@@ -47,18 +46,17 @@ type BuffSellConfig struct {
 }
 
 // NewBuffSellScraper 创建Buff卖出抓取器
-func NewBuffSellScraper(dao *dao.Dao, dataProcessor *business.DataProcessor) *BuffSellScraper {
-	baseScraper := framework.NewBaseScraper("buff_sell")
+func NewBuffSellScraper(dao *dao.Dao) *BuffSellScraper {
+	baseScraper := NewBaseScraper("buff_sell")
 
 	return &BuffSellScraper{
-		BaseScraper:   baseScraper,
-		dao:           dao,
-		dataProcessor: dataProcessor,
+		BaseScraper: baseScraper,
+		dao:         dao,
 	}
 }
 
 // Initialize 初始化抓取器
-func (bs *BuffSellScraper) Initialize(config *framework.ScraperConfig) error {
+func (bs *BuffSellScraper) Initialize(config *ScraperConfig) error {
 	if err := bs.BaseScraper.Initialize(config); err != nil {
 		return err
 	}
@@ -107,7 +105,7 @@ func (bs *BuffSellScraper) Start(ctx context.Context) error {
 }
 
 // ProcessTask 处理抓取任务
-func (bs *BuffSellScraper) ProcessTask(task *framework.ScrapingTask) (*framework.ScrapingResult, error) {
+func (bs *BuffSellScraper) ProcessTask(task *ScrapingTask) (*ScrapingResult, error) {
 	// 执行HTTP请求
 	result, err := bs.BaseScraper.ProcessTask(task)
 	if err != nil {
@@ -129,7 +127,7 @@ func (bs *BuffSellScraper) generateTasks() error {
 		url := fmt.Sprintf("https://buff.163.com/api/market/goods/selling?game=%s&page_num=%d&min_price=%.2f&max_price=%.2f&sort_by=price.asc&page_size=80&use_suggestion=0&_=%d",
 			bs.config.Game, i, bs.config.MinPrice, bs.config.MaxPrice, time.Now().UnixNano()/1e6)
 
-		task := &framework.ScrapingTask{
+		task := &ScrapingTask{
 			ID:     fmt.Sprintf("buff_sell_page_%d", i),
 			URL:    url,
 			Method: "GET",
@@ -155,7 +153,7 @@ func (bs *BuffSellScraper) generateTasks() error {
 }
 
 // processResponse 处理响应数据
-func (bs *BuffSellScraper) processResponse(result *framework.ScrapingResult) error {
+func (bs *BuffSellScraper) processResponse(result *ScrapingResult) error {
 	if result.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP error: %d", result.StatusCode)
 	}
@@ -163,20 +161,15 @@ func (bs *BuffSellScraper) processResponse(result *framework.ScrapingResult) err
 	// 解析JSON数据
 	var buffData BuffSellData
 	if err := json.Unmarshal(result.Body, &buffData); err != nil {
-		return fmt.Errorf("failed to unmarshal response: %v", err)
+		return fmt.Errorf("failed to parse JSON: %v", err)
 	}
 
-	// 检查响应状态
-	switch buffData.Code {
-	case "OK":
-		return bs.handleBuffData(buffData, result.Metadata)
-	case "Action Forbidden":
-		return fmt.Errorf("action forbidden")
-	case "Login Required":
-		return fmt.Errorf("login required")
-	default:
-		return fmt.Errorf("unknown response code: %s", buffData.Code)
+	// 处理数据
+	if err := bs.handleBuffData(buffData, result.Metadata); err != nil {
+		return fmt.Errorf("failed to handle buff data: %v", err)
 	}
+
+	return nil
 }
 
 // handleBuffData 处理Buff数据
@@ -191,30 +184,31 @@ func (bs *BuffSellScraper) handleBuffData(buffData BuffSellData, metadata map[st
 		appid = appidInt
 	}
 
-	// 转换数据格式
-	items := make([]business.BuffSellItem, len(buffData.Result.Items))
-	for i, item := range buffData.Result.Items {
-		items[i] = business.BuffSellItem{
-			Id:             item.Id,
-			Name:           item.Name,
-			MarketHashName: item.MarketHashName,
-			SellMinPrice:   item.SellMinPrice,
-			SellNum:        item.SellNum,
-			Appid:          item.Appid,
-		}
-
-		fmt.Printf("buff - sell - name: %s | 价格: %s | 数量: %d\n", item.Name, item.SellMinPrice, item.SellNum)
+	var wg sync.WaitGroup
+	for _, item := range buffData.Result.Items {
+		wg.Add(1)
+		go func(item BuffSellItem) {
+			defer wg.Done()
+			bs.processBuffItem(item, game, appid)
+		}(item)
 	}
-
-	// 使用数据处理器处理数据
-	if bs.dataProcessor != nil {
-		result := bs.dataProcessor.ProcessBuffSellData(items, game, appid)
-		if !result.Success {
-			return fmt.Errorf("data processing failed: %v", result.Errors)
-		}
-	}
+	wg.Wait()
 
 	return nil
+}
+
+// processBuffItem 处理单个Buff商品
+func (bs *BuffSellScraper) processBuffItem(item BuffSellItem, game string, appid int) {
+	// 转换价格字符串为浮点数
+	sellMinPrice, err := strconv.ParseFloat(item.SellMinPrice, 64)
+	if err != nil {
+		fmt.Printf("Failed to parse price %s for item %s: %v\n", item.SellMinPrice, item.Name, err)
+		return
+	}
+
+	// 这里可以根据需要处理卖出数据
+	// 目前只是简单打印
+	fmt.Printf("Processed sell item: %s, price: %.2f, num: %d\n", item.Name, sellMinPrice, item.SellNum)
 }
 
 // GetConfig 获取配置
@@ -229,17 +223,12 @@ func (bs *BuffSellScraper) UpdateConfig(config *BuffSellConfig) {
 
 // SetManagers 设置管理器
 func (bs *BuffSellScraper) SetManagers(
-	httpManager framework.IHTTPClientManager,
-	proxyManager framework.IProxyManager,
-	configManager framework.IConfigManager,
-	cacheManager framework.ICacheManager,
-	errorHandler framework.IErrorHandler,
-	taskManager framework.ITaskManager,
+	httpManager IHTTPClientManager,
+	proxyManager IProxyManager,
+	configManager IConfigManager,
+	cacheManager ICacheManager,
+	errorHandler IErrorHandler,
+	taskManager ITaskManager,
 ) {
 	bs.BaseScraper.SetManagers(httpManager, proxyManager, configManager, cacheManager, errorHandler, taskManager)
-}
-
-// SetDataProcessor 设置数据处理器
-func (bs *BuffSellScraper) SetDataProcessor(processor *business.DataProcessor) {
-	bs.dataProcessor = processor
 }

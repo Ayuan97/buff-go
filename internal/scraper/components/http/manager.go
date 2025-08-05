@@ -1,6 +1,7 @@
-package framework
+package http
 
 import (
+	"buff-go/internal/scraper/core"
 	"crypto/tls"
 	"fmt"
 	"net/http"

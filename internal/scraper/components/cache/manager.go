@@ -1,6 +1,7 @@
-package framework
+package cache
 
 import (
+	"buff-go/internal/scraper/core"
 	"buff-go/pkg/gredis"
 	"encoding/json"
 	"fmt"
@@ -10,9 +11,9 @@ import (
 
 // CacheManager 缓存管理器实现
 type CacheManager struct {
-	localCache map[string]*CacheItem
+	localCache map[string]*core.CacheItem
 	localMux   sync.RWMutex
-	stats      *CacheStats
+	stats      *core.CacheStats
 	statsMux   sync.RWMutex
 	prefix     string
 }
@@ -20,8 +21,8 @@ type CacheManager struct {
 // NewCacheManager 创建缓存管理器
 func NewCacheManager(prefix string) *CacheManager {
 	cm := &CacheManager{
-		localCache: make(map[string]*CacheItem),
-		stats:      &CacheStats{},
+		localCache: make(map[string]*core.CacheItem),
+		stats:      &core.CacheStats{},
 		prefix:     prefix,
 	}
 
@@ -73,7 +74,7 @@ func (cm *CacheManager) Get(key string) (interface{}, error) {
 	}
 
 	// 更新本地缓存
-	item := &CacheItem{
+	item := &core.CacheItem{
 		Key:       key,
 		Value:     cacheValue,
 		CreatedAt: time.Now(),
@@ -109,7 +110,7 @@ func (cm *CacheManager) Set(key string, value interface{}, ttl time.Duration) er
 	}()
 
 	// 更新本地缓存
-	item := &CacheItem{
+	item := &core.CacheItem{
 		Key:       key,
 		Value:     value,
 		TTL:       ttl,
@@ -179,7 +180,7 @@ func (cm *CacheManager) Exists(key string) bool {
 func (cm *CacheManager) Clear() error {
 	// 清空本地缓存
 	cm.localMux.Lock()
-	cm.localCache = make(map[string]*CacheItem)
+	cm.localCache = make(map[string]*core.CacheItem)
 	cm.localMux.Unlock()
 
 	// 这里可以实现清空Redis中特定前缀的缓存
@@ -189,7 +190,7 @@ func (cm *CacheManager) Clear() error {
 }
 
 // GetStats 获取缓存统计信息
-func (cm *CacheManager) GetStats() *CacheStats {
+func (cm *CacheManager) GetStats() *core.CacheStats {
 	cm.statsMux.RLock()
 	defer cm.statsMux.RUnlock()
 
@@ -199,7 +200,7 @@ func (cm *CacheManager) GetStats() *CacheStats {
 		hitRate = float64(cm.stats.HitCount) / float64(cm.stats.HitCount+cm.stats.MissCount)
 	}
 
-	return &CacheStats{
+	return &core.CacheStats{
 		TotalKeys:   cm.stats.TotalKeys,
 		HitCount:    cm.stats.HitCount,
 		MissCount:   cm.stats.MissCount,
@@ -260,7 +261,7 @@ func (cm *CacheManager) Increment(key string, delta int64) (int64, error) {
 
 	// 更新本地缓存
 	cm.localMux.Lock()
-	cm.localCache[key] = &CacheItem{
+	cm.localCache[key] = &core.CacheItem{
 		Key:       key,
 		Value:     result,
 		CreatedAt: time.Now(),
@@ -304,7 +305,7 @@ func (cm *CacheManager) getFullKey(key string) string {
 }
 
 // isExpired 检查缓存项是否过期
-func (cm *CacheManager) isExpired(item *CacheItem) bool {
+func (cm *CacheManager) isExpired(item *core.CacheItem) bool {
 	return time.Now().After(item.ExpiresAt)
 }
 

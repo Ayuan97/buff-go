@@ -1,6 +1,7 @@
-package framework
+package proxy
 
 import (
+	"buff-go/internal/scraper/core"
 	"errors"
 	"math/rand"
 	"sync"
@@ -9,9 +10,9 @@ import (
 
 // ProxyManager 代理管理器实现
 type ProxyManager struct {
-	proxies     []*ProxyInfo
+	proxies     []*core.ProxyInfo
 	proxiesMux  sync.RWMutex
-	usedProxies map[string]*ProxyInfo
+	usedProxies map[string]*core.ProxyInfo
 	usedMux     sync.RWMutex
 	config      *ProxyManagerConfig
 }
@@ -37,8 +38,8 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 	}
 
 	pm := &ProxyManager{
-		proxies:     make([]*ProxyInfo, 0),
-		usedProxies: make(map[string]*ProxyInfo),
+		proxies:     make([]*core.ProxyInfo, 0),
+		usedProxies: make(map[string]*core.ProxyInfo),
 		config:      config,
 	}
 
@@ -49,7 +50,7 @@ func NewProxyManager(config *ProxyManagerConfig) *ProxyManager {
 }
 
 // GetProxy 获取可用代理
-func (pm *ProxyManager) GetProxy() (*ProxyInfo, error) {
+func (pm *ProxyManager) GetProxy() (*core.ProxyInfo, error) {
 	pm.proxiesMux.RLock()
 	defer pm.proxiesMux.RUnlock()
 
@@ -58,7 +59,7 @@ func (pm *ProxyManager) GetProxy() (*ProxyInfo, error) {
 	}
 
 	// 过滤可用代理
-	availableProxies := make([]*ProxyInfo, 0)
+	availableProxies := make([]*core.ProxyInfo, 0)
 	for _, proxy := range pm.proxies {
 		if pm.isProxyAvailable(proxy) {
 			availableProxies = append(availableProxies, proxy)
@@ -82,7 +83,7 @@ func (pm *ProxyManager) GetProxy() (*ProxyInfo, error) {
 }
 
 // ReleaseProxy 释放代理
-func (pm *ProxyManager) ReleaseProxy(proxy *ProxyInfo) {
+func (pm *ProxyManager) ReleaseProxy(proxy *core.ProxyInfo) {
 	if proxy == nil {
 		return
 	}
@@ -93,7 +94,7 @@ func (pm *ProxyManager) ReleaseProxy(proxy *ProxyInfo) {
 }
 
 // MarkProxyFailed 标记代理失效
-func (pm *ProxyManager) MarkProxyFailed(proxy *ProxyInfo, reason string) {
+func (pm *ProxyManager) MarkProxyFailed(proxy *core.ProxyInfo, reason string) {
 	if proxy == nil {
 		return
 	}
@@ -119,11 +120,11 @@ func (pm *ProxyManager) MarkProxyFailed(proxy *ProxyInfo, reason string) {
 }
 
 // GetPoolStatus 获取代理池状态
-func (pm *ProxyManager) GetPoolStatus() *ProxyPoolStatus {
+func (pm *ProxyManager) GetPoolStatus() *core.ProxyPoolStatus {
 	pm.proxiesMux.RLock()
 	defer pm.proxiesMux.RUnlock()
 
-	status := &ProxyPoolStatus{
+	status := &core.ProxyPoolStatus{
 		TotalProxies: len(pm.proxies),
 	}
 
@@ -155,7 +156,7 @@ func (pm *ProxyManager) RefreshProxies() error {
 }
 
 // AddProxy 添加代理
-func (pm *ProxyManager) AddProxy(proxy *ProxyInfo) {
+func (pm *ProxyManager) AddProxy(proxy *core.ProxyInfo) {
 	if proxy == nil {
 		return
 	}
@@ -192,7 +193,7 @@ func (pm *ProxyManager) RemoveProxy(proxyID string) {
 }
 
 // isProxyAvailable 检查代理是否可用
-func (pm *ProxyManager) isProxyAvailable(proxy *ProxyInfo) bool {
+func (pm *ProxyManager) isProxyAvailable(proxy *core.ProxyInfo) bool {
 	if !proxy.IsActive {
 		return false
 	}
@@ -242,7 +243,7 @@ func (pm *ProxyManager) startBackgroundTasks() {
 // healthCheck 健康检查
 func (pm *ProxyManager) healthCheck() {
 	pm.proxiesMux.RLock()
-	proxies := make([]*ProxyInfo, len(pm.proxies))
+	proxies := make([]*core.ProxyInfo, len(pm.proxies))
 	copy(proxies, pm.proxies)
 	pm.proxiesMux.RUnlock()
 
@@ -263,16 +264,16 @@ func (pm *ProxyManager) healthCheck() {
 }
 
 // fetchProxiesFromSource 从数据源获取代理列表
-func (pm *ProxyManager) fetchProxiesFromSource() []*ProxyInfo {
+func (pm *ProxyManager) fetchProxiesFromSource() []*core.ProxyInfo {
 	// 集成现有的代理获取逻辑
 	// 这里可以从数据库、外部API或其他数据源获取代理
 
 	// 示例：从数据库获取代理（需要注入DAO）
 	// 实际实现时应该通过依赖注入获取DAO实例
-	proxies := make([]*ProxyInfo, 0)
+	proxies := make([]*core.ProxyInfo, 0)
 
 	// 添加一些默认代理作为后备
-	defaultProxies := []*ProxyInfo{
+	defaultProxies := []*core.ProxyInfo{
 		{
 			ID:       "default_proxy_1",
 			URL:      "http://127.0.0.1:8080",
@@ -288,7 +289,7 @@ func (pm *ProxyManager) fetchProxiesFromSource() []*ProxyInfo {
 }
 
 // GetProxyByID 根据ID获取代理
-func (pm *ProxyManager) GetProxyByID(id string) *ProxyInfo {
+func (pm *ProxyManager) GetProxyByID(id string) *core.ProxyInfo {
 	pm.proxiesMux.RLock()
 	defer pm.proxiesMux.RUnlock()
 

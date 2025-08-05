@@ -1,4 +1,4 @@
-package framework
+package core
 
 import (
 	"context"
@@ -356,4 +356,31 @@ type ProcessingResult struct {
 	ItemCount   int                    `json:"item_count"`
 	Errors      []string               `json:"errors,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// 请求选项函数
+func WithTimeout(timeout time.Duration) RequestOption {
+	return func(opts *RequestOptions) {
+		opts.Timeout = timeout
+	}
+}
+
+func WithRetry(count int, delay time.Duration) RequestOption {
+	return func(opts *RequestOptions) {
+		opts.RetryCount = count
+		opts.RetryDelay = delay
+	}
+}
+
+func WithProxy(useProxy bool) RequestOption {
+	return func(opts *RequestOptions) {
+		opts.UseProxy = useProxy
+	}
+}
+
+func WithCache(key string, ttl time.Duration) RequestOption {
+	return func(opts *RequestOptions) {
+		opts.CacheKey = key
+		opts.CacheTTL = ttl
+	}
 }

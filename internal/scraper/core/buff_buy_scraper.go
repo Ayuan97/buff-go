@@ -1,15 +1,14 @@
-package framework
+package core
 
 import (
 	"buff-go/internal/dao"
 	"buff-go/internal/model"
 	"buff-go/pkg/gredis"
-	"buff-go/pkg/rediskey"
-	"buff-go/pkg/util"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -164,20 +163,15 @@ func (bs *BuffBuyScraper) processResponse(result *ScrapingResult) error {
 	// 解析JSON数据
 	var buffData BuffBuyData
 	if err := json.Unmarshal(result.Body, &buffData); err != nil {
-		return fmt.Errorf("failed to unmarshal response: %v", err)
+		return fmt.Errorf("failed to parse JSON: %v", err)
 	}
 
-	// 检查响应状态
-	switch buffData.Code {
-	case "OK":
-		return bs.handleBuffData(buffData, result.Metadata)
-	case "Action Forbidden":
-		return fmt.Errorf("action forbidden")
-	case "Login Required":
-		return fmt.Errorf("login required")
-	default:
-		return fmt.Errorf("unknown response code: %s", buffData.Code)
+	// 处理数据
+	if err := bs.handleBuffData(buffData, result.Metadata); err != nil {
+		return fmt.Errorf("failed to handle buff data: %v", err)
 	}
+
+	return nil
 }
 
 // handleBuffData 处理Buff数据
@@ -207,60 +201,55 @@ func (bs *BuffBuyScraper) handleBuffData(buffData BuffBuyData, metadata map[stri
 
 // processBuffItem 处理单个Buff商品
 func (bs *BuffBuyScraper) processBuffItem(item BuffBuyItem, game string, appid int) {
-	fmt.Printf("buff - buy - name: %s | 价格: %s | 数量: %d\n", item.Name, item.BuyMaxPrice, item.BuyNum)
+	// 转换价格字符串为浮点数
+	buyMaxPrice, err := strconv.ParseFloat(item.BuyMaxPrice, 64)
+	if err != nil {
+		fmt.Printf("Failed to parse price %s for item %s: %v\n", item.BuyMaxPrice, item.Name, err)
+		return
+	}
 
-	key := rediskey.GetCacheKey(item.MarketHashName, game)
+	// 构建商品数据
+	goods := &model.Goods{
+		Name:           item.Name,
+		MarketHashName: item.MarketHashName,
+		BuyMaxPrice:    buyMaxPrice,
+		BuyNum:         item.BuyNum,
+		Appid:          appid,
+		Game:           game,
+		GoodsId:        item.Id,
+	}
 
-	// 查询缓存
-	value, _ := gredis.HGetAll(key)
-	var info model.Info
+	// 使用现有的 CreateGoods 方法（存在即更新）
+	if !bs.dao.CreateGoods(goods) {
+		fmt.Printf("Failed to create/update goods %s\n", item.Name)
+		return
+	}
+	fmt.Printf("Processed goods: %s\n", item.Name)
 
-	if len(value) == 0 {
-		// 缓存不存在，查询数据库
-		_, err := bs.dao.GetOneInfoByMarketHashName(item.MarketHashName)
-		if err != nil {
-			// 数据库不存在，创建新记录
-			info.Appid = item.Appid
-			info.GoodsId = item.Id
-			info.MarketHashName = item.MarketHashName
-			info.BuffBuyPrice = util.StringToFloat64(item.BuyMaxPrice)
-			info.BuffBuyNum = item.BuyNum
-			info.Name = item.Name
-			info.Game = game
-			info.BuffBuyUpdate = int(time.Now().Unix())
+	// 缓存商品信息
+	bs.cacheGoodsInfo(item)
+}
 
-			// 插入数据库
-			bs.dao.CreateInfo(&info)
-		} else {
-			// 数据库存在，更新数据
-			info.BuffBuyPrice = util.StringToFloat64(item.BuyMaxPrice)
-			info.BuffBuyNum = item.BuyNum
-			info.BuffBuyUpdate = int(time.Now().Unix())
-			bs.dao.UpdateInfo(&info)
-		}
+// cacheGoodsInfo 缓存商品信息
+func (bs *BuffBuyScraper) cacheGoodsInfo(item BuffBuyItem) {
+	cacheKey := fmt.Sprintf("goods:%s", item.MarketHashName)
+	goodsData := map[string]interface{}{
+		"name":             item.Name,
+		"market_hash_name": item.MarketHashName,
+		"buy_max_price":    item.BuyMaxPrice,
+		"buy_num":          item.BuyNum,
+		"appid":            item.Appid,
+		"updated_at":       time.Now().Unix(),
+	}
 
-		// 更新缓存
-		gredis.Hset(key, "buff_buy_price", info.BuffBuyPrice)
-		gredis.Hset(key, "buff_buy_num", info.BuffBuyNum)
-		gredis.Hset(key, "buff_buy_update", info.BuffBuyUpdate)
-	} else {
-		// 缓存存在，直接更新
-		oldPrice := util.StringToFloat64(value["buff_buy_price"])
-		newPrice := util.StringToFloat64(item.BuyMaxPrice)
+	goodsJSON, err := json.Marshal(goodsData)
+	if err != nil {
+		fmt.Printf("Failed to marshal goods data for %s: %v\n", item.Name, err)
+		return
+	}
 
-		if oldPrice != newPrice {
-			// 价格有变化，更新缓存和数据库
-			gredis.Hset(key, "buff_buy_price", newPrice)
-			gredis.Hset(key, "buff_buy_num", item.BuyNum)
-			gredis.Hset(key, "buff_buy_update", time.Now().Unix())
-
-			// 更新数据库
-			info.MarketHashName = item.MarketHashName
-			info.BuffBuyPrice = newPrice
-			info.BuffBuyNum = item.BuyNum
-			info.BuffBuyUpdate = int(time.Now().Unix())
-			bs.dao.UpdateInfo(&info)
-		}
+	if err := gredis.Set(cacheKey, string(goodsJSON), time.Hour); err != nil {
+		fmt.Printf("Failed to cache goods %s: %v\n", item.Name, err)
 	}
 }
 

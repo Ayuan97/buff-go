@@ -1,7 +1,8 @@
-package framework
+package config
 
 import (
 	"buff-go/internal/dao"
+	"buff-go/internal/scraper/core"
 	"buff-go/pkg/gredis"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,7 @@ import (
 // ConfigManager 配置管理器实现
 type ConfigManager struct {
 	dao      *dao.Dao
-	cache    map[string]*ConfigItem
+	cache    map[string]*core.ConfigItem
 	cacheMux sync.RWMutex
 	watchers map[string][]func(oldValue, newValue interface{})
 	watchMux sync.RWMutex
@@ -24,7 +25,7 @@ type ConfigManager struct {
 func NewConfigManager(dao *dao.Dao) *ConfigManager {
 	cm := &ConfigManager{
 		dao:      dao,
-		cache:    make(map[string]*ConfigItem),
+		cache:    make(map[string]*core.ConfigItem),
 		watchers: make(map[string][]func(oldValue, newValue interface{})),
 	}
 
@@ -56,7 +57,7 @@ func (cm *ConfigManager) Get(key string) (interface{}, error) {
 	if value != "" {
 		var configValue interface{}
 		if err := json.Unmarshal([]byte(value), &configValue); err == nil {
-			item := &ConfigItem{
+			item := &core.ConfigItem{
 				Key:       key,
 				Value:     configValue,
 				UpdatedAt: time.Now(),
@@ -178,7 +179,7 @@ func (cm *ConfigManager) Set(key string, value interface{}) error {
 	oldValue, _ := cm.Get(key)
 
 	// 更新缓存
-	item := &ConfigItem{
+	item := &core.ConfigItem{
 		Key:       key,
 		Value:     value,
 		UpdatedAt: time.Now(),
@@ -236,7 +237,7 @@ func (cm *ConfigManager) Reload() error {
 	defer cm.cacheMux.Unlock()
 
 	// 清空缓存
-	cm.cache = make(map[string]*ConfigItem)
+	cm.cache = make(map[string]*core.ConfigItem)
 
 	// 清空Redis缓存中的配置
 	// 这里可以根据需要实现具体的清理逻辑
@@ -331,8 +332,8 @@ func (cm *ConfigManager) checkConfigChanges() {
 }
 
 // GetScraperConfig 获取抓取器配置
-func (cm *ConfigManager) GetScraperConfig(scraperName string) (*ScraperConfig, error) {
-	config := &ScraperConfig{
+func (cm *ConfigManager) GetScraperConfig(scraperName string) (*core.ScraperConfig, error) {
+	config := &core.ScraperConfig{
 		Name:           scraperName,
 		MaxConcurrency: 5,
 		RequestDelay:   time.Second,

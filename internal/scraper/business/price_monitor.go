@@ -1,7 +1,7 @@
 package business
 
 import (
-	"buff-go/internal/scraper/framework"
+	"buff-go/internal/scraper/core"
 	"fmt"
 	"sync"
 	"time"
@@ -37,7 +37,7 @@ type PriceMonitor struct {
 	alertsMux    sync.RWMutex
 	subscribers  []PriceChangeSubscriber
 	subsMux      sync.RWMutex
-	cacheManager framework.ICacheManager
+	cacheManager core.ICacheManager
 	stats        *MonitorStats
 	statsMux     sync.RWMutex
 }
@@ -57,7 +57,7 @@ type MonitorStats struct {
 }
 
 // NewPriceMonitor 创建价格监控器
-func NewPriceMonitor(cacheManager framework.ICacheManager) *PriceMonitor {
+func NewPriceMonitor(cacheManager core.ICacheManager) *PriceMonitor {
 	return &PriceMonitor{
 		alerts:       make(map[string]*PriceAlert),
 		subscribers:  make([]PriceChangeSubscriber, 0),

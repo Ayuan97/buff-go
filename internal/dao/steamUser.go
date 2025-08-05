@@ -22,8 +22,3 @@ func (d *Dao) GetSteamUserList() (steamUserList []*model.SteamUser, err error) {
 func (d *Dao) UpdateSteamUserInfo(id int, steamUser *model.SteamUser) (err error) {
 	return model.UpdateSteamUserInfo(d.engine, id, steamUser)
 }
-
-// 根据id查询账号信息
-func (d *Dao) GetSteamUserInfo(id int) (steamUser model.SteamUser, err error) {
-	return model.GetSteamUserInfo(d.engine, id)
-}
