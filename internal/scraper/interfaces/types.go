@@ -17,6 +17,7 @@ const (
 // ScraperConfig 抓取器配置
 type ScraperConfig struct {
 	Name           string            `json:"name"`
+	Game           string            `json:"game"`
 	MaxConcurrency int               `json:"max_concurrency"`
 	RequestDelay   time.Duration     `json:"request_delay"`
 	RetryCount     int               `json:"retry_count"`

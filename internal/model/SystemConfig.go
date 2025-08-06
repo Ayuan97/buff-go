@@ -7,6 +7,8 @@ import (
 type Config struct {
 	*Model
 	GameName           string  `json:"game_name" gorm:"column:game_name"`
+	Status             int     `json:"status" gorm:"column:status"` //1启用 0禁用
+	AppId              string  `json:"app_id" gorm:"column:app_id"`
 	BuffBuyStatus      int     `json:"buff_buy_status"`
 	BuffSellStatus     int     `json:"buff_sell_status"`
 	SteamBuyStatus     int     `json:"steam_buy_status"`
@@ -31,55 +33,12 @@ func (Config) TableName() string {
 }
 
 // 根据id  获取单个配置
-func (s *Config) GetConfigOne(db *gorm.DB) Config {
+func (s *Config) GetConfigOne(db *gorm.DB) (*Config, error) {
 	var SystemConfig Config
 	//使用First方法，如果找不到记录会返回错误
-	err := db.Where("id = ?", s.ID).First(&SystemConfig).Error
+	err := db.Where("id = ?", s.ID).Find(&SystemConfig).Error
 	if err != nil {
-		// 如果记录不存在，返回默认配置
-		if err == gorm.ErrRecordNotFound {
-			return s.getDefaultConfig()
-		}
-		// 其他错误也返回默认配置
-		return s.getDefaultConfig()
+		return nil, err
 	}
-	return SystemConfig
-}
-
-// getDefaultConfig 获取默认配置
-func (s *Config) getDefaultConfig() Config {
-	// 根据ID确定游戏类型
-	gameName := "csgo" // 默认CSGO
-	if s.ID == 2 {
-		gameName = "dota2"
-	}
-
-	defaultConfig := Config{
-		Model:              &Model{ID: s.ID},
-		GameName:           gameName,
-		BuffBuyStatus:      1,  // 默认启用
-		BuffSellStatus:     1,  // 默认启用
-		SteamBuyStatus:     0,  // 默认禁用
-		SteamSellStatus:    0,  // 默认禁用
-		BuffBuyDelay:       5,  // 5秒延迟
-		BuffSellDelay:      5,  // 5秒延迟
-		SteamBuyDelay:      10, // 10秒延迟
-		SteamSellDelay:     10, // 10秒延迟
-		BotFilter:          "",
-		BuffPageNum:        10,   // 默认10页
-		SteamPageNum:       5,    // 默认5页
-		BotBuffProportion:  0.95, // 95%
-		BotSteamProportion: 0.95, // 95%
-		BotPrice:           100.0,
-		MinPrice:           0.01,   // 最小价格0.01
-		MaxPrice:           1000.0, // 最大价格1000
-	}
-
-	// 根据游戏类型调整默认值
-	if gameName == "dota2" {
-		defaultConfig.BuffPageNum = 5 // DOTA2默认较少页面
-		defaultConfig.SteamPageNum = 3
-	}
-
-	return defaultConfig
+	return &SystemConfig, nil
 }

@@ -84,23 +84,3 @@ func ValidateConfig(config model.Config) error {
 
 	return nil
 }
-
-// GetCurrentGameConfig 获取当前活跃的游戏配置
-func GetCurrentGameConfig() (model.Config, string, error) {
-	if myDao == nil {
-		return model.Config{}, "", fmt.Errorf("DAO未初始化")
-	}
-
-	// 使用DAO中的GetActiveGameConfig方法
-	config, game, err := myDao.GetActiveGameConfig()
-	if err != nil {
-		return config, game, fmt.Errorf("获取活跃游戏配置失败: %v", err)
-	}
-
-	// 验证配置
-	if err := ValidateConfig(config); err != nil {
-		return config, game, fmt.Errorf("配置验证失败: %v", err)
-	}
-
-	return config, game, nil
-}

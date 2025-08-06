@@ -11,31 +11,52 @@ import (
 
 // GetOneSystemConfig 获取系统配置
 func (d *Dao) GetOneSystemConfig(id int64) model.Config {
+	fmt.Printf("开始获取系统配置 ID：%d\n", id)
+
 	//设置缓存
 	key := rediskey.GetConfigKey(int(id))
 	value := gredis.Get(key)
 	if value == "" {
+		fmt.Printf("缓存中未找到配置，从数据库查询 ID：%d 缓存键：%s\n", id, key)
+
 		s := model.Config{
 			Model: &model.Model{ID: id},
 		}
-		config := s.GetConfigOne(d.engine)
-
-		// 如果从数据库获取到了有效配置，尝试保存到数据库（确保数据库中有记录）
-		if config.ID == 0 {
-			// 如果数据库中没有记录，创建默认记录
-			d.createDefaultConfigIfNotExists(id)
-			// 重新获取配置
-			config = s.GetConfigOne(d.engine)
+		config, err := s.GetConfigOne(d.engine)
+		if err != nil {
+			fmt.Printf("数据库查询配置失败 ID：%d 错误：%v\n", id, err)
+			panic(fmt.Sprintf("致命错误：数据库查询配置失败 ID：%d 错误：%v", id, err))
 		}
 
+		if config == nil {
+			fmt.Printf("数据库中未找到配置记录 ID：%d\n", id)
+			panic(fmt.Sprintf("致命错误：数据库中未找到配置记录 ID：%d", id))
+		}
+
+		if config.ID == 0 {
+			fmt.Printf("配置记录ID为0，数据异常 ID：%d\n", id)
+			panic(fmt.Sprintf("致命错误：配置记录ID为0，数据异常 查询ID：%d", id))
+		}
+
+		fmt.Printf("数据库查询配置成功 ID：%d 游戏：%s 抓取状态：%d\n", config.ID, config.GameName, config.BuffBuyStatus)
+
 		//结构体转换为字符串，增加缓存时间到30分钟
-		str, _ := json.Marshal(config)
+		str, _ := json.Marshal(*config)
 		gredis.Set(key, str, time.Minute*30)
-		return config
+		return *config
 	} else {
+		fmt.Printf("从缓存获取配置 ID：%d 缓存键：%s\n", id, key)
 		var config model.Config
 		//字符串解析到结构体
-		json.Unmarshal([]byte(value), &config)
+		err := json.Unmarshal([]byte(value), &config)
+		if err != nil {
+			fmt.Printf("缓存数据解析失败 ID：%d 错误：%v\n", id, err)
+			// 缓存数据损坏，清理缓存并重新从数据库获取
+			gredis.Del(key)
+			return d.GetOneSystemConfig(id)
+		}
+
+		fmt.Printf("缓存获取配置成功 ID：%d 游戏：%s 抓取状态：%d\n", config.ID, config.GameName, config.BuffBuyStatus)
 		return config
 	}
 }
@@ -55,6 +76,7 @@ func (d *Dao) createDefaultConfigIfNotExists(id int64) {
 		defaultConfig := &model.Config{
 			Model:              &model.Model{ID: id},
 			GameName:           gameName,
+			Status:             1,  // 默认启用状态
 			BuffBuyStatus:      1,  // 默认启用
 			BuffSellStatus:     1,  // 默认启用
 			SteamBuyStatus:     0,  // 默认禁用
@@ -134,34 +156,43 @@ func (d *Dao) GetConfigByGameName(gameName string) model.Config {
 	return d.GetOneSystemConfig(id)
 }
 
-// GetActiveGameConfig 获取当前活跃的游戏配置
-// 优先级：CSGO > DOTA2，返回第一个启用的配置
-func (d *Dao) GetActiveGameConfig() (model.Config, string, error) {
-	// 先尝试获取CSGO配置
-	csgoConfig := d.GetOneSystemConfig(1)
-	if csgoConfig.ID != 0 && csgoConfig.BuffBuyStatus == 1 {
-		return csgoConfig, "csgo", nil
-	}
-
-	// 如果CSGO未启用，尝试DOTA2配置
-	dota2Config := d.GetOneSystemConfig(2)
-	if dota2Config.ID != 0 && dota2Config.BuffBuyStatus == 1 {
-		return dota2Config, "dota2", nil
-	}
-
-	// 如果都未启用，返回CSGO配置作为默认
-	if csgoConfig.ID != 0 {
-		return csgoConfig, "csgo", nil
-	}
-
-	// 如果CSGO配置也不存在，返回DOTA2配置
-	return dota2Config, "dota2", nil
-}
-
 // GetAllConfigs 获取所有游戏配置
 func (d *Dao) GetAllConfigs() map[string]model.Config {
 	configs := make(map[string]model.Config)
 	configs["csgo"] = d.GetOneSystemConfig(1)
 	configs["dota2"] = d.GetOneSystemConfig(2)
 	return configs
+}
+
+// GetEnabledConfigs 获取所有启用状态的游戏配置
+func (d *Dao) GetEnabledConfigs() map[string]model.Config {
+	allConfigs := d.GetAllConfigs()
+	enabledConfigs := make(map[string]model.Config)
+
+	for gameName, config := range allConfigs {
+		if config.ID != 0 && config.Status == 1 {
+			enabledConfigs[gameName] = config
+			fmt.Printf("找到启用配置 游戏：%s ID：%d 状态：%d\n", gameName, config.ID, config.Status)
+		} else {
+			fmt.Printf("跳过未启用配置 游戏：%s ID：%d 状态：%d\n", gameName, config.ID, config.Status)
+		}
+	}
+
+	return enabledConfigs
+}
+
+// GetEnabledConfigByGameName 根据游戏名称获取启用状态的配置
+func (d *Dao) GetEnabledConfigByGameName(gameName string) (model.Config, error) {
+	config := d.GetConfigByGameName(gameName)
+
+	if config.ID == 0 {
+		return model.Config{}, fmt.Errorf("配置不存在 游戏：%s", gameName)
+	}
+
+	if config.Status != 1 {
+		return model.Config{}, fmt.Errorf("配置未启用 游戏：%s 状态：%d", gameName, config.Status)
+	}
+
+	fmt.Printf("获取启用配置成功 游戏：%s ID：%d 状态：%d\n", gameName, config.ID, config.Status)
+	return config, nil
 }

@@ -48,20 +48,50 @@ func (s *SystemConfigServiceImpl) createDefaultConfigIfNotExists(id int64, gameN
 	return nil
 }
 
-// GetCurrentGameConfig 获取当前游戏配置
-// 使用新的逻辑：优先返回启用的配置，如果都未启用则返回CSGO配置
+// GetCurrentGameConfig 获取当前启用状态的游戏配置
 func (s *SystemConfigServiceImpl) GetCurrentGameConfig() (model.Config, string, error) {
-	return s.dao.GetActiveGameConfig()
+	// 获取启用状态的配置，优先返回CSGO配置
+	config := s.dao.GetOneSystemConfig(1)
+	if config.ID != 0 && config.Status == 1 {
+		return config, config.GameName, nil
+	}
+
+	// 如果CSGO配置未启用，尝试DOTA2配置
+	config = s.dao.GetOneSystemConfig(2)
+	if config.ID != 0 && config.Status == 1 {
+		return config, config.GameName, nil
+	}
+
+	return model.Config{}, "", fmt.Errorf("没有找到启用状态的游戏配置")
 }
 
-// GetConfigByGameName 根据游戏名称获取配置
+// GetConfigByGameName 根据游戏名称获取启用状态的配置
 func (s *SystemConfigServiceImpl) GetConfigByGameName(gameName string) model.Config {
-	return s.dao.GetConfigByGameName(gameName)
+	config := s.dao.GetConfigByGameName(gameName)
+
+	// 检查配置是否启用
+	if config.ID != 0 && config.Status == 1 {
+		return config
+	}
+
+	// 如果配置未启用，返回空配置
+	fmt.Printf("配置未启用或不存在 游戏：%s 状态：%d\n", gameName, config.Status)
+	return model.Config{}
 }
 
-// GetAllGameConfigs 获取所有游戏配置
+// GetAllGameConfigs 获取所有启用状态的游戏配置
 func (s *SystemConfigServiceImpl) GetAllGameConfigs() map[string]model.Config {
-	return s.dao.GetAllConfigs()
+	allConfigs := s.dao.GetAllConfigs()
+	enabledConfigs := make(map[string]model.Config)
+
+	// 只返回启用状态的配置
+	for gameName, config := range allConfigs {
+		if config.ID != 0 && config.Status == 1 {
+			enabledConfigs[gameName] = config
+		}
+	}
+
+	return enabledConfigs
 }
 
 // ValidateConfig 验证配置有效性
@@ -70,6 +100,7 @@ func (s *SystemConfigServiceImpl) ValidateConfig(config model.Config) error {
 		return fmt.Errorf("页面数量配置无效: %d", config.BuffPageNum)
 	}
 
+	// 验证价格范围
 	if config.MinPrice < 0 {
 		return fmt.Errorf("最小价格配置无效: %f", config.MinPrice)
 	}
@@ -81,59 +112,17 @@ func (s *SystemConfigServiceImpl) ValidateConfig(config model.Config) error {
 	return nil
 }
 
-// 便利函数，用于向后兼容
-var (
-	defaultService SystemConfigService
-	defaultManager SystemConfigManager
-)
-
-// InitDefaultService 初始化默认服务实例
-func InitDefaultService(dao *dao.Dao) {
-	defaultService = NewSystemConfigService(dao)
-	defaultManager = GetSystemConfigManager(dao)
+// IsConfigEnabled 检查配置是否启用
+func (s *SystemConfigServiceImpl) IsConfigEnabled(config model.Config) bool {
+	return config.ID != 0 && config.Status == 1
 }
 
-// InitializeDefaultConfigs 初始化默认配置（便利函数）
-func InitializeDefaultConfigs() error {
-	if defaultService == nil {
-		return fmt.Errorf("系统配置服务未初始化")
-	}
-	return defaultService.InitializeDefaultConfigs()
+// GetEnabledGameConfigs 获取所有启用状态的游戏配置
+func (s *SystemConfigServiceImpl) GetEnabledGameConfigs() map[string]model.Config {
+	return s.dao.GetEnabledConfigs()
 }
 
-// GetCurrentGameConfig 获取当前游戏配置（便利函数）
-func GetCurrentGameConfig() (model.Config, string, error) {
-	if defaultService == nil {
-		return model.Config{}, "", fmt.Errorf("系统配置服务未初始化")
-	}
-	return defaultService.GetCurrentGameConfig()
-}
-
-// GetConfigByGameName 根据游戏名称获取配置（便利函数）
-func GetConfigByGameName(gameName string) model.Config {
-	if defaultService == nil {
-		return model.Config{}
-	}
-	return defaultService.GetConfigByGameName(gameName)
-}
-
-// GetAllGameConfigs 获取所有游戏配置（便利函数）
-func GetAllGameConfigs() map[string]model.Config {
-	if defaultService == nil {
-		return make(map[string]model.Config)
-	}
-	return defaultService.GetAllGameConfigs()
-}
-
-// ValidateConfig 验证配置有效性（便利函数）
-func ValidateConfig(config model.Config) error {
-	if defaultService == nil {
-		return fmt.Errorf("系统配置服务未初始化")
-	}
-	return defaultService.ValidateConfig(config)
-}
-
-// GetConfigManager 获取配置管理器（便利函数）
-func GetConfigManager() SystemConfigManager {
-	return defaultManager
+// GetEnabledConfigByGameName 根据游戏名称获取启用状态的配置
+func (s *SystemConfigServiceImpl) GetEnabledConfigByGameName(gameName string) (model.Config, error) {
+	return s.dao.GetEnabledConfigByGameName(gameName)
 }

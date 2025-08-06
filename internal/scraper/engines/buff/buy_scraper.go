@@ -43,7 +43,7 @@ type BuffBuyItem struct {
 type BuffBuyScraper struct {
 	*base.BaseScraper
 	dao           *dao.Dao
-	config        *BuffBuyConfig
+	config        *model.Config
 	accountTasks  map[int64]*AccountTask // 账号任务映射，使用int64匹配model.BuffUser.ID
 	tasksMux      sync.RWMutex           // 任务锁
 	proxyManager  interfaces.IProxyManager
@@ -61,15 +61,6 @@ type AccountTask struct {
 	Cancel     context.CancelFunc
 }
 
-// BuffBuyConfig Buff买入抓取器配置
-type BuffBuyConfig struct {
-	Game     string  `json:"game"`
-	AppID    int     `json:"app_id"`
-	MinPrice float64 `json:"min_price"`
-	MaxPrice float64 `json:"max_price"`
-	PageNum  int     `json:"page_num"`
-}
-
 // NewBuffBuyScraper 创建Buff买入抓取器
 func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 	baseScraper := base.NewBaseScraper("buff_buy")
@@ -77,7 +68,7 @@ func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 		BaseScraper:  baseScraper,
 		dao:          dao,
 		accountTasks: make(map[int64]*AccountTask),
-		config:       &BuffBuyConfig{}, // 初始化空配置，稍后从系统配置加载
+		config:       &model.Config{}, // 初始化空配置，稍后从系统配置加载
 	}
 
 	// 从系统配置加载初始配置
@@ -91,23 +82,61 @@ func NewBuffBuyScraper(dao *dao.Dao) *BuffBuyScraper {
 
 // loadInitialConfig 加载初始配置
 func (bs *BuffBuyScraper) loadInitialConfig() {
-	// 获取当前活跃的游戏配置
-	config, game, err := service.GetCurrentGameConfig()
-	if err != nil {
-		fmt.Printf("获取系统配置失败，使用默认CSGO配置 平台：%s 错误：%v\n", bs.GetPlatform(), err)
-		// 使用默认CSGO配置作为fallback
-		bs.config.Game = "csgo"
-		bs.config.AppID = 730
-		bs.config.MinPrice = 0.01
-		bs.config.MaxPrice = 1000.0
-		bs.config.PageNum = 10
-		return
+	fmt.Printf("开始加载初始配置 平台：%s\n", bs.GetPlatform())
+
+	// 默认使用CSGO配置（ID=1）
+	config := bs.dao.GetOneSystemConfig(1)
+	game := "csgo"
+
+	// 验证配置是否成功获取
+	if config.ID == 0 {
+		panic(fmt.Sprintf("致命错误：无法获取CSGO配置 平台：%s 配置ID：1", bs.GetPlatform()))
+	}
+
+	fmt.Printf("配置获取成功 平台：%s 配置ID：%d 游戏：%s\n", bs.GetPlatform(), config.ID, game)
+
+	// 验证配置完整性
+	if err := bs.validateConfig(config); err != nil {
+		panic(fmt.Sprintf("致命错误：配置验证失败 平台：%s 游戏：%s 错误：%v", bs.GetPlatform(), game, err))
 	}
 
 	// 使用系统配置更新本地配置
 	bs.updateLocalConfig(config, game)
-	fmt.Printf("初始配置加载完成 平台：%s 游戏：%s 页面数：%d 价格范围：%.2f-%.2f\n",
-		bs.GetPlatform(), game, bs.config.PageNum, bs.config.MinPrice, bs.config.MaxPrice)
+	fmt.Printf("初始配置加载完成 平台：%s 游戏：%s 页面数：%d 价格范围：%.2f-%.2f 抓取状态：%d\n",
+		bs.GetPlatform(), game, bs.config.BuffPageNum, bs.config.MinPrice, bs.config.MaxPrice, bs.config.BuffBuyStatus)
+}
+
+// validateConfig 验证配置完整性
+func (bs *BuffBuyScraper) validateConfig(config model.Config) error {
+	// 检查基本字段
+	if config.ID == 0 {
+		return fmt.Errorf("配置ID无效: %d", config.ID)
+	}
+
+	// 检查页面数量
+	if config.BuffPageNum <= 0 {
+		return fmt.Errorf("页面数量配置无效: %d (必须大于0)", config.BuffPageNum)
+	}
+
+	// 检查价格范围
+	if config.MinPrice < 0 {
+		return fmt.Errorf("最小价格配置无效: %.2f (不能小于0)", config.MinPrice)
+	}
+
+	if config.MaxPrice <= 0 {
+		return fmt.Errorf("最大价格配置无效: %.2f (必须大于0)", config.MaxPrice)
+	}
+
+	if config.MaxPrice <= config.MinPrice {
+		return fmt.Errorf("价格范围配置无效: 最大价格%.2f必须大于最小价格%.2f", config.MaxPrice, config.MinPrice)
+	}
+
+	// 检查抓取状态
+	if config.BuffBuyStatus < 0 || config.BuffBuyStatus > 1 {
+		return fmt.Errorf("Buff买入状态配置无效: %d (必须是0或1)", config.BuffBuyStatus)
+	}
+
+	return nil
 }
 
 // setupConfigListener 设置配置变更监听器
@@ -143,40 +172,37 @@ func (bs *BuffBuyScraper) onConfigChanged(configID int64) {
 	}
 
 	// 获取当前活跃配置
-	activeConfig, activeGame, err := service.GetCurrentGameConfig()
-	if err != nil {
-		fmt.Printf("获取当前活跃配置失败 平台：%s 错误：%v\n", bs.GetPlatform(), err)
+	activeConfig := bs.dao.GetConfigByGameName(bs.config.GameName)
+	if activeConfig.ID == 0 {
+		fmt.Printf("获取当前活跃配置失败 平台：%s 错误：%v\n", bs.GetPlatform(), "activeConfig is nil")
 		return
 	}
 
 	// 更新本地配置为当前活跃配置
-	bs.updateLocalConfig(activeConfig, activeGame)
+	bs.updateLocalConfig(activeConfig, bs.config.GameName)
 
 	// 如果当前活跃配置的Buff买入功能被禁用，停止所有任务
 	if activeConfig.BuffBuyStatus == 0 {
-		fmt.Printf("当前活跃配置的Buff买入功能已禁用，停止所有抓取任务 平台：%s 游戏：%s\n", bs.GetPlatform(), activeGame)
+		fmt.Printf("当前活跃配置的Buff买入功能已禁用，停止所有抓取任务 平台：%s 游戏：%s\n", bs.GetPlatform(), bs.config.GameName)
 		bs.stopAllAccountTasks()
 	} else {
-		fmt.Printf("配置已更新，抓取任务将使用新配置 平台：%s 游戏：%s 配置ID：%d\n", bs.GetPlatform(), activeGame, activeConfig.ID)
+		fmt.Printf("配置已更新，抓取任务将使用新配置 平台：%s 游戏：%s 配置ID：%d\n", bs.GetPlatform(), bs.config.GameName, activeConfig.ID)
 	}
 }
 
 // updateLocalConfig 更新本地配置
 func (bs *BuffBuyScraper) updateLocalConfig(config model.Config, game string) {
-	bs.config.Game = game
-	bs.config.MinPrice = config.MinPrice
-	bs.config.MaxPrice = config.MaxPrice
-	bs.config.PageNum = config.BuffPageNum
+	bs.config = &config
 
 	// 根据游戏类型设置AppID
 	if game == "csgo" {
-		bs.config.AppID = 730
+		bs.config.AppId = "730"
 	} else if game == "dota2" {
-		bs.config.AppID = 570
+		bs.config.AppId = "570"
 	}
 
 	fmt.Printf("本地配置已更新 平台：%s 游戏：%s 页面数：%d 价格范围：%.2f-%.2f\n",
-		bs.GetPlatform(), game, bs.config.PageNum, bs.config.MinPrice, bs.config.MaxPrice)
+		bs.GetPlatform(), game, bs.config.BuffPageNum, bs.config.MinPrice, bs.config.MaxPrice)
 }
 
 // Initialize 初始化抓取器
@@ -240,7 +266,7 @@ func (bs *BuffBuyScraper) startMultiAccountScraping() {
 	ticker := time.NewTicker(10 * time.Second) // 检查账号状态的间隔
 	defer ticker.Stop()
 
-	fmt.Println("开始多账号抓取循环 平台：", bs.GetPlatform(), " 游戏：", bs.config.Game, " 最小价格：", bs.config.MinPrice, " 最大价格：", bs.config.MaxPrice, " 页面数量：", bs.config.PageNum)
+	fmt.Println("开始多账号抓取循环 平台：", bs.GetPlatform(), " 游戏：", bs.config.GameName, " 最小价格：", bs.config.MinPrice, " 最大价格：", bs.config.MaxPrice, " 页面数量：", bs.config.BuffPageNum)
 
 	for {
 		select {
@@ -487,18 +513,26 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 
 	fmt.Println("开始账号抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 开始时间：", startTime.Format("2006-01-02 15:04:05.000"))
 
-	// 获取当前活跃的游戏配置
-	config, game, err := service.GetCurrentGameConfig()
-	if err != nil {
-		fmt.Println("获取当前游戏配置失败 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 错误：", err)
-		// 使用默认CSGO配置
-		config = bs.dao.GetOneSystemConfig(1)
-		game = "csgo"
+	// 获取CSGO配置
+	config := bs.dao.GetOneSystemConfig(1)
+	game := "csgo"
+
+	// 验证配置获取是否成功
+	if config.ID == 0 {
+		panic(fmt.Sprintf("致命错误：无法获取CSGO配置 平台：%s 账号ID：%d", bs.GetPlatform(), task.Account.ID))
 	}
 
-	fmt.Println("获取游戏配置 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏类型：", game, " 配置ID：", config.ID)
-	fmt.Println("config", config)
-	fmt.Println("系统配置获取完成 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 游戏：", game, " 页面数：", config.BuffPageNum, " 价格范围：", config.MinPrice, "-", config.MaxPrice, " 抓取状态：", config.BuffBuyStatus)
+	fmt.Printf("配置获取成功 平台：%s 账号ID：%d 配置ID：%d 游戏：%s\n",
+		bs.GetPlatform(), task.Account.ID, config.ID, game)
+
+	// 验证配置完整性
+	if err := bs.validateConfig(config); err != nil {
+		panic(fmt.Sprintf("致命错误：配置验证失败 平台：%s 账号ID：%d 游戏：%s 错误：%v",
+			bs.GetPlatform(), task.Account.ID, game, err))
+	}
+
+	fmt.Printf("系统配置获取完成 平台：%s 账号ID：%d 游戏：%s 页面数：%d 价格范围：%.2f-%.2f 抓取状态：%d\n",
+		bs.GetPlatform(), task.Account.ID, game, config.BuffPageNum, config.MinPrice, config.MaxPrice, config.BuffBuyStatus)
 
 	// 检查抓取功能是否启用
 	if config.BuffBuyStatus == 0 {
@@ -517,9 +551,9 @@ func (bs *BuffBuyScraper) performAccountScraping(task *AccountTask) {
 	// 顺序抓取多个页面，使用配置的延迟时间
 	for i := 1; i <= config.BuffPageNum; i++ {
 		// 检查当前活跃配置是否变更
-		currentConfig, currentGame, err := service.GetCurrentGameConfig()
-		if err == nil && (currentConfig.ID != config.ID || currentGame != game) {
-			fmt.Println("活跃配置已变更，停止当前抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 当前游戏：", currentGame, " 当前配置ID：", currentConfig.ID, " 原配置ID：", config.ID)
+		currentConfig := bs.dao.GetConfigByGameName(bs.config.GameName)
+		if currentConfig.ID != config.ID {
+			fmt.Println("活跃配置已变更，停止当前抓取 平台：", bs.GetPlatform(), " 账号ID：", task.Account.ID, " 账号：", task.Account.Account, " 当前游戏：", bs.config.GameName, " 当前配置ID：", currentConfig.ID, " 原配置ID：", config.ID)
 			break
 		}
 
