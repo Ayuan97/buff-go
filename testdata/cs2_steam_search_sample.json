@@ -1,0 +1,45 @@
+{
+  "success": true,
+  "start": 0,
+  "total_count": 3,
+  "results": [
+    {
+      "name": "AK-47 | Redline (Field-Tested)",
+      "hash_name": "AK-47 | Redline (Field-Tested)",
+      "sell_price": 1850,
+      "sell_price_text": "$18.50",
+      "sell_listings": 120,
+      "appid": 730,
+      "asset_description": {
+        "appid": 730,
+        "icon_url": "icon-ak47-redline",
+        "market_hash_name": "AK-47 | Redline (Field-Tested)"
+      }
+    },
+    {
+      "name": "AWP | Asiimov (Field-Tested)",
+      "hash_name": "AWP | Asiimov (Field-Tested)",
+      "sell_price": 4200,
+      "sell_price_text": "$42.00",
+      "sell_listings": 45,
+      "appid": 730,
+      "asset_description": {
+        "appid": 730,
+        "icon_url": "icon-awp-asiimov",
+        "market_hash_name": "AWP | Asiimov (Field-Tested)"
+      }
+    },
+    {
+      "name": "Glock-18 | Water Elemental (Minimal Wear)",
+      "hash_name": "Glock-18 | Water Elemental (Minimal Wear)",
+      "sell_price": 650,
+      "sell_price_text": "$6.50",
+      "sell_listings": 200,
+      "appid": 730,
+      "asset_description": {
+        "appid": 730,
+        "market_hash_name": "Glock-18 | Water Elemental (Minimal Wear)"
+      }
+    }
+  ]
+}

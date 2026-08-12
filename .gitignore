@@ -1,10 +1,27 @@
-.idea
-.vscode
-!*.example
-config.yaml
+.idea/
+.vscode/
 *.log
-Reptile*
-dist
-/go.mod
-/go.sum
-/tmp/
+dist/
+tmp/
+*.exe
+/buffgo
+.DS_Store
+
+# Local / secret configs
+config.yaml
+configs/config.local.toml
+configs/config.local.yaml
+*.local.toml
+
+# Platform development credentials
+/platforms/private/**
+!/platforms/private/.gitignore
+!/platforms/private/README.md
+
+# Browser automation / MCP scratch
+.playwright-mcp/
+.playwright/
+
+# OS / editor
+*.swp
+*~

@@ -1,0 +1,38 @@
+{
+  "appid": 252490,
+  "items": [
+    {
+      "market_hash_name": "Metal Facemask",
+      "name": "Metal Facemask",
+      "icon_url": "-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot621FAR17PLfYQJD_9W7m5a0mvLwOq7c2G9QtZBw37yTot-hjgOwr0U9Yz-nJIeXelA6ZFrU-gS7kL3vhZG1ot2Xnq-m_4s"
+    },
+    {
+      "market_hash_name": "Road Sign Kilt",
+      "name": "Road Sign Kilt"
+    },
+    {
+      "market_hash_name": "AK47",
+      "name": "AK47"
+    },
+    {
+      "market_hash_name": "Semi-Automatic Rifle",
+      "name": "Semi-Automatic Rifle"
+    },
+    {
+      "market_hash_name": "Hoodie",
+      "name": "Hoodie"
+    },
+    {
+      "market_hash_name": "Tempered AK47",
+      "name": "Tempered AK47"
+    },
+    {
+      "market_hash_name": "Sheet Metal Door",
+      "name": "Sheet Metal Door"
+    },
+    {
+      "market_hash_name": "Garage Door",
+      "name": "Garage Door"
+    }
+  ]
+}

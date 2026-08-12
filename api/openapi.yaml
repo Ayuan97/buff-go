@@ -1,0 +1,218 @@
+openapi: 3.1.0
+info:
+  title: buffgo local control API
+  version: 0.1.0
+servers:
+  - url: /
+paths:
+  /api/security/context:
+    get:
+      operationId: getSecurityContext
+      summary: Create a short-lived browser control session
+      responses:
+        "200":
+          description: Security context created without changing business data
+          headers:
+            Set-Cookie:
+              description: Host-only HttpOnly SameSite=Strict control-session cookie
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityContext"
+        "421":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "405":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+  /api/accounts:
+    get:
+      operationId: listAccounts
+      security: []
+      responses:
+        "200":
+          description: Credential-safe account summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Account"
+    post:
+      operationId: createAccount
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountCreate"
+      responses:
+        "201":
+          description: Account created; session is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AccountID"
+    get:
+      operationId: getAccount
+      security: []
+      responses:
+        "200":
+          description: Credential-safe account summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}/session:
+    parameters:
+      - $ref: "#/components/parameters/AccountID"
+    post:
+      operationId: replaceAccountSession
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountSessionReplace"
+      responses:
+        "200":
+          description: Session replaced; raw session is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}/delete:
+    parameters:
+      - $ref: "#/components/parameters/AccountID"
+    post:
+      operationId: deleteAccount
+      security:
+        - controlSession: []
+          csrfToken: []
+      responses:
+        "200":
+          description: Account deleted
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    AccountID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+  securitySchemes:
+    controlSession:
+      type: apiKey
+      in: cookie
+      name: buffgo_control_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-Buffgo-CSRF
+  schemas:
+    SecurityContext:
+      type: object
+      additionalProperties: false
+      required:
+        - csrf_token
+        - expires_at
+      properties:
+        csrf_token:
+          type: string
+          minLength: 43
+          maxLength: 43
+        expires_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          enum:
+            - invalid_host
+            - method_not_allowed
+            - origin_rejected
+            - origin_required
+            - json_required
+            - csrf_rejected
+            - internal_error
+            - invalid_account_id
+            - account_not_found
+            - account_occupied
+            - account_in_use
+            - account_revision_conflict
+            - session_required
+            - session_too_large
+            - invalid_json
+            - body_not_allowed
+            - credential_store_unavailable
+            - resource_storage_unavailable
+            - resource_integrity
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, platform, alias, session_state, session_revision]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        platform: {type: string}
+        alias: {type: string}
+        session_state: {type: string, enum: [unverified, valid, invalid]}
+        session_revision: {type: integer, format: int64, minimum: 1}
+        last_checked_at: {type: string, format: date-time}
+    AccountCreate:
+      type: object
+      additionalProperties: false
+      required: [platform, alias, session]
+      properties:
+        platform: {type: string}
+        alias: {type: string}
+        session: {type: string, writeOnly: true, minLength: 1, maxLength: 262144}
+    AccountSessionReplace:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, session]
+      properties:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        session: {type: string, writeOnly: true, minLength: 1, maxLength: 262144}
+  responses:
+    Error:
+      description: Request rejected without reflecting request data or credentials
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

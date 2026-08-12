@@ -1,0 +1,49 @@
+{
+  "success": true,
+  "start": 0,
+  "total_count": 3,
+  "results": [
+    {
+      "name": "Metal Facemask",
+      "hash_name": "Metal Facemask",
+      "sell_price": 1250,
+      "sell_price_text": "$12.50",
+      "sell_listings": 40,
+      "appid": 252490,
+      "asset_description": {
+        "appid": 252490,
+        "icon_url": "icon-metal-facemask",
+        "market_hash_name": "Metal Facemask",
+        "classid": "1234567890",
+        "commodity": 1
+      }
+    },
+    {
+      "name": "Road Sign Kilt",
+      "hash_name": "Road Sign Kilt",
+      "sell_price": 800,
+      "sell_price_text": "$8.00",
+      "sell_listings": 22,
+      "appid": 252490,
+      "asset_description": {
+        "appid": 252490,
+        "icon_url": "icon-road-sign-kilt",
+        "market_hash_name": "Road Sign Kilt",
+        "classid": "1234567891",
+        "commodity": 1
+      }
+    },
+    {
+      "name": "AK47",
+      "hash_name": "AK47",
+      "sell_price": 350,
+      "sell_price_text": "$3.50",
+      "sell_listings": 100,
+      "appid": 252490,
+      "asset_description": {
+        "appid": 252490,
+        "market_hash_name": "AK47"
+      }
+    }
+  ]
+}

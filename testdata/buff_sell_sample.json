@@ -1,0 +1,15 @@
+{
+  "code": "OK",
+  "data": {
+    "items": [
+      {
+        "id": 22345,
+        "name": "M4A1-S | Hot Rod (Factory New)",
+        "market_hash_name": "M4A1-S | Hot Rod (Factory New)",
+        "sell_min_price": "45.30",
+        "sell_num": 3,
+        "appid": 730
+      }
+    ]
+  }
+}

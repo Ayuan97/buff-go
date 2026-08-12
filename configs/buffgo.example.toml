@@ -1,0 +1,121 @@
+# buffgo process config (PostgreSQL + Redis)
+# Copy and adjust DSN/addr for your environment.
+
+[database]
+driver = "postgres"
+dsn = "postgres://buffgo:buffgo@127.0.0.1:5432/buffgo?sslmode=disable"
+
+[redis]
+addr = "127.0.0.1:6379"
+password = ""
+db = 0
+
+[games]
+# Default: Rust only (PRODUCT baseline). Multi-game: add appids — model is
+# appid-keyed throughout (config / jobs / quota / catalog / quotes).
+# Second appid (e.g. CS2 730) is for model validation; leave off unless needed.
+# enabled_appids = [252490, 730]
+enabled_appids = [252490]
+
+# Soft concurrent lease caps per game (pool.Manager MaxProxyLeases).
+# Hard IP split uses proxies.only_appids (e.g. 10 IPs only_appids=[252490],
+# 5 IPs only_appids=[730], rest shared empty only_appids).
+[games.quota.252490]
+weight = 70
+max_inflight = 20
+max_proxy_leases = 10
+
+# Uncomment when enabled_appids includes 730 (P5.1 multi-game model).
+# [games.quota.730]
+# weight = 30
+# max_inflight = 8
+# max_proxy_leases = 5
+
+[pool]
+lease_ttl = "30s"
+# Legacy compatibility value only; Goal 0B has not verified Steam cooldowns.
+default_platform_cooldown = "3m"
+
+[pool.platform_lines]
+buff = ["cn", "dual", "hk"]
+steam = ["oversea", "dual", "hk"]
+
+# Legacy compatibility settings. The 2s / 80 / 100 / 5m / 3m values are not
+# verified Steam policy evidence and must not seed the new rate-limit store.
+# 限频键：(proxy_id|direct, platform=steam, class=search)
+# Env 覆盖：BUFFGO_STEAM_SEARCH_MAX_PER_WINDOW / BUFFGO_STEAM_SEARCH_COOLDOWN
+[steam.search]
+min_interval = "2s"
+max_per_window = 80
+hard_max_per_window = 100
+cooldown_on_429 = "3m"
+window = "5m"
+# steam.histogram.min_interval = "300ms"
+#
+# Legacy steam_item_name_id candidate backfill (listing HTML → legacy catalog).
+# Stability, identity role, endpoint necessity, and safe pacing are unverified.
+# Default off so single-process steam.ask stays light. Enable via env (not TOML yet):
+#   BUFFGO_NAMEID_BACKFILL_LIMIT=5          # items per successful sell job
+#   BUFFGO_NAMEID_BACKFILL_DELAY=2s         # legacy pause between HTML resolves
+# Or call nameid.Backfill from code/tests with a steam.Client + catalog.Store.
+
+# Static proxy list for pool.ProxyProvider (StaticProvider). Empty / omitted →
+# direct mode (lease & rate-limit keys use proxy_id=direct; steam.ask uses default
+# http.Client). When set, steam.ask selects candidates per appid and builds HTTP
+# client with Transport.Proxy (endpoint may be full URL or host:port; auth =
+# "user:pass"). 429 / search budgets key by proxy_id. Scale throughput by adding
+# proxies, not processes. No proxy CRUD CLI yet; later: PG proxies or admin UI.
+# Redis (above) is preferred for steam search limiter; memory fallback if redis
+# client is unavailable at wire time.
+# [[proxies]]
+# endpoint = "http://1.2.3.4:8080"
+# auth = "user:pass"
+# line_type = "oversea"
+# enabled = true
+# only_appids = [252490]
+# prefer_appids = []
+# max_concurrent = 1
+#
+# [[proxies]]
+# endpoint = "http://5.6.7.8:8080"
+# line_type = "cn"
+# enabled = true
+
+# --- jobs: each job carries its own appid (never hardcode a single game) ---
+
+[jobs.steam_sell_rust]
+platform = "steam"
+side = "ask"
+appid = 252490
+enabled = true
+interval = "60s"
+needs_account = false
+# Legacy example delay only; it is not a verified safe Steam interval.
+page_delay = "2s"
+# max_pages = 0   # 0 = 按 total_count 抓到末页；正数 = 单轮安全上限
+
+[jobs.buff_sell_rust]
+platform = "buff"
+side = "ask"
+appid = 252490
+enabled = true
+interval = "30s"
+needs_account = true
+
+# Second game (CS2 730) — model validation only; disabled by default.
+# Enable jobs + games.enabled_appids = [252490, 730] for multi-game 联调.
+# [jobs.steam_sell_cs2]
+# platform = "steam"
+# side = "ask"
+# appid = 730
+# enabled = true
+# interval = "60s"
+# needs_account = false
+#
+# [jobs.buff_sell_cs2]
+# platform = "buff"
+# side = "ask"
+# appid = 730
+# enabled = true
+# interval = "30s"
+# needs_account = true
