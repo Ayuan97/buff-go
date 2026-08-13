@@ -37,15 +37,6 @@ func TestAdvisoryLockParts(t *testing.T) {
 }
 
 func TestCollectionStoreValidation(t *testing.T) {
-	if validateStoredPeriod(time.Second) != nil {
-		t.Fatal("whole-microsecond period was rejected")
-	}
-	for _, period := range []time.Duration{0, -time.Second, time.Second + time.Nanosecond} {
-		if validateStoredPeriod(period) == nil {
-			t.Fatalf("invalid period %s was accepted", period)
-		}
-	}
-
 	recheck := collectionStoreTestTime().Add(time.Hour)
 	validTransitions := []TargetTransition{
 		{State: collection.ActualWaiting, Reason: collection.TargetReasonNextCycle, RecheckAt: &recheck},
@@ -107,27 +98,24 @@ func TestCollectionStoreValidation(t *testing.T) {
 
 func TestCollectionStoreDomainShapes(t *testing.T) {
 	now := collectionStoreTestTime()
-	target, err := collection.NewCatalogTarget(collection.CatalogTargetInput{
-		ID: 1, Revision: 1, AppID: 730, Period: time.Minute,
+	target, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
+		ID: 1, Revision: 1, Platform: "steam", AppID: 730, Side: market.SideAsk,
 		Desired: collection.DesiredEnabled, Actual: collection.ActualStarting,
 		SwitchVersion: 1, ChangedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := target.ChangePeriod(2*time.Minute, now.Add(time.Microsecond))
+	waitingRecheck := now.Add(time.Hour)
+	waiting, err := target.MarkWaiting(collection.TargetReasonNextCycle, waitingRecheck, now.Add(time.Microsecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !validTargetSuccessor(target, next) || next.SwitchVersion() != target.SwitchVersion() {
-		t.Fatal("period successor changed identity or switch fence")
+	if !validTargetSuccessor(target, waiting) || waiting.SwitchVersion() != target.SwitchVersion() {
+		t.Fatal("waiting successor changed identity or switch fence")
 	}
 
 	recheck := now.Add(time.Hour)
-	waiting, err := next.MarkWaiting(collection.TargetReasonNextCycle, recheck, now.Add(2*time.Microsecond))
-	if err != nil {
-		t.Fatal(err)
-	}
 	transition := TargetTransition{State: collection.ActualWaiting, Reason: collection.TargetReasonNextCycle, RecheckAt: &recheck}
 	if !targetHasTransition(waiting, transition) {
 		t.Fatal("exact target transition was not recognized")
@@ -137,27 +125,40 @@ func TestCollectionStoreDomainShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := collection.NewCatalogRun(collection.CatalogRunInput{
-		ID: 1, TargetID: target.ID(), AppID: 730, SwitchVersion: target.SwitchVersion(),
-		RunSequence: 1, State: collection.RunPending, CurrentCursor: cursor, CreatedAt: now,
+	run, err := collection.NewSummaryRun(collection.SummaryRunInput{
+		ID: 1, TargetID: target.ID(), Platform: "steam", AppID: 730, Side: market.SideAsk,
+		SwitchVersion: target.SwitchVersion(), RunSequence: 1, State: collection.RunPending,
+		CurrentCursor: cursor, CreatedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !runMatchesTarget(run, target) {
-		t.Fatal("catalog run did not match its target")
+		t.Fatal("summary run did not match its target")
 	}
 
-	summary, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
-		ID: 2, Revision: 1, Platform: "buff", Side: market.SideAsk,
+	other, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
+		ID: 2, Revision: 1, Platform: "buff", AppID: 730, Side: market.SideAsk,
 		Desired: collection.DesiredEnabled, Actual: collection.ActualStarting,
 		SwitchVersion: 1, ChangedAt: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runMatchesTarget(run, summary) {
-		t.Fatal("catalog run matched a summary target")
+	if runMatchesTarget(run, other) {
+		t.Fatal("summary run matched a different target")
+	}
+
+	wrongApp, err := collection.NewSummaryRun(collection.SummaryRunInput{
+		ID: 1, TargetID: target.ID(), Platform: "steam", AppID: 252490, Side: market.SideAsk,
+		SwitchVersion: target.SwitchVersion(), RunSequence: 1, State: collection.RunPending,
+		CurrentCursor: cursor, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runMatchesTarget(wrongApp, target) {
+		t.Fatal("summary run matched a target with a different appid")
 	}
 }
 

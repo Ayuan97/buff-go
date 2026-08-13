@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 
-	"buff-go/internal/credential"
 	"buff-go/internal/ratelimit"
 )
 
@@ -17,19 +16,12 @@ var (
 
 // Store uses a caller-owned database handle. It never opens, pings, or closes it.
 type Store struct {
-	db               *sql.DB
-	credentialCipher *credential.Cipher
-	rateLimitSigner  *ratelimit.Signer
+	db              *sql.DB
+	rateLimitSigner *ratelimit.Signer
 }
 
 // New creates a PostgreSQL store around a caller-owned database handle.
 func New(db *sql.DB) (*Store, error) {
-	return NewWithCredentialCipher(db, nil)
-}
-
-// NewWithCredentialCipher creates a store that can persist and open encrypted
-// account sessions and proxy connection material.
-func NewWithCredentialCipher(db *sql.DB, cipher *credential.Cipher) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("nil postgres db")
 	}
@@ -37,7 +29,7 @@ func NewWithCredentialCipher(db *sql.DB, cipher *credential.Cipher) (*Store, err
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, credentialCipher: cipher, rateLimitSigner: signer}, nil
+	return &Store{db: db, rateLimitSigner: signer}, nil
 }
 
 func (s *Store) validate() error {

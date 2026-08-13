@@ -7,7 +7,7 @@ import (
 	"buff-go/internal/market"
 )
 
-// TargetID identifies one controllable catalog or summary target.
+// TargetID identifies one controllable summary target.
 type TargetID int64
 
 // Validate rejects a missing target identity.
@@ -83,10 +83,10 @@ const (
 	TaskTypeDetail  TaskType = "detail"
 )
 
-// Validate rejects an unknown task type.
+// Validate rejects an unknown task type. Catalog is not a schedulable task.
 func (taskType TaskType) Validate() error {
 	switch taskType {
-	case TaskTypeCatalog, TaskTypeSummary, TaskTypeDetail:
+	case TaskTypeSummary, TaskTypeDetail:
 		return nil
 	default:
 		return fmt.Errorf("invalid task type %q", taskType)

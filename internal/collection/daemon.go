@@ -13,7 +13,7 @@ var ErrInstanceLocked = errors.New("another resident scheduler owns the collecti
 // DaemonStore 是常驻恢复所需的持久化端口：在单周期能力之上增加残留运行读取。
 type DaemonStore interface {
 	ScheduleStore
-	// ActiveRuns 返回调度器拥有的全部非终态运行（目录与摘要），不含详情运行。
+	// ActiveRuns 返回调度器拥有的全部非终态摘要运行，不含详情运行。
 	ActiveRuns(ctx context.Context) ([]Run, error)
 }
 

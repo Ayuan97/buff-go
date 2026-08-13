@@ -9,23 +9,6 @@ import (
 	"buff-go/internal/market"
 )
 
-// CatalogRunInput is the persisted shape of one catalog run.
-type CatalogRunInput struct {
-	ID               RunID
-	TargetID         TargetID
-	AppID            int64
-	SwitchVersion    Revision
-	RunSequence      Sequence
-	State            RunState
-	Completeness     Completeness
-	Reason           RunReason
-	CurrentCursor    Cursor
-	LastPageSequence int64
-	CreatedAt        time.Time
-	StartedAt        *time.Time
-	FinishedAt       *time.Time
-}
-
 // SummaryRunInput is the persisted shape of one summary run.
 type SummaryRunInput struct {
 	ID               RunID
@@ -63,7 +46,7 @@ type DetailRunInput struct {
 	FinishedAt       *time.Time
 }
 
-// Run is an immutable catalog, summary, or detail execution.
+// Run is an immutable summary or detail execution.
 type Run struct {
 	id               RunID
 	taskType         TaskType
@@ -82,28 +65,6 @@ type Run struct {
 	createdAt        time.Time
 	startedAt        time.Time
 	finishedAt       time.Time
-}
-
-// NewCatalogRun validates a catalog run restored from persistence.
-func NewCatalogRun(input CatalogRunInput) (Run, error) {
-	run := Run{
-		id:               input.ID,
-		taskType:         TaskTypeCatalog,
-		targetID:         input.TargetID,
-		platform:         PlatformSteam,
-		appID:            input.AppID,
-		switchVersion:    input.SwitchVersion,
-		runSequence:      input.RunSequence,
-		state:            input.State,
-		completeness:     input.Completeness,
-		reason:           input.Reason,
-		currentCursor:    input.CurrentCursor.clone(),
-		lastPageSequence: input.LastPageSequence,
-		createdAt:        input.CreatedAt,
-		startedAt:        timeValue(input.StartedAt),
-		finishedAt:       timeValue(input.FinishedAt),
-	}
-	return validatedRun(run)
 }
 
 // NewSummaryRun validates a summary run restored from persistence.
@@ -182,19 +143,6 @@ func (run Run) Validate() error {
 		return fmt.Errorf("last_page_sequence cannot be negative")
 	}
 	switch run.taskType {
-	case TaskTypeCatalog:
-		if err := run.targetID.Validate(); err != nil {
-			return err
-		}
-		if run.platform != PlatformSteam {
-			return fmt.Errorf("catalog run platform must be steam")
-		}
-		if run.side != "" || run.productID != 0 {
-			return fmt.Errorf("catalog run must not have a side or product_id")
-		}
-		if err := run.switchVersion.Validate(); err != nil {
-			return fmt.Errorf("switch_version: %w", err)
-		}
 	case TaskTypeSummary:
 		if err := run.targetID.Validate(); err != nil {
 			return err
@@ -462,7 +410,9 @@ func (run Run) Platform() Platform { return run.platform }
 func (run Run) AppID() int64 { return run.appID }
 
 // Side returns the summary or detail side when present.
-func (run Run) Side() (market.Side, bool) { return run.side, run.taskType != TaskTypeCatalog }
+func (run Run) Side() (market.Side, bool) {
+	return run.side, run.taskType == TaskTypeSummary || run.taskType == TaskTypeDetail
+}
 
 // ProductID returns the detail product identity when present.
 func (run Run) ProductID() (catalog.ProductID, bool) {

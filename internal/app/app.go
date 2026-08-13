@@ -1,4 +1,3 @@
-// Package app owns process dependency assembly and the legacy runtime bridge.
 package app
 
 import (
@@ -11,106 +10,133 @@ import (
 	"time"
 
 	"buff-go/internal/api"
-	legacyrun "buff-go/internal/buffgo/run"
+	"buff-go/internal/resource"
+	"buff-go/internal/storage/postgres"
 	"buff-go/internal/telemetry"
+	"buff-go/internal/webui"
 )
 
 // ErrInvalidOptions marks startup arguments that must be corrected by the caller.
 var ErrInvalidOptions = errors.New("invalid app options")
 
-const (
-	legacySteamSell = "steam.ask"
-	legacyBuffSell  = "buff.ask"
-)
-
-// Options contains the temporary legacy runtime startup arguments.
+// Options contains the local API control-plane startup arguments.
 type Options struct {
-	ConfigPath string
-	Sources    string
-	AppID      int64
-	APIListen  string
+	APIListen   string
+	PostgresDSN string
 }
 
-type legacyRunFunc func(context.Context, legacyrun.Options) error
-
-// Run starts the current runtime bridge and waits until it has stopped.
+// Run starts the local API server with PostgreSQL-backed control services.
 func Run(ctx context.Context, opt Options) error {
-	return runWithServer(ctx, opt, legacyrun.Run)
-}
-
-// ErrorRef returns an opaque reference suitable for process error output.
-func ErrorRef(err error) string {
-	return telemetry.SafeErrorRef(err)
-}
-
-func runWith(ctx context.Context, opt Options, run legacyRunFunc) error {
-	if err := validateOptions(ctx, opt, run); err != nil {
-		return err
+	if ctx == nil {
+		return errors.New("app: context is required")
 	}
-	sources, _ := normalizeSources(opt.Sources)
-	err := run(ctx, optToLegacy(opt, sources))
-	if err == nil {
-		return nil
-	}
-	if ctx.Err() == context.Canceled && errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return telemetry.WrapError("legacy runtime", err)
-}
-
-func runWithServer(ctx context.Context, opt Options, run legacyRunFunc) error {
 	if strings.TrimSpace(opt.APIListen) == "" {
-		return runWith(ctx, opt, run)
-	}
-	if err := validateOptions(ctx, opt, run); err != nil {
-		return err
+		return fmt.Errorf("%w: api listen address is required", ErrInvalidOptions)
 	}
 	if err := api.ValidateListenAddress(opt.APIListen); err != nil {
 		return fmt.Errorf("%w: invalid api listen address", ErrInvalidOptions)
 	}
-	sources, _ := normalizeSources(opt.Sources)
+	if strings.TrimSpace(opt.PostgresDSN) == "" {
+		return fmt.Errorf("%w: postgres dsn is required", ErrInvalidOptions)
+	}
+
+	db, err := openPostgres(ctx, opt.PostgresDSN)
+	if err != nil {
+		return telemetry.WrapError("postgres connect", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := postgres.ApplyMigrations(ctx, db); err != nil {
+		return telemetry.WrapError("postgres migrate", err)
+	}
+	store, err := postgres.New(db)
+	if err != nil {
+		return telemetry.WrapError("postgres store", err)
+	}
+	if err := seedSteamRateLimits(ctx, store); err != nil {
+		return telemetry.WrapError("rate-limit seed", err)
+	}
+	coordinator, err := resource.NewCoordinator(store)
+	if err != nil {
+		return telemetry.WrapError("resource coordinator", err)
+	}
+	accounts, nodes, combinations, targets, quotes, err := newControlServices(store, coordinator)
+	if err != nil {
+		return err
+	}
+	daemon, err := newCollectionDaemon(store, coordinator)
+	if err != nil {
+		return telemetry.WrapError("collection daemon", err)
+	}
+
 	listener, err := net.Listen("tcp", opt.APIListen)
 	if err != nil {
 		return telemetry.WrapError("api listen", err)
 	}
-	server := &http.Server{Handler: api.NewHandlerForAuthority(nil, opt.APIListen)}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	handler := api.NewHandlerForAuthority(webui.Handler(), opt.APIListen, api.ControlServices{
+		Accounts:     accounts,
+		Nodes:        nodes,
+		Combinations: combinations,
+		Collection:   targets,
+		Market:       quotes,
+	})
+	server := &http.Server{Handler: handler}
 	serverDone := make(chan error, 1)
 	go func() {
-		err := server.Serve(listener)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+		serveErr := server.Serve(listener)
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		serverDone <- err
+		serverDone <- serveErr
 	}()
-	legacyDone := make(chan error, 1)
-	go func() { legacyDone <- run(runCtx, optToLegacy(opt, sources)) }()
 
-	var legacyErr, serverErr error
-	serverExited := false
+	daemonCtx, daemonCancel := context.WithCancel(context.Background())
+	daemonDone := make(chan error, 1)
+	go func() {
+		runErr := daemon.Run(daemonCtx)
+		if errors.Is(runErr, context.Canceled) {
+			runErr = nil
+		}
+		daemonDone <- runErr
+	}()
+
+	var serverErr error
+	var daemonErr error
+	daemonExited := false
 	select {
-	case legacyErr = <-legacyDone:
-		cancel()
 	case serverErr = <-serverDone:
-		serverExited = true
-		cancel()
-		legacyErr = <-legacyDone
+	case daemonErr = <-daemonDone:
+		daemonExited = true
 	case <-ctx.Done():
-		cancel()
-		legacyErr = <-legacyDone
 	}
+
+	daemonCancel()
+	if !daemonExited {
+		select {
+		case daemonErr = <-daemonDone:
+		case <-time.After(35 * time.Second):
+			daemonErr = errors.New("collection daemon stop timed out")
+		}
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = server.Shutdown(shutdownCtx)
 	shutdownCancel()
-	if !serverExited {
-		serverErr = <-serverDone
+	if serverErr == nil {
+		select {
+		case serverErr = <-serverDone:
+		case <-time.After(5 * time.Second):
+			serverErr = errors.New("api server stop timed out")
+		}
 	}
-	if legacyErr == nil && serverErr == nil {
+	if ctx.Err() != nil {
+		if serverErr != nil {
+			return telemetry.WrapError("api server", serverErr)
+		}
 		return nil
 	}
-	if legacyErr != nil && !(ctx.Err() == context.Canceled && errors.Is(legacyErr, context.Canceled)) {
-		return telemetry.WrapError("legacy runtime", legacyErr)
+	if daemonErr != nil {
+		return telemetry.WrapError("collection daemon", daemonErr)
 	}
 	if serverErr != nil {
 		return telemetry.WrapError("api server", serverErr)
@@ -118,54 +144,7 @@ func runWithServer(ctx context.Context, opt Options, run legacyRunFunc) error {
 	return nil
 }
 
-func validateOptions(ctx context.Context, opt Options, run legacyRunFunc) error {
-	if ctx == nil {
-		return errors.New("app: context is required")
-	}
-	if run == nil {
-		return errors.New("app: runtime is required")
-	}
-	if strings.TrimSpace(opt.ConfigPath) == "" {
-		return fmt.Errorf("%w: config path is required", ErrInvalidOptions)
-	}
-	if opt.AppID < 0 {
-		return fmt.Errorf("%w: appid cannot be negative", ErrInvalidOptions)
-	}
-	if _, err := normalizeSources(opt.Sources); err != nil {
-		return err
-	}
-	return nil
-}
-
-func optToLegacy(opt Options, sources string) legacyrun.Options {
-	return legacyrun.Options{
-		ConfigPath: opt.ConfigPath,
-		Sources:    sources,
-		AppID:      opt.AppID,
-	}
-}
-
-func normalizeSources(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", nil
-	}
-	allowed := map[string]struct{}{
-		legacySteamSell: {},
-		legacyBuffSell:  {},
-	}
-	seen := make(map[string]struct{}, len(allowed))
-	parts := make([]string, 0, len(allowed))
-	for _, raw := range strings.Split(value, ",") {
-		token := strings.ToLower(strings.TrimSpace(raw))
-		if _, ok := allowed[token]; !ok {
-			return "", fmt.Errorf("%w: sources contains an unsupported value", ErrInvalidOptions)
-		}
-		if _, ok := seen[token]; ok {
-			continue
-		}
-		seen[token] = struct{}{}
-		parts = append(parts, token)
-	}
-	return strings.Join(parts, ","), nil
+// ErrorRef returns an opaque reference suitable for process error output.
+func ErrorRef(err error) string {
+	return telemetry.SafeErrorRef(err)
 }

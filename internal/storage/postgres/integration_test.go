@@ -38,7 +38,6 @@ func TestPostgresIntegration(t *testing.T) {
 	t.Run("rate-limit behavior", func(t *testing.T) { testRateLimitStorage(t, dsn) })
 	t.Run("collection DDL", func(t *testing.T) { testCollectionDDLConstraints(t, dsn) })
 	t.Run("collection summary pages", func(t *testing.T) { testCollectionSummaryPages(t, dsn) })
-	t.Run("collection catalog pages", func(t *testing.T) { testCollectionCatalogPages(t, dsn) })
 }
 
 func testMigrations(t *testing.T, dsn string) {
@@ -208,31 +207,24 @@ func testCollectionDDLConstraints(t *testing.T, dsn string) {
 		}
 		return targetID
 	}
-	catalogTarget := insertTarget(`
-INSERT INTO collection_targets (
-    kind, platform, appid, desired_state, actual_state, reason_code,
-    recovery_mode, next_check_at, period_microseconds, changed_at
-) VALUES ('catalog', 'steam', 730, 'enabled', 'waiting', 'next_cycle',
-          'automatic', $1, 3600000000, $2)
-RETURNING target_id`, nextCheck, createdAt)
-	catalogProbe := insertTarget(`
-INSERT INTO collection_targets (
-    kind, platform, appid, desired_state, actual_state, period_microseconds, changed_at
-) VALUES ('catalog', 'steam', 252490, 'enabled', 'starting', 3600000000, $1)
-RETURNING target_id`, createdAt)
 	summaryTarget := insertTarget(`
 INSERT INTO collection_targets (
-    kind, platform, side, desired_state, actual_state, reason_code,
+    kind, platform, appid, side, desired_state, actual_state, reason_code,
     recovery_mode, next_check_at, changed_at
-) VALUES ('summary', 'steam', 'ask', 'enabled', 'waiting', 'scheduler_opportunity',
+) VALUES ('summary', 'steam', 730, 'ask', 'enabled', 'waiting', 'scheduler_opportunity',
           'automatic', $1, $2)
 RETURNING target_id`, nextCheck, createdAt)
 	summaryProbe := insertTarget(`
 INSERT INTO collection_targets (
-    kind, platform, side, desired_state, actual_state, reason_code,
+    kind, platform, appid, side, desired_state, actual_state, reason_code,
     recovery_mode, changed_at
-) VALUES ('summary', 'steam', 'bid', 'enabled', 'blocked', 'session_invalid',
+) VALUES ('summary', 'steam', 730, 'bid', 'enabled', 'blocked', 'session_invalid',
           'manual', $1)
+RETURNING target_id`, createdAt)
+	summaryOther := insertTarget(`
+INSERT INTO collection_targets (
+    kind, platform, appid, side, desired_state, actual_state, period_microseconds, changed_at
+) VALUES ('summary', 'steam', 252490, 'ask', 'enabled', 'starting', NULL, $1)
 RETURNING target_id`, createdAt)
 
 	reject := func(name, query string, args ...any) {
@@ -246,24 +238,14 @@ RETURNING target_id`, createdAt)
 		query string
 	}{
 		{
-			name: "catalog platform",
-			query: `INSERT INTO collection_targets(kind,platform,appid,desired_state,actual_state,period_microseconds,changed_at)
-                    VALUES ('catalog','buff',1,'enabled','starting',1,NOW())`,
+			name: "catalog kind",
+			query: `INSERT INTO collection_targets(kind,platform,appid,side,desired_state,actual_state,changed_at)
+                    VALUES ('catalog','steam',730,'ask','enabled','starting',NOW())`,
 		},
 		{
-			name: "catalog null appid",
-			query: `INSERT INTO collection_targets(kind,platform,desired_state,actual_state,period_microseconds,changed_at)
-                    VALUES ('catalog','steam','enabled','starting',1,NOW())`,
-		},
-		{
-			name: "catalog null period",
-			query: `INSERT INTO collection_targets(kind,platform,appid,desired_state,actual_state,changed_at)
-                    VALUES ('catalog','steam',440,'enabled','starting',NOW())`,
-		},
-		{
-			name: "catalog period outside Go duration",
-			query: `INSERT INTO collection_targets(kind,platform,appid,desired_state,actual_state,period_microseconds,changed_at)
-                    VALUES ('catalog','steam',10,'enabled','starting',9223372036854776,NOW())`,
+			name: "summary without appid",
+			query: `INSERT INTO collection_targets(kind,platform,side,desired_state,actual_state,changed_at)
+                    VALUES ('summary','steam','ask','enabled','starting',NOW())`,
 		},
 		{
 			name: "summary period",
@@ -312,8 +294,8 @@ RETURNING target_id`, createdAt)
 		},
 		{
 			name: "target identity duplicate",
-			query: `INSERT INTO collection_targets(kind,platform,appid,desired_state,actual_state,period_microseconds,changed_at)
-                    VALUES ('catalog','steam',730,'enabled','starting',1,NOW())`,
+			query: `INSERT INTO collection_targets(kind,platform,appid,side,desired_state,actual_state,changed_at)
+                    VALUES ('summary','steam',730,'ask','enabled','starting',NOW())`,
 		},
 		{
 			name: "infinite target time",
@@ -331,21 +313,13 @@ RETURNING product_id`).Scan(&productID); err != nil {
 		t.Fatal(err)
 	}
 
-	var catalogRun, summaryRun, detailRun int64
-	if err := db.QueryRowContext(ctx, `
-INSERT INTO collection_runs (
-    target_id, kind, platform, appid, switch_version, run_sequence,
-    status, current_cursor, last_page_sequence, created_at, started_at
-) VALUES ($1, 'catalog', 'steam', 730, 1, 1, 'running', $2, 1, $3, $3)
-RETURNING run_id`, catalogTarget, []byte("next"), createdAt).Scan(&catalogRun); err != nil {
-		t.Fatal(err)
-	}
+	var summaryRun, detailRun int64
 	if err := db.QueryRowContext(ctx, `
 INSERT INTO collection_runs (
     target_id, kind, platform, appid, side, switch_version, run_sequence,
-    status, current_cursor, created_at
-) VALUES ($1, 'summary', 'steam', 730, 'ask', 1, 1, 'pending', $2, $3)
-RETURNING run_id`, summaryTarget, emptyCursor, createdAt).Scan(&summaryRun); err != nil {
+    status, current_cursor, last_page_sequence, created_at, started_at
+) VALUES ($1, 'summary', 'steam', 730, 'ask', 1, 1, 'running', $2, 1, $3, $3)
+RETURNING run_id`, summaryTarget, []byte("next"), createdAt).Scan(&summaryRun); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRowContext(ctx, `
@@ -356,20 +330,18 @@ INSERT INTO collection_runs (
 RETURNING run_id`, productID, emptyCursor, createdAt).Scan(&detailRun); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `
+	reject("parallel summary appid", `
 INSERT INTO collection_runs (
     target_id, kind, platform, appid, side, switch_version, run_sequence,
     status, current_cursor, created_at
 ) VALUES ($1, 'summary', 'steam', 252490, 'ask', 1, 2, 'pending', $2, $3)`,
-		summaryTarget, emptyCursor, createdAt); err != nil {
-		t.Fatalf("parallel summary appid: %v", err)
-	}
+		summaryTarget, emptyCursor, createdAt)
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO collection_runs (
-    target_id, kind, platform, appid, switch_version, run_sequence,
+    target_id, kind, platform, appid, side, switch_version, run_sequence,
     status, completeness, current_cursor, last_page_sequence, created_at, started_at, finished_at
-) VALUES ($1, 'catalog', 'steam', 252490, 1, 1,
-		  'succeeded', 'partial', $2, 1, $3, $3, $3)`, catalogProbe, emptyCursor, createdAt); err != nil {
+) VALUES ($1, 'summary', 'steam', 252490, 'ask', 1, 1,
+		  'succeeded', 'partial', $2, 1, $3, $3, $3)`, summaryOther, emptyCursor, createdAt); err != nil {
 		t.Fatalf("succeeded partial run: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -389,24 +361,24 @@ INSERT INTO collection_runs (
 		t.Fatalf("pending-to-stopped shape: %v", err)
 	}
 
-	reject("second active catalog run", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',730,1,2,'pending',$2,$3)`, catalogTarget, emptyCursor, createdAt)
-	reject("second active summary appid run", `
+	reject("catalog run kind", `
 INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'summary','steam',730,'ask',1,3,'running',$2,$3,$3)`, summaryTarget, emptyCursor, createdAt)
+VALUES ($1,'catalog','steam',730,'ask',1,2,'pending',$2,$3)`, summaryTarget, emptyCursor, createdAt)
+	reject("second active summary run", `
+INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
+VALUES ($1,'summary','steam',730,'ask',1,3,'pending',$2,$3)`, summaryTarget, emptyCursor, createdAt)
 	reject("second active detail scope run", `
 INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
 VALUES ('detail','steam',730,'ask',$1,2,'pending',$2,$3)`, productID, emptyCursor, createdAt)
 	reject("catalog direction", `
 INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',252490,'ask',1,2,'pending',$2,$3)`, catalogProbe, emptyCursor, createdAt)
+VALUES ($1,'catalog','steam',252490,'ask',1,2,'pending',$2,$3)`, summaryOther, emptyCursor, createdAt)
 	reject("orphan control target", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES (9223372036854775807,'catalog','steam',440,1,23,'pending',$1,$2)`, emptyCursor, createdAt)
+INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
+VALUES (9223372036854775807,'summary','steam',440,'ask',1,23,'pending',$1,$2)`, emptyCursor, createdAt)
 	reject("catalog null switch version", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',252490,12,'pending',$2,$3)`, catalogProbe, emptyCursor, createdAt)
+INSERT INTO collection_runs(target_id,kind,platform,appid,side,run_sequence,status,current_cursor,created_at)
+VALUES ($1,'catalog','steam',252490,'ask',12,'pending',$2,$3)`, summaryOther, emptyCursor, createdAt)
 	reject("summary without switch version", `
 INSERT INTO collection_runs(target_id,kind,platform,appid,side,run_sequence,status,current_cursor,created_at)
 VALUES ($1,'summary','steam',730,'bid',2,'pending',$2,$3)`, summaryProbe, emptyCursor, createdAt)
@@ -483,12 +455,12 @@ INSERT INTO collection_pages (
     run_id, page_sequence, cursor_before, cursor_after, payload_digest,
     collected_at, committed_at
 ) VALUES ($1, 1, $2, $3, $4, $5, $5)`,
-		catalogRun, emptyCursor, []byte("next"), digest, createdAt); err != nil {
+		summaryRun, emptyCursor, []byte("next"), digest, createdAt); err != nil {
 		t.Fatal(err)
 	}
 	reject("duplicate page sequence", `
 INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$3,$4,$5,$5)`, catalogRun, emptyCursor, []byte("next"), digest, createdAt)
+VALUES ($1,1,$2,$3,$4,$5,$5)`, summaryRun, emptyCursor, []byte("next"), digest, createdAt)
 	reject("orphan page run", `
 INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
 VALUES (9223372036854775807,1,$1,$1,$2,$3,$3)`, emptyCursor, digest, createdAt)
@@ -519,16 +491,26 @@ func testCatalogStorage(t *testing.T, dsn string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.CreateSteamProduct(ctx, 730, "AK-47 | Redline")
+	second, err := store.CreateSteamProduct(ctx, 730, "AK-47 | Redline (Field-Tested)")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if first.ProductID == second.ProductID {
+		t.Fatal("different names must be different products")
+	}
+	same, err := store.CreateSteamProduct(ctx, 730, "AK-47 | Redline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.ProductID != first.ProductID {
+		t.Fatal("same (appid, name) must upsert to one product")
 	}
 	otherApp, err := store.CreateSteamProduct(ctx, 252490, "AK-47 | Redline")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ProductID == second.ProductID {
-		t.Fatal("duplicate names collapsed into one product")
+	if otherApp.ProductID == first.ProductID {
+		t.Fatal("same name on another appid must be a different product")
 	}
 	products, err := store.ListSteamProductsByAppID(ctx, 730)
 	if err != nil || len(products) != 2 {

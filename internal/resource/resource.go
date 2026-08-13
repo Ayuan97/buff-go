@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"buff-go/internal/market"
 )
 
 // AccountID is the stable identity of one platform account.
@@ -264,8 +266,28 @@ func isReservedIPv4(address netip.Addr) bool {
 		octets[0] >= 240
 }
 
+// NodeSideAssignment binds one node to one platform direction inside its game.
+type NodeSideAssignment struct {
+	Platform Platform
+	Side     market.Side
+}
+
+// Validate checks one direction assignment.
+func (assignment NodeSideAssignment) Validate() error {
+	if err := assignment.Platform.Validate(); err != nil {
+		return fmt.Errorf("assignment platform: %w", err)
+	}
+	switch assignment.Side {
+	case market.SideBid, market.SideAsk:
+		return nil
+	default:
+		return fmt.Errorf("invalid assignment side %q", assignment.Side)
+	}
+}
+
 // AccessNode is the credential-safe read model of one network exit.
-// An empty AssignedPlatform means the node is currently unassigned.
+// AppID zero means the node is not yet given to a game. Sides is the
+// per-platform bid/ask assignment inside that game.
 type AccessNode struct {
 	ID                      NodeID
 	Name                    string
@@ -275,7 +297,8 @@ type AccessNode struct {
 	State                   NodeState
 	EgressRevision          int64
 	AssignmentRevision      int64
-	AssignedPlatform        Platform
+	AppID                   int64
+	Sides                   []NodeSideAssignment
 	HasProxyCredential      bool
 	StickySessionValidUntil *time.Time
 	ExitVerification        *ExitVerification
@@ -318,10 +341,21 @@ func (node AccessNode) Validate() error {
 	if node.AssignmentRevision < 1 {
 		return fmt.Errorf("assignment_revision must be at least 1")
 	}
-	if node.AssignedPlatform != "" {
-		if err := node.AssignedPlatform.Validate(); err != nil {
-			return fmt.Errorf("assigned platform: %w", err)
+	if node.AppID < 0 {
+		return fmt.Errorf("appid must be non-negative")
+	}
+	if node.AppID == 0 && len(node.Sides) > 0 {
+		return fmt.Errorf("unassigned node must not have direction assignments")
+	}
+	seenPlatform := make(map[Platform]struct{}, len(node.Sides))
+	for _, assignment := range node.Sides {
+		if err := assignment.Validate(); err != nil {
+			return err
 		}
+		if _, exists := seenPlatform[assignment.Platform]; exists {
+			return fmt.Errorf("duplicate direction assignment for platform %q", assignment.Platform)
+		}
+		seenPlatform[assignment.Platform] = struct{}{}
 	}
 
 	switch node.Kind {
@@ -401,4 +435,23 @@ func (node AccessNode) UsableAt(now time.Time) bool {
 		return false
 	}
 	return node.StickySessionValidUntil == nil || now.Before(*node.StickySessionValidUntil)
+}
+
+// SideFor returns the bid/ask assignment of one platform on this node.
+func (node AccessNode) SideFor(platform Platform) (market.Side, bool) {
+	for _, assignment := range node.Sides {
+		if assignment.Platform == platform {
+			return assignment.Side, true
+		}
+	}
+	return "", false
+}
+
+// AssignedTo reports whether the node is given to this game, platform, and side.
+func (node AccessNode) AssignedTo(appID int64, platform Platform, side market.Side) bool {
+	if appID < 1 || node.AppID != appID {
+		return false
+	}
+	assigned, ok := node.SideFor(platform)
+	return ok && assigned == side
 }

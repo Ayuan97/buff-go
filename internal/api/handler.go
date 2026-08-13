@@ -51,6 +51,10 @@ type AccountService interface {
 type Handler struct {
 	next             http.Handler
 	accounts         AccountService
+	nodes            NodeService
+	combinations     CombinationService
+	collection       CollectionService
+	market           MarketService
 	allowedAuthority string
 	now              func() time.Time
 	random           io.Reader
@@ -96,11 +100,16 @@ func NewHandlerWithAccounts(accounts AccountService) *Handler {
 
 // NewHandlerForAuthority binds requests to the exact authority used by the
 // explicitly configured loopback listener.
-func NewHandlerForAuthority(next http.Handler, authority string) *Handler {
+func NewHandlerForAuthority(next http.Handler, authority string, services ControlServices) *Handler {
 	h := NewHandler(next)
 	if host, port, ok := splitAuthority(authority); ok && port != "" {
 		h.allowedAuthority = net.JoinHostPort(host, port)
 	}
+	h.accounts = services.Accounts
+	h.nodes = services.Nodes
+	h.combinations = services.Combinations
+	h.collection = services.Collection
+	h.market = services.Market
 	return h
 }
 
@@ -133,8 +142,35 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.URL.Path == "/api/capabilities" {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		// 无详情适配器时只声明不可用，不创建永远跑不了的详情任务。
+		writeAccountJSON(w, http.StatusOK, struct {
+			Detail string `json:"detail"`
+		}{Detail: "detail_unavailable"})
+		return
+	}
 	if h.accounts != nil && (r.URL.Path == "/api/accounts" || strings.HasPrefix(r.URL.Path, "/api/accounts/")) {
 		h.serveAccounts(w, r)
+		return
+	}
+	if h.nodes != nil && (r.URL.Path == "/api/nodes" || strings.HasPrefix(r.URL.Path, "/api/nodes/")) {
+		h.serveNodes(w, r)
+		return
+	}
+	if h.combinations != nil && (r.URL.Path == "/api/combinations" || strings.HasPrefix(r.URL.Path, "/api/combinations/")) {
+		h.serveCombinations(w, r)
+		return
+	}
+	if h.collection != nil && (r.URL.Path == "/api/targets" || strings.HasPrefix(r.URL.Path, "/api/targets/") || r.URL.Path == "/api/runs") {
+		h.serveCollection(w, r)
+		return
+	}
+	if h.market != nil && r.URL.Path == "/api/quotes" {
+		h.serveQuotes(w, r)
 		return
 	}
 	h.next.ServeHTTP(w, r)
@@ -298,8 +334,10 @@ func writeAccountError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "account_not_found")
 	case errors.Is(err, postgres.ErrResourceRevisionConflict):
 		writeError(w, http.StatusConflict, "account_revision_conflict")
-	case errors.Is(err, postgres.ErrCredentialCipherUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "credential_store_unavailable")
+	case errors.Is(err, postgres.ErrAccountConflict):
+		writeError(w, http.StatusConflict, "account_conflict")
+	case errors.Is(err, postgres.ErrInvalidResource):
+		writeError(w, http.StatusBadRequest, "invalid_account")
 	case errors.Is(err, postgres.ErrResourceStorage):
 		writeError(w, http.StatusServiceUnavailable, "resource_storage_unavailable")
 	case errors.Is(err, postgres.ErrResourceIntegrity):

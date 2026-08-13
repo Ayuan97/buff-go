@@ -8,18 +8,20 @@ import (
 	"net/netip"
 	"time"
 
-	"buff-go/internal/credential"
+	"buff-go/internal/market"
 	"buff-go/internal/resource"
 )
 
 var (
-	ErrCredentialCipherUnavailable = errors.New("credential cipher is unavailable")
-	ErrResourceNotFound            = errors.New("resource not found")
-	ErrResourceRevisionConflict    = errors.New("resource revision conflict")
-	ErrNodeAssignmentConflict      = errors.New("access node is assigned to another platform")
-	ErrProxyCredentialUnavailable  = errors.New("proxy credential is unavailable")
-	ErrResourceIntegrity           = errors.New("stored resource is inconsistent")
-	ErrResourceStorage             = errors.New("resource storage operation failed")
+	ErrResourceNotFound           = errors.New("resource not found")
+	ErrResourceRevisionConflict   = errors.New("resource revision conflict")
+	ErrNodeAssignmentConflict     = errors.New("node direction assignment conflicts")
+	ErrNodeNameConflict           = errors.New("access node name already exists")
+	ErrAccountConflict            = errors.New("account alias already exists")
+	ErrInvalidResource            = errors.New("invalid resource input")
+	ErrProxyCredentialUnavailable = errors.New("proxy credential is unavailable")
+	ErrResourceIntegrity          = errors.New("stored resource is inconsistent")
+	ErrResourceStorage            = errors.New("resource storage operation failed")
 )
 
 const accountReadColumns = `
@@ -27,41 +29,37 @@ account_id, platform, alias, session_state, session_revision, last_checked_at`
 
 const nodeReadColumns = `
 node_id, name, kind, region, egress_mode, state, egress_revision,
-assignment_revision, assigned_platform, (proxy_ciphertext IS NOT NULL), sticky_session_valid_until,
+assignment_revision, appid, (proxy_plaintext IS NOT NULL), sticky_session_valid_until,
 exit_verified_revision, host(exit_address), exit_verified_at, exit_valid_until`
 
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// CreateAccount stores a write-only encrypted session at revision one.
+// CreateAccount stores a plaintext session at revision one.
 func (s *Store) CreateAccount(ctx context.Context, platform resource.Platform, alias string, session []byte) (resource.PlatformAccount, error) {
 	if err := s.validate(); err != nil {
 		return resource.PlatformAccount{}, err
 	}
 	if err := validateNewAccount(platform, alias); err != nil {
-		return resource.PlatformAccount{}, err
+		return resource.PlatformAccount{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
 	}
-	if err := s.requireCredentialCipher(); err != nil {
-		return resource.PlatformAccount{}, err
+	if err := validateSessionPlaintext(session); err != nil {
+		return resource.PlatformAccount{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
 	}
 	accountID, err := s.nextIdentity(ctx, "platform_accounts", "account_id")
 	if err != nil {
 		return resource.PlatformAccount{}, err
 	}
-	envelope, err := s.sealCredential(session, accountSessionAAD(resource.AccountID(accountID), platform, 1))
-	if err != nil {
-		return resource.PlatformAccount{}, err
-	}
 	account, err := scanAccount(s.db.QueryRowContext(ctx, `
 INSERT INTO platform_accounts (
-    account_id, platform, alias, session_envelope_version, session_key_id, session_nonce, session_ciphertext
-) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7)
+    account_id, platform, alias, session_plaintext
+) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4)
 RETURNING `+accountReadColumns,
-		accountID, string(platform), alias, int64(envelope.Version), envelope.KeyID, envelope.Nonce, envelope.Ciphertext,
+		accountID, string(platform), alias, session,
 	))
 	if err != nil {
-		return resource.PlatformAccount{}, fmt.Errorf("create platform account: %w", ErrResourceStorage)
+		return resource.PlatformAccount{}, mapAccountWriteError(err)
 	}
 	return account, nil
 }
@@ -118,31 +116,22 @@ func (s *Store) ReplaceAccountSession(ctx context.Context, id resource.AccountID
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.PlatformAccount{}, err
 	}
-	if err := s.requireCredentialCipher(); err != nil {
+	if err := validateSessionPlaintext(session); err != nil {
 		return resource.PlatformAccount{}, err
 	}
-	var platform resource.Platform
-	if err := s.db.QueryRowContext(ctx, `SELECT platform FROM platform_accounts WHERE account_id = $1`, int64(id)).Scan(&platform); errors.Is(err, sql.ErrNoRows) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT TRUE FROM platform_accounts WHERE account_id = $1`, int64(id)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return resource.PlatformAccount{}, ErrResourceNotFound
 	} else if err != nil {
 		return resource.PlatformAccount{}, ErrResourceStorage
 	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.PlatformAccount{}, err
-	}
-	envelope, err := s.sealCredential(session, accountSessionAAD(id, platform, nextRevision))
-	if err != nil {
-		return resource.PlatformAccount{}, err
-	}
 	account, err := scanAccount(s.db.QueryRowContext(ctx, `
 UPDATE platform_accounts
 SET session_state = 'unverified', session_revision = session_revision + 1,
-    last_checked_at = NULL, session_envelope_version = $3, session_key_id = $4,
-    session_nonce = $5, session_ciphertext = $6
+    last_checked_at = NULL, session_plaintext = $3
 WHERE account_id = $1 AND session_revision = $2
 RETURNING `+accountReadColumns,
-		int64(id), expectedRevision, int64(envelope.Version), envelope.KeyID, envelope.Nonce, envelope.Ciphertext,
+		int64(id), expectedRevision, session,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.PlatformAccount{}, ErrResourceRevisionConflict
@@ -186,30 +175,24 @@ RETURNING `+accountReadColumns, int64(id), expectedRevision, string(state), chec
 	return account, nil
 }
 
-// OpenAccountSessionAt decrypts only the account session revision the caller
-// observed when it acquired the resource.
+// OpenAccountSessionAt returns the plaintext session for the observed revision.
 func (s *Store) OpenAccountSessionAt(ctx context.Context, id resource.AccountID, expectedRevision int64) ([]byte, error) {
-	if err := s.requireCredentialCipher(); err != nil {
+	if err := s.validate(); err != nil {
 		return nil, err
 	}
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return nil, err
 	}
-	var version int64
-	var envelope credential.Envelope
+	var plaintext []byte
 	var scanned accountScanData
-	destinations := append(scanned.destinations(), &version, &envelope.KeyID, &envelope.Nonce, &envelope.Ciphertext)
-	err := s.db.QueryRowContext(ctx, `SELECT `+accountReadColumns+`,
-session_envelope_version, session_key_id, session_nonce, session_ciphertext
+	destinations := append(scanned.destinations(), &plaintext)
+	err := s.db.QueryRowContext(ctx, `SELECT `+accountReadColumns+`, session_plaintext
 FROM platform_accounts WHERE account_id = $1`, int64(id)).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrResourceNotFound
 	}
 	if err != nil {
 		return nil, ErrResourceStorage
-	}
-	if version != int64(credential.EnvelopeVersion) {
-		return nil, ErrResourceIntegrity
 	}
 	account, err := scanned.result()
 	if err != nil || account.ID != id {
@@ -218,15 +201,13 @@ FROM platform_accounts WHERE account_id = $1`, int64(id)).Scan(destinations...)
 	if account.SessionRevision != expectedRevision {
 		return nil, ErrResourceRevisionConflict
 	}
-	envelope.Version = uint8(version)
-	plaintext, err := s.credentialCipher.Open(envelope, accountSessionAAD(account.ID, account.Platform, account.SessionRevision))
-	if err != nil {
-		return nil, fmt.Errorf("open account session: %w", err)
+	if len(plaintext) == 0 {
+		return nil, ErrResourceIntegrity
 	}
-	return plaintext, nil
+	return append([]byte(nil), plaintext...), nil
 }
 
-// CreateNode stores a direct or encrypted-proxy node at revision one.
+// CreateNode stores a direct or proxy node at revision one.
 func (s *Store) CreateNode(ctx context.Context, name string, input resource.NodeConnectionInput) (resource.AccessNode, error) {
 	if err := s.validate(); err != nil {
 		return resource.AccessNode{}, err
@@ -235,31 +216,21 @@ func (s *Store) CreateNode(ctx context.Context, name string, input resource.Node
 	if err != nil {
 		return resource.AccessNode{}, err
 	}
-	if prepared.Kind == resource.NodeKindProxy {
-		if err := s.requireCredentialCipher(); err != nil {
-			return resource.AccessNode{}, err
-		}
-	}
 	nodeID, err := s.nextIdentity(ctx, "access_nodes", "node_id")
 	if err != nil {
 		return resource.AccessNode{}, err
 	}
-	envelope, hasEnvelope, err := s.sealNodeCredential(resource.NodeID(nodeID), 1, prepared)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	version, keyID, nonce, ciphertext := envelopeDatabaseValues(envelope, hasEnvelope)
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
+	proxyPlaintext := nodeProxyPlaintext(prepared)
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
 INSERT INTO access_nodes (
-    node_id, name, kind, region, egress_mode, proxy_envelope_version, proxy_key_id,
-    proxy_nonce, proxy_ciphertext, sticky_session_valid_until
-) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    node_id, name, kind, region, egress_mode, proxy_plaintext, sticky_session_valid_until
+) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING `+nodeReadColumns,
 		nodeID, name, string(prepared.Kind), string(prepared.Region), string(prepared.EgressMode),
-		version, keyID, nonce, ciphertext, nullableTime(prepared.StickySessionValidUntil),
+		proxyPlaintext, nullableTime(prepared.StickySessionValidUntil),
 	))
 	if err != nil {
-		return resource.AccessNode{}, fmt.Errorf("create access node: %w", ErrResourceStorage)
+		return resource.AccessNode{}, mapNodeWriteError(err)
 	}
 	return node, nil
 }
@@ -272,7 +243,7 @@ func (s *Store) Node(ctx context.Context, id resource.NodeID) (resource.AccessNo
 	if err := id.Validate(); err != nil {
 		return resource.AccessNode{}, false, err
 	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
 FROM access_nodes WHERE node_id = $1`, int64(id)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, false, nil
@@ -305,6 +276,9 @@ FROM access_nodes ORDER BY node_id`)
 	if err := rows.Err(); err != nil {
 		return nil, ErrResourceStorage
 	}
+	if err := attachAllNodeSides(ctx, s.db, nodes); err != nil {
+		return nil, err
+	}
 	return nodes, nil
 }
 
@@ -316,11 +290,6 @@ func (s *Store) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, e
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
-	if input.Kind == resource.NodeKindProxy {
-		if err := s.requireCredentialCipher(); err != nil {
-			return resource.AccessNode{}, err
-		}
-	}
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT name FROM access_nodes WHERE node_id = $1`, int64(id)).Scan(&name); errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceNotFound
@@ -331,26 +300,17 @@ func (s *Store) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, e
 	if err != nil {
 		return resource.AccessNode{}, err
 	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	envelope, hasEnvelope, err := s.sealNodeCredential(id, nextRevision, prepared)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	version, keyID, nonce, ciphertext := envelopeDatabaseValues(envelope, hasEnvelope)
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
+	proxyPlaintext := nodeProxyPlaintext(prepared)
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
-SET kind = $3, region = $4, egress_mode = $5,
-    proxy_envelope_version = $6, proxy_key_id = $7, proxy_nonce = $8, proxy_ciphertext = $9,
-    sticky_session_valid_until = $10, state = 'validating',
+SET kind = $3, region = $4, egress_mode = $5, proxy_plaintext = $6,
+    sticky_session_valid_until = $7, state = 'validating',
     egress_revision = egress_revision + 1,
     exit_address = NULL, exit_verified_revision = NULL, exit_verified_at = NULL, exit_valid_until = NULL
 WHERE node_id = $1 AND egress_revision = $2
 RETURNING `+nodeReadColumns,
 		int64(id), expectedRevision, string(prepared.Kind), string(prepared.Region), string(prepared.EgressMode),
-		version, keyID, nonce, ciphertext, nullableTime(prepared.StickySessionValidUntil),
+		proxyPlaintext, nullableTime(prepared.StickySessionValidUntil),
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceRevisionConflict
@@ -369,87 +329,26 @@ func (s *Store) BeginNodeRevalidation(ctx context.Context, id resource.NodeID, e
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var kind resource.NodeKind
-	var storedRevision int64
-	var version sql.NullInt64
-	var keyID sql.NullString
-	var nonce, ciphertext []byte
-	err = tx.QueryRowContext(ctx, `
-SELECT kind, egress_revision, proxy_envelope_version, proxy_key_id, proxy_nonce, proxy_ciphertext
-FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)).Scan(
-		&kind, &storedRevision, &version, &keyID, &nonce, &ciphertext,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceNotFound
-	}
-	if err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	if storedRevision != expectedRevision {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-
-	var newEnvelope credential.Envelope
-	hasEnvelope := false
-	if kind == resource.NodeKindProxy {
-		if err := s.requireCredentialCipher(); err != nil {
-			return resource.AccessNode{}, err
-		}
-		if !version.Valid || version.Int64 != int64(credential.EnvelopeVersion) ||
-			!keyID.Valid || len(nonce) == 0 || len(ciphertext) == 0 {
-			return resource.AccessNode{}, ErrResourceIntegrity
-		}
-		oldEnvelope := credential.Envelope{
-			Version:    credential.EnvelopeVersion,
-			KeyID:      keyID.String,
-			Nonce:      nonce,
-			Ciphertext: ciphertext,
-		}
-		plaintext, err := s.credentialCipher.Open(oldEnvelope, nodeProxyAAD(id, kind, expectedRevision))
-		if err != nil {
-			return resource.AccessNode{}, fmt.Errorf("open node credential for revalidation: %w", err)
-		}
-		newEnvelope, err = s.credentialCipher.Seal(plaintext, nodeProxyAAD(id, kind, nextRevision))
-		for index := range plaintext {
-			plaintext[index] = 0
-		}
-		if err != nil {
-			return resource.AccessNode{}, fmt.Errorf("reseal node credential for revalidation: %w", err)
-		}
-		hasEnvelope = true
-	} else if kind != resource.NodeKindDirect {
-		return resource.AccessNode{}, ErrResourceIntegrity
-	}
-	newVersion, newKeyID, newNonce, newCiphertext := envelopeDatabaseValues(newEnvelope, hasEnvelope)
-	node, err := scanNode(tx.QueryRowContext(ctx, `
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET state = 'validating', egress_revision = egress_revision + 1,
-    proxy_envelope_version = $3, proxy_key_id = $4, proxy_nonce = $5, proxy_ciphertext = $6,
     exit_address = NULL, exit_verified_revision = NULL, exit_verified_at = NULL, exit_valid_until = NULL
 WHERE node_id = $1 AND egress_revision = $2
-RETURNING `+nodeReadColumns,
-		int64(id), expectedRevision, newVersion, newKeyID, newNonce, newCiphertext,
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
+RETURNING `+nodeReadColumns, int64(id), expectedRevision))
+	if err == nil {
+		return node, nil
 	}
-	if err != nil {
-		return resource.AccessNode{}, fmt.Errorf("begin node revalidation: %w", ErrResourceStorage)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return resource.AccessNode{}, mapResourceReadError(err)
 	}
-	if err := tx.Commit(); err != nil {
-		return resource.AccessNode{}, fmt.Errorf("commit node revalidation: %w", ErrResourceStorage)
+	_, found, queryErr := s.Node(ctx, id)
+	if queryErr != nil {
+		return resource.AccessNode{}, ErrResourceStorage
 	}
-	return node, nil
+	if !found {
+		return resource.AccessNode{}, ErrResourceNotFound
+	}
+	return resource.AccessNode{}, ErrResourceRevisionConflict
 }
 
 // RecordNodeExit makes current validating evidence available.
@@ -466,7 +365,7 @@ func (s *Store) RecordNodeExit(ctx context.Context, id resource.NodeID, expected
 	if err := verification.Validate(); err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET state = 'available', exit_address = $3, exit_verified_revision = $2,
     exit_verified_at = $4, exit_valid_until = $5
@@ -492,8 +391,93 @@ WHERE node_id = $1 AND egress_revision = $2 AND state IN ('validating', 'unavail
 RETURNING `+nodeReadColumns)
 }
 
-// AssignNodePlatform assigns an unassigned node using assignment revision CAS.
-func (s *Store) AssignNodePlatform(ctx context.Context, id resource.NodeID, expectedRevision int64, platform resource.Platform) (resource.AccessNode, error) {
+// AssignNodeGame sets or clears the node's game using assignment revision CAS.
+// appID 0 clears the game. Direction rows or combinations block the change.
+func (s *Store) AssignNodeGame(ctx context.Context, id resource.NodeID, expectedRevision int64, appID int64) (resource.AccessNode, error) {
+	if err := s.validate(); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if appID < 0 {
+		return resource.AccessNode{}, fmt.Errorf("appid must be non-negative")
+	}
+	nextRevision, err := nextResourceRevision(expectedRevision)
+	if err != nil {
+		return resource.AccessNode{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	node, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
+FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.AccessNode{}, ErrResourceNotFound
+	}
+	if err != nil {
+		return resource.AccessNode{}, mapResourceReadError(err)
+	}
+	if err := attachNodeSides(ctx, tx, &node); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if node.AssignmentRevision != expectedRevision {
+		return resource.AccessNode{}, ErrResourceRevisionConflict
+	}
+	if node.AppID == appID {
+		if err := tx.Commit(); err != nil {
+			return resource.AccessNode{}, ErrResourceStorage
+		}
+		return node, nil
+	}
+
+	var hasDirection bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM node_direction_assignments WHERE node_id = $1)`, int64(id)).Scan(&hasDirection); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	var hasCombination bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM account_node_combinations WHERE node_id = $1)`, int64(id)).Scan(&hasCombination); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	if hasDirection || hasCombination {
+		return resource.AccessNode{}, ErrResourceDependency
+	}
+
+	var storedAppID any
+	if appID > 0 {
+		storedAppID = appID
+	}
+	node, err = scanCompleteNode(ctx, tx, tx.QueryRowContext(ctx, `
+UPDATE access_nodes
+SET appid = $3, assignment_revision = $4
+WHERE node_id = $1 AND assignment_revision = $2
+RETURNING `+nodeReadColumns, int64(id), expectedRevision, storedAppID, nextRevision))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.AccessNode{}, ErrResourceRevisionConflict
+	}
+	if err != nil {
+		return resource.AccessNode{}, mapAssignmentWriteError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	return node, nil
+}
+
+// AssignNodeSide sets or deletes one platform direction using assignment revision CAS.
+// Empty side deletes that platform row. Combinations on that platform block the change.
+func (s *Store) AssignNodeSide(
+	ctx context.Context,
+	id resource.NodeID,
+	expectedRevision int64,
+	platform resource.Platform,
+	side market.Side,
+) (resource.AccessNode, error) {
 	if err := s.validate(); err != nil {
 		return resource.AccessNode{}, err
 	}
@@ -501,147 +485,112 @@ func (s *Store) AssignNodePlatform(ctx context.Context, id resource.NodeID, expe
 		return resource.AccessNode{}, err
 	}
 	if err := platform.Validate(); err != nil {
-		return resource.AccessNode{}, err
+		return resource.AccessNode{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
+	}
+	if side != "" && side != market.SideBid && side != market.SideAsk {
+		return resource.AccessNode{}, fmt.Errorf("%w: invalid assignment side %q", ErrInvalidResource, side)
 	}
 	nextRevision, err := nextResourceRevision(expectedRevision)
 	if err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
-UPDATE access_nodes
-SET assigned_platform = $3, assignment_revision = $4
-WHERE node_id = $1 AND assignment_revision = $2 AND assigned_platform IS NULL
-RETURNING `+nodeReadColumns, int64(id), expectedRevision, string(platform), nextRevision))
-	if err == nil {
-		return node, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, mapAssignmentWriteError(err)
-	}
-	current, found, queryErr := s.Node(ctx, id)
-	if queryErr != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	if !found {
-		return resource.AccessNode{}, ErrResourceNotFound
-	}
-	if current.AssignedPlatform == platform && current.AssignmentRevision == expectedRevision {
-		return current, nil
-	}
-	if current.AssignmentRevision != expectedRevision {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-	return resource.AccessNode{}, ErrNodeAssignmentConflict
-}
-
-// UnassignNodePlatform clears only the platform and assignment revision the
-// caller observed.
-func (s *Store) UnassignNodePlatform(ctx context.Context, id resource.NodeID, expectedRevision int64, expectedPlatform resource.Platform) (resource.AccessNode, error) {
-	if err := s.validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := expectedPlatform.Validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
-UPDATE access_nodes
-SET assigned_platform = NULL, assignment_revision = $4
-WHERE node_id = $1 AND assignment_revision = $2 AND assigned_platform = $3
-RETURNING `+nodeReadColumns, int64(id), expectedRevision, string(expectedPlatform), nextRevision))
-	if err == nil {
-		return node, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, mapAssignmentWriteError(err)
-	}
-	current, found, queryErr := s.Node(ctx, id)
-	if queryErr != nil {
 		return resource.AccessNode{}, ErrResourceStorage
 	}
-	if !found {
+	defer func() { _ = tx.Rollback() }()
+
+	node, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
+FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)))
+	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceNotFound
 	}
-	if current.AssignmentRevision != expectedRevision {
+	if err != nil {
+		return resource.AccessNode{}, mapResourceReadError(err)
+	}
+	if err := attachNodeSides(ctx, tx, &node); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if node.AssignmentRevision != expectedRevision {
 		return resource.AccessNode{}, ErrResourceRevisionConflict
 	}
-	return resource.AccessNode{}, ErrNodeAssignmentConflict
-}
 
-// ReassignNodePlatform atomically changes an observed platform assignment.
-func (s *Store) ReassignNodePlatform(ctx context.Context, id resource.NodeID, expectedRevision int64, expectedPlatform, newPlatform resource.Platform) (resource.AccessNode, error) {
-	if err := s.validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := expectedPlatform.Validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := newPlatform.Validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if expectedPlatform == newPlatform {
-		current, found, err := s.Node(ctx, id)
-		if err != nil {
-			return resource.AccessNode{}, ErrResourceStorage
-		}
-		if !found {
-			return resource.AccessNode{}, ErrResourceNotFound
-		}
-		if current.AssignmentRevision != expectedRevision {
-			return resource.AccessNode{}, ErrResourceRevisionConflict
-		}
-		if current.AssignedPlatform != expectedPlatform {
+	current, assigned := node.SideFor(platform)
+	switch {
+	case side == "":
+		if !assigned {
 			return resource.AccessNode{}, ErrNodeAssignmentConflict
 		}
-		return current, nil
-	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
-UPDATE access_nodes
-SET assigned_platform = $4, assignment_revision = $5
-WHERE node_id = $1 AND assignment_revision = $2 AND assigned_platform = $3
-RETURNING `+nodeReadColumns,
-		int64(id), expectedRevision, string(expectedPlatform), string(newPlatform), nextRevision))
-	if err == nil {
+		var hasCombination bool
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM account_node_combinations WHERE node_id = $1 AND platform = $2
+)`, int64(id), string(platform)).Scan(&hasCombination); err != nil {
+			return resource.AccessNode{}, ErrResourceStorage
+		}
+		if hasCombination {
+			return resource.AccessNode{}, ErrResourceDependency
+		}
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM node_direction_assignments WHERE node_id = $1 AND platform = $2`, int64(id), string(platform)); err != nil {
+			return resource.AccessNode{}, mapAssignmentWriteError(err)
+		}
+	case assigned && current == side:
+		if err := tx.Commit(); err != nil {
+			return resource.AccessNode{}, ErrResourceStorage
+		}
 		return node, nil
+	default:
+		if node.AppID < 1 {
+			return resource.AccessNode{}, ErrNodeAssignmentConflict
+		}
+		if assigned {
+			var hasCombination bool
+			if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM account_node_combinations WHERE node_id = $1 AND platform = $2
+)`, int64(id), string(platform)).Scan(&hasCombination); err != nil {
+				return resource.AccessNode{}, ErrResourceStorage
+			}
+			if hasCombination {
+				return resource.AccessNode{}, ErrResourceDependency
+			}
+			if _, err := tx.ExecContext(ctx, `
+UPDATE node_direction_assignments SET side = $3
+WHERE node_id = $1 AND platform = $2`, int64(id), string(platform), string(side)); err != nil {
+				return resource.AccessNode{}, mapAssignmentWriteError(err)
+			}
+		} else if _, err := tx.ExecContext(ctx, `
+INSERT INTO node_direction_assignments (node_id, platform, side)
+VALUES ($1, $2, $3)`, int64(id), string(platform), string(side)); err != nil {
+			return resource.AccessNode{}, mapAssignmentWriteError(err)
+		}
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, mapAssignmentWriteError(err)
-	}
-	current, found, queryErr := s.Node(ctx, id)
-	if queryErr != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	if !found {
-		return resource.AccessNode{}, ErrResourceNotFound
-	}
-	if current.AssignmentRevision != expectedRevision {
+
+	node, err = scanCompleteNode(ctx, tx, tx.QueryRowContext(ctx, `
+UPDATE access_nodes
+SET assignment_revision = $3
+WHERE node_id = $1 AND assignment_revision = $2
+RETURNING `+nodeReadColumns, int64(id), expectedRevision, nextRevision))
+	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceRevisionConflict
 	}
-	return resource.AccessNode{}, ErrNodeAssignmentConflict
+	if err != nil {
+		return resource.AccessNode{}, mapAssignmentWriteError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	return node, nil
 }
 
-// OpenNodeProxyCredentialAt decrypts only the node egress revision the caller
-// observed when it acquired the resource.
+// OpenNodeProxyCredentialAt returns plaintext proxy material for the observed revisions.
 func (s *Store) OpenNodeProxyCredentialAt(
 	ctx context.Context,
 	id resource.NodeID,
 	expectedEgressRevision, expectedAssignmentRevision int64,
-	expectedPlatform resource.Platform,
 ) ([]byte, error) {
-	if err := s.requireCredentialCipher(); err != nil {
+	if err := s.validate(); err != nil {
 		return nil, err
 	}
 	if err := validateIdentityRevision(id.Validate(), expectedEgressRevision); err != nil {
@@ -650,18 +599,10 @@ func (s *Store) OpenNodeProxyCredentialAt(
 	if expectedAssignmentRevision < 1 {
 		return nil, fmt.Errorf("expected assignment revision must be at least 1")
 	}
-	if expectedPlatform != "" {
-		if err := expectedPlatform.Validate(); err != nil {
-			return nil, err
-		}
-	}
-	var version sql.NullInt64
-	var keyID sql.NullString
-	var nonce, ciphertext []byte
+	var plaintext []byte
 	var scanned nodeScanData
-	destinations := append(scanned.destinations(), &version, &keyID, &nonce, &ciphertext)
-	err := s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`,
-proxy_envelope_version, proxy_key_id, proxy_nonce, proxy_ciphertext
+	destinations := append(scanned.destinations(), &plaintext)
+	err := s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`, proxy_plaintext
 FROM access_nodes WHERE node_id = $1`, int64(id)).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrResourceNotFound
@@ -676,22 +617,13 @@ FROM access_nodes WHERE node_id = $1`, int64(id)).Scan(destinations...)
 	if node.EgressRevision != expectedEgressRevision || node.AssignmentRevision != expectedAssignmentRevision {
 		return nil, ErrResourceRevisionConflict
 	}
-	if node.AssignedPlatform != expectedPlatform {
-		return nil, ErrNodeAssignmentConflict
-	}
 	if node.Kind != resource.NodeKindProxy {
 		return nil, ErrProxyCredentialUnavailable
 	}
-	if !version.Valid || version.Int64 != int64(credential.EnvelopeVersion) ||
-		!keyID.Valid || len(nonce) == 0 || len(ciphertext) == 0 {
+	if len(plaintext) == 0 {
 		return nil, ErrResourceIntegrity
 	}
-	envelope := credential.Envelope{Version: credential.EnvelopeVersion, KeyID: keyID.String, Nonce: nonce, Ciphertext: ciphertext}
-	plaintext, err := s.credentialCipher.Open(envelope, nodeProxyAAD(node.ID, node.Kind, node.EgressRevision))
-	if err != nil {
-		return nil, fmt.Errorf("open node proxy credential: %w", err)
-	}
-	return plaintext, nil
+	return append([]byte(nil), plaintext...), nil
 }
 
 func (s *Store) updateNodeRevision(ctx context.Context, id resource.NodeID, expectedRevision int64, statement string) (resource.AccessNode, error) {
@@ -701,7 +633,7 @@ func (s *Store) updateNodeRevision(ctx context.Context, id resource.NodeID, expe
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanNode(s.db.QueryRowContext(ctx, statement, int64(id), expectedRevision))
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, statement, int64(id), expectedRevision))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceRevisionConflict
 	}
@@ -711,38 +643,16 @@ func (s *Store) updateNodeRevision(ctx context.Context, id resource.NodeID, expe
 	return node, nil
 }
 
-func (s *Store) sealCredential(plaintext, aad []byte) (credential.Envelope, error) {
-	if err := s.requireCredentialCipher(); err != nil {
-		return credential.Envelope{}, err
-	}
-	envelope, err := s.credentialCipher.Seal(plaintext, aad)
-	if err != nil {
-		return credential.Envelope{}, fmt.Errorf("seal credential: %w", err)
-	}
-	return envelope, nil
-}
-
-func (s *Store) requireCredentialCipher() error {
-	if err := s.validate(); err != nil {
-		return err
-	}
-	if s.credentialCipher == nil {
-		return ErrCredentialCipherUnavailable
-	}
-	return nil
-}
-
-func (s *Store) sealNodeCredential(id resource.NodeID, revision int64, input resource.NodeConnectionInput) (credential.Envelope, bool, error) {
-	if input.Kind == resource.NodeKindDirect {
-		return credential.Envelope{}, false, nil
-	}
-	envelope, err := s.sealCredential(input.ProxyCredential, nodeProxyAAD(id, input.Kind, revision))
-	return envelope, err == nil, err
-}
-
 func validateNewAccount(platform resource.Platform, alias string) error {
 	account := resource.PlatformAccount{ID: 1, Platform: platform, Alias: alias, SessionState: resource.AccountSessionStateUnverified, SessionRevision: 1}
 	return account.Validate()
+}
+
+func validateSessionPlaintext(session []byte) error {
+	if len(session) == 0 {
+		return fmt.Errorf("session is empty")
+	}
+	return nil
 }
 
 func prepareNodeConnection(name string, input resource.NodeConnectionInput) (resource.NodeConnectionInput, error) {
@@ -760,10 +670,17 @@ func prepareNodeConnection(name string, input resource.NodeConnectionInput) (res
 		StickySessionValidUntil: cloneTime(input.StickySessionValidUntil),
 	}
 	if err := node.Validate(); err != nil {
-		return resource.NodeConnectionInput{}, err
+		return resource.NodeConnectionInput{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
 	}
 	input.ProxyCredential = append([]byte(nil), input.ProxyCredential...)
 	return input, nil
+}
+
+func nodeProxyPlaintext(input resource.NodeConnectionInput) any {
+	if input.Kind == resource.NodeKindDirect {
+		return nil
+	}
+	return input.ProxyCredential
 }
 
 func validateIdentityRevision(identityErr error, revision int64) error {
@@ -774,14 +691,6 @@ func validateIdentityRevision(identityErr error, revision int64) error {
 		return fmt.Errorf("expected revision must be at least 1")
 	}
 	return nil
-}
-
-func accountSessionAAD(id resource.AccountID, platform resource.Platform, revision int64) []byte {
-	return []byte(fmt.Sprintf("buffgo.resource.account-session.v1\x00%d\x00%s\x00%d", id, platform, revision))
-}
-
-func nodeProxyAAD(id resource.NodeID, kind resource.NodeKind, revision int64) []byte {
-	return []byte(fmt.Sprintf("buffgo.resource.node-proxy.v1\x00%d\x00%s\x00%d", id, kind, revision))
 }
 
 func nextResourceRevision(current int64) (int64, error) {
@@ -809,11 +718,18 @@ func mapResourceReadError(err error) error {
 	return ErrResourceStorage
 }
 
-func envelopeDatabaseValues(envelope credential.Envelope, present bool) (any, any, any, any) {
-	if !present {
-		return nil, nil, nil, nil
+func mapAccountWriteError(err error) error {
+	if postgresErrorCode(err) == "23505" {
+		return ErrAccountConflict
 	}
-	return int64(envelope.Version), envelope.KeyID, envelope.Nonce, envelope.Ciphertext
+	return ErrResourceStorage
+}
+
+func mapNodeWriteError(err error) error {
+	if postgresErrorCode(err) == "23505" {
+		return ErrNodeNameConflict
+	}
+	return ErrResourceStorage
 }
 
 type accountScanData struct {
@@ -851,7 +767,7 @@ func scanAccount(row rowScanner) (resource.PlatformAccount, error) {
 type nodeScanData struct {
 	node                   resource.AccessNode
 	id                     int64
-	assigned               sql.NullString
+	appid                  sql.NullInt64
 	sticky                 sql.NullTime
 	verifiedRevision       sql.NullInt64
 	address                sql.NullString
@@ -862,15 +778,15 @@ func (data *nodeScanData) destinations() []any {
 	return []any{
 		&data.id, &data.node.Name, &data.node.Kind, &data.node.Region,
 		&data.node.EgressMode, &data.node.State, &data.node.EgressRevision,
-		&data.node.AssignmentRevision, &data.assigned, &data.node.HasProxyCredential, &data.sticky,
+		&data.node.AssignmentRevision, &data.appid, &data.node.HasProxyCredential, &data.sticky,
 		&data.verifiedRevision, &data.address, &data.verifiedAt, &data.validUntil,
 	}
 }
 
 func (data *nodeScanData) result() (resource.AccessNode, error) {
 	data.node.ID = resource.NodeID(data.id)
-	if data.assigned.Valid {
-		data.node.AssignedPlatform = resource.Platform(data.assigned.String)
+	if data.appid.Valid {
+		data.node.AppID = data.appid.Int64
 	}
 	if data.sticky.Valid {
 		data.node.StickySessionValidUntil = cloneTime(&data.sticky.Time)
@@ -902,4 +818,101 @@ func scanNode(row rowScanner) (resource.AccessNode, error) {
 		return resource.AccessNode{}, err
 	}
 	return data.result()
+}
+
+type sideQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func scanCompleteNode(ctx context.Context, querier sideQuerier, row rowScanner) (resource.AccessNode, error) {
+	node, err := scanNode(row)
+	if err != nil {
+		return resource.AccessNode{}, err
+	}
+	if err := attachNodeSides(ctx, querier, &node); err != nil {
+		return resource.AccessNode{}, err
+	}
+	return node, nil
+}
+
+func attachNodeSides(ctx context.Context, querier sideQuerier, node *resource.AccessNode) error {
+	sides, err := listNodeSides(ctx, querier, node.ID)
+	if err != nil {
+		return err
+	}
+	node.Sides = sides
+	if err := node.Validate(); err != nil {
+		return ErrResourceIntegrity
+	}
+	return nil
+}
+
+func attachAllNodeSides(ctx context.Context, querier sideQuerier, nodes []resource.AccessNode) error {
+	byNode, err := listAllNodeSides(ctx, querier)
+	if err != nil {
+		return err
+	}
+	for index := range nodes {
+		nodes[index].Sides = byNode[nodes[index].ID]
+		if err := nodes[index].Validate(); err != nil {
+			return ErrResourceIntegrity
+		}
+	}
+	return nil
+}
+
+func listNodeSides(ctx context.Context, querier sideQuerier, id resource.NodeID) ([]resource.NodeSideAssignment, error) {
+	rows, err := querier.QueryContext(ctx, `
+SELECT platform, side
+FROM node_direction_assignments
+WHERE node_id = $1
+ORDER BY platform`, int64(id))
+	if err != nil {
+		return nil, ErrResourceStorage
+	}
+	defer rows.Close()
+	return scanNodeSideRows(rows)
+}
+
+func listAllNodeSides(ctx context.Context, querier sideQuerier) (map[resource.NodeID][]resource.NodeSideAssignment, error) {
+	rows, err := querier.QueryContext(ctx, `
+SELECT node_id, platform, side
+FROM node_direction_assignments
+ORDER BY node_id, platform`)
+	if err != nil {
+		return nil, ErrResourceStorage
+	}
+	defer rows.Close()
+	byNode := make(map[resource.NodeID][]resource.NodeSideAssignment)
+	for rows.Next() {
+		var nodeID int64
+		var assignment resource.NodeSideAssignment
+		if err := rows.Scan(&nodeID, &assignment.Platform, &assignment.Side); err != nil {
+			return nil, ErrResourceStorage
+		}
+		id := resource.NodeID(nodeID)
+		byNode[id] = append(byNode[id], assignment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrResourceStorage
+	}
+	return byNode, nil
+}
+
+func scanNodeSideRows(rows *sql.Rows) ([]resource.NodeSideAssignment, error) {
+	sides := make([]resource.NodeSideAssignment, 0)
+	for rows.Next() {
+		var assignment resource.NodeSideAssignment
+		if err := rows.Scan(&assignment.Platform, &assignment.Side); err != nil {
+			return nil, ErrResourceStorage
+		}
+		sides = append(sides, assignment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrResourceStorage
+	}
+	if len(sides) == 0 {
+		return nil, nil
+	}
+	return sides, nil
 }

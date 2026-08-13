@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"buff-go/internal/market"
 )
 
 type coordinatorRepositoryStub struct {
@@ -39,7 +41,6 @@ type nodeCredentialOpen struct {
 	id                 NodeID
 	egressRevision     int64
 	assignmentRevision int64
-	platform           Platform
 }
 
 func newCoordinatorRepositoryStub(resources ...CombinationResources) *coordinatorRepositoryStub {
@@ -98,7 +99,10 @@ func (repository *coordinatorRepositoryStub) CreateCombination(_ context.Context
 		}
 	}
 	node, found := repository.nodes[nodeID]
-	if account.ID == 0 || !found || node.AssignedPlatform != account.Platform {
+	if account.ID == 0 || !found || node.AppID < 1 {
+		return AccountNodeCombination{}, errors.New("incompatible resources")
+	}
+	if _, ok := node.SideFor(account.Platform); !ok {
 		return AccountNodeCombination{}, errors.New("incompatible resources")
 	}
 	var next CombinationID = 1
@@ -166,6 +170,24 @@ func (repository *coordinatorRepositoryStub) OpenAccountSessionAt(ctx context.Co
 	return repository.openCredential(ctx, "open_account")
 }
 
+func (repository *coordinatorRepositoryStub) RecordAccountSessionCheck(_ context.Context, id AccountID, revision int64, state AccountSessionState, _ time.Time) (PlatformAccount, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.calls["record_session_check"]++
+	for _, resources := range repository.combinations {
+		if resources.Account.ID == id && resources.Account.SessionRevision == revision {
+			account := resources.Account
+			account.SessionState = state
+			now := time.Now().UTC()
+			account.LastCheckedAt = &now
+			resources.Account = account
+			repository.combinations[resources.Combination.ID] = resources
+			return account, nil
+		}
+	}
+	return PlatformAccount{}, errors.New("account revision conflict")
+}
+
 func (repository *coordinatorRepositoryStub) ReplaceNodeConnection(_ context.Context, id NodeID, expectedRevision int64, input NodeConnectionInput) (AccessNode, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
@@ -219,14 +241,13 @@ func (repository *coordinatorRepositoryStub) OpenNodeProxyCredentialAt(
 	ctx context.Context,
 	id NodeID,
 	egressRevision, assignmentRevision int64,
-	platform Platform,
 ) ([]byte, error) {
 	repository.mu.Lock()
 	node, found := repository.nodes[id]
 	valid := found && node.EgressRevision == egressRevision &&
-		node.AssignmentRevision == assignmentRevision && node.AssignedPlatform == platform
+		node.AssignmentRevision == assignmentRevision
 	repository.lastNodeOpen = nodeCredentialOpen{
-		id: id, egressRevision: egressRevision, assignmentRevision: assignmentRevision, platform: platform,
+		id: id, egressRevision: egressRevision, assignmentRevision: assignmentRevision,
 	}
 	repository.mu.Unlock()
 	if !valid {
@@ -271,27 +292,61 @@ func (repository *coordinatorRepositoryStub) MarkNodeUnavailable(ctx context.Con
 	return node, nil
 }
 
-func (repository *coordinatorRepositoryStub) AssignNodePlatform(_ context.Context, id NodeID, expectedRevision int64, platform Platform) (AccessNode, error) {
-	return repository.changeAssignment("assign_node", id, expectedRevision, "", platform)
-}
-
-func (repository *coordinatorRepositoryStub) UnassignNodePlatform(_ context.Context, id NodeID, expectedRevision int64, expectedPlatform Platform) (AccessNode, error) {
-	return repository.changeAssignment("unassign_node", id, expectedRevision, expectedPlatform, "")
-}
-
-func (repository *coordinatorRepositoryStub) ReassignNodePlatform(_ context.Context, id NodeID, expectedRevision int64, expectedPlatform, newPlatform Platform) (AccessNode, error) {
-	return repository.changeAssignment("reassign_node", id, expectedRevision, expectedPlatform, newPlatform)
-}
-
-func (repository *coordinatorRepositoryStub) changeAssignment(operation string, id NodeID, expectedRevision int64, expectedPlatform, newPlatform Platform) (AccessNode, error) {
+func (repository *coordinatorRepositoryStub) AssignNodeGame(_ context.Context, id NodeID, expectedRevision int64, appID int64) (AccessNode, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
-	repository.calls[operation]++
+	repository.calls["assign_node_game"]++
 	node, found := repository.nodes[id]
-	if !found || node.AssignmentRevision != expectedRevision || node.AssignedPlatform != expectedPlatform {
+	if !found || node.AssignmentRevision != expectedRevision {
 		return AccessNode{}, errors.New("assignment revision conflict")
 	}
-	node.AssignedPlatform = newPlatform
+	if appID < 0 {
+		return AccessNode{}, errors.New("appid must be non-negative")
+	}
+	if appID == 0 && len(node.Sides) > 0 {
+		return AccessNode{}, errors.New("node has direction assignments")
+	}
+	node.AppID = appID
+	if appID == 0 {
+		node.Sides = nil
+	}
+	node.AssignmentRevision++
+	repository.storeNodeLocked(node)
+	return node, nil
+}
+
+func (repository *coordinatorRepositoryStub) AssignNodeSide(_ context.Context, id NodeID, expectedRevision int64, platform Platform, side market.Side) (AccessNode, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.calls["assign_node_side"]++
+	node, found := repository.nodes[id]
+	if !found || node.AssignmentRevision != expectedRevision {
+		return AccessNode{}, errors.New("assignment revision conflict")
+	}
+	if side == "" {
+		filtered := node.Sides[:0]
+		for _, assignment := range node.Sides {
+			if assignment.Platform != platform {
+				filtered = append(filtered, assignment)
+			}
+		}
+		if len(filtered) == len(node.Sides) {
+			return AccessNode{}, errors.New("assignment revision conflict")
+		}
+		node.Sides = filtered
+	} else {
+		replaced := false
+		for index, assignment := range node.Sides {
+			if assignment.Platform == platform {
+				node.Sides[index].Side = side
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			node.Sides = append(append([]NodeSideAssignment(nil), node.Sides...), NodeSideAssignment{Platform: platform, Side: side})
+		}
+	}
 	node.AssignmentRevision++
 	repository.storeNodeLocked(node)
 	return node, nil
@@ -365,18 +420,20 @@ func TestCoordinatorCombinationExclusivityAndSnapshot(t *testing.T) {
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	first := usableCombinationResources(now, 1, 11, 21)
 	sharedAccount := usableCombinationResources(now, 2, 11, 22)
-	sharedNode := usableCombinationResources(now, 3, 12, 21)
+	samePlatform := usableCombinationResources(now, 3, 12, 21)
+	crossPlatform := usableCombinationResourcesFor(now, 5, 13, 21, "buff", market.SideAsk)
 	disjoint := usableCombinationResources(now, 4, 12, 22)
-	repository := newCoordinatorRepositoryStub(first, sharedAccount, sharedNode, disjoint)
+	repository := newCoordinatorRepositoryStub(first, sharedAccount, samePlatform, crossPlatform, disjoint)
 	coordinator := newTestCoordinator(t, repository)
-	components := registerTestComponents(t, coordinator, 4)
+	components := registerTestComponents(t, coordinator, 5)
 
-	lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatalf("AcquireCombination(first) error = %v", err)
 	}
 	if lease.Kind != LeaseKindCombination || lease.Snapshot.CombinationID != 1 ||
 		lease.Snapshot.AccountID != 11 || lease.Snapshot.NodeID != 21 ||
+		lease.Snapshot.Platform != "steam" ||
 		lease.Snapshot.SessionRevision != 3 || lease.Snapshot.EgressRevision != 4 ||
 		lease.Snapshot.AssignmentRevision != 2 || lease.Snapshot.NodeKind != NodeKindDirect ||
 		lease.Snapshot.NodeRegion != NodeRegionDomestic || lease.Snapshot.EgressMode != EgressModeStatic ||
@@ -384,18 +441,28 @@ func TestCoordinatorCombinationExclusivityAndSnapshot(t *testing.T) {
 		lease.Snapshot.ExitVerifiedAt.IsZero() || lease.Snapshot.ExitValidUntil.IsZero() {
 		t.Fatalf("unexpected lease snapshot: %+v", lease.Snapshot)
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+	if _, err := coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 		t.Fatalf("shared account error = %v", err)
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), components[2], 3, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
-		t.Fatalf("shared node error = %v", err)
+	if _, err := coordinator.AcquireCombination(context.Background(), components[2], 3, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
+		t.Fatalf("same-platform shared node error = %v", err)
 	}
-	other, err := coordinator.AcquireCombination(context.Background(), components[3], 4, TargetRegionDomestic, now)
+	cross, err := coordinator.AcquireCombination(context.Background(), components[3], 5, TargetRegionDomestic, now, 730, market.SideAsk)
+	if err != nil {
+		t.Fatalf("AcquireCombination(cross-platform) error = %v", err)
+	}
+	if cross.Snapshot.Platform != "buff" || cross.Snapshot.NodeID != 21 {
+		t.Fatalf("cross-platform snapshot = %+v", cross.Snapshot)
+	}
+	other, err := coordinator.AcquireCombination(context.Background(), components[4], 4, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatalf("AcquireCombination(disjoint) error = %v", err)
 	}
 	if err := coordinator.Release(other.Token); err != nil {
 		t.Fatalf("Release(disjoint) error = %v", err)
+	}
+	if err := coordinator.Release(cross.Token); err != nil {
+		t.Fatalf("Release(cross-platform) error = %v", err)
 	}
 	if err := coordinator.Release(lease.Token); err != nil {
 		t.Fatalf("Release(first) error = %v", err)
@@ -408,7 +475,7 @@ func TestLeaseAuthorityDeactivationRejectsBeforeContextCancellation(t *testing.T
 	repository := newCoordinatorRepositoryStub(usableCombinationResources(now, 1, 11, 21))
 	coordinator := newTestCoordinator(t, repository)
 	component := registerTestComponents(t, coordinator, 1)[0]
-	lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +513,7 @@ func TestCoordinatorConcurrentAcquireHasOneWinner(t *testing.T) {
 		go func() {
 			defer wait.Done()
 			<-start
-			lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now)
+			lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 			results <- struct {
 				lease Lease
 				err   error
@@ -482,27 +549,27 @@ func TestCoordinatorStaleReleaseAndRestartEpoch(t *testing.T) {
 	repository := newCoordinatorRepositoryStub(usableCombinationResources(now, 1, 11, 21))
 	coordinator := newTestCoordinator(t, repository)
 	components := registerTestComponents(t, coordinator, 3)
-	first, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+	first, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := coordinator.Release(first.Token); err != nil {
 		t.Fatal(err)
 	}
-	second, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now)
+	second, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := coordinator.Release(first.Token); !errors.Is(err, ErrLeaseNotHeld) {
 		t.Fatalf("stale Release() error = %v", err)
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), components[2], 1, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+	if _, err := coordinator.AcquireCombination(context.Background(), components[2], 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 		t.Fatalf("lease was cleared by stale token: %v", err)
 	}
 
 	restarted := newTestCoordinator(t, repository)
 	restartedComponent := registerTestComponents(t, restarted, 1)[0]
-	restartedLease, err := restarted.AcquireCombination(context.Background(), restartedComponent, 1, TargetRegionDomestic, now)
+	restartedLease, err := restarted.AcquireCombination(context.Background(), restartedComponent, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatalf("restarted AcquireCombination() error = %v", err)
 	}
@@ -524,7 +591,7 @@ func TestCoordinatorParentCancelKeepsOccupationUntilRelease(t *testing.T) {
 	coordinator := newTestCoordinator(t, repository)
 	components := registerTestComponents(t, coordinator, 2)
 	parent, cancel := context.WithCancel(context.Background())
-	lease, err := coordinator.AcquireCombination(parent, components[0], 1, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(parent, components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +601,7 @@ func TestCoordinatorParentCancelKeepsOccupationUntilRelease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("lease context was not canceled by parent")
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+	if _, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 		t.Fatalf("parent cancellation released occupation: %v", err)
 	}
 	if err := coordinator.Release(lease.Token); err != nil {
@@ -550,11 +617,11 @@ func TestCoordinatorCancelWaitsForExplicitReleaseAndCanRetry(t *testing.T) {
 	repository := newCoordinatorRepositoryStub(first, second)
 	coordinator := newTestCoordinator(t, repository)
 	component := registerTestComponents(t, coordinator, 1)[0]
-	leaseOne, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now)
+	leaseOne, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaseTwo, err := coordinator.AcquireCombination(context.Background(), component, 2, TargetRegionDomestic, now)
+	leaseTwo, err := coordinator.AcquireCombination(context.Background(), component, 2, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +642,7 @@ func TestCoordinatorCancelWaitsForExplicitReleaseAndCanRetry(t *testing.T) {
 			t.Fatalf("lease cancellation cause = %v", cause)
 		}
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now); !errors.Is(err, ErrComponentUnavailable) {
+	if _, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrComponentUnavailable) {
 		t.Fatalf("canceled component AcquireCombination() error = %v", err)
 	}
 	if err := coordinator.CancelComponent(context.Background(), component); err != nil {
@@ -583,7 +650,7 @@ func TestCoordinatorCancelWaitsForExplicitReleaseAndCanRetry(t *testing.T) {
 	}
 
 	stuckComponent := registerTestComponents(t, coordinator, 1)[0]
-	stuck, err := coordinator.AcquireCombination(context.Background(), stuckComponent, 1, TargetRegionDomestic, now)
+	stuck, err := coordinator.AcquireCombination(context.Background(), stuckComponent, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +660,7 @@ func TestCoordinatorCancelWaitsForExplicitReleaseAndCanRetry(t *testing.T) {
 		t.Fatalf("timed CancelComponent() error = %v", err)
 	}
 	competitor := registerTestComponents(t, coordinator, 1)[0]
-	if _, err := coordinator.AcquireCombination(context.Background(), competitor, 1, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+	if _, err := coordinator.AcquireCombination(context.Background(), competitor, 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 		t.Fatalf("timed cancellation force-released lease: %v", err)
 	}
 	retryDone := make(chan error, 1)
@@ -620,7 +687,7 @@ func TestCoordinatorReReadsDeletedCombination(t *testing.T) {
 	coordinator := newTestCoordinator(t, repository)
 	component := registerTestComponents(t, coordinator, 1)[0]
 	repository.removeCombination(1)
-	if _, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now); !errors.Is(err, ErrCombinationNotFound) {
+	if _, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrCombinationNotFound) {
 		t.Fatalf("AcquireCombination(deleted) error = %v", err)
 	}
 }
@@ -633,7 +700,7 @@ func TestCoordinatorReleaseDoesNotWaitForRepositoryRead(t *testing.T) {
 	repository := newCoordinatorRepositoryStub(first, second)
 	coordinator := newTestCoordinator(t, repository)
 	components := registerTestComponents(t, coordinator, 2)
-	lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +715,7 @@ func TestCoordinatorReleaseDoesNotWaitForRepositoryRead(t *testing.T) {
 	var secondLease Lease
 	go func() {
 		var err error
-		secondLease, err = coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now)
+		secondLease, err = coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now, 730, market.SideAsk)
 		acquireDone <- err
 	}()
 	select {
@@ -692,7 +759,7 @@ func TestCoordinatorCoordWaitHonorsContext(t *testing.T) {
 	}
 	firstResult := make(chan acquisitionResult, 1)
 	go func() {
-		lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+		lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 		firstResult <- acquisitionResult{lease: lease, err: err}
 	}()
 	select {
@@ -705,7 +772,7 @@ func TestCoordinatorCoordWaitHonorsContext(t *testing.T) {
 	defer cancel()
 	waitResult := make(chan error, 1)
 	go func() {
-		_, err := coordinator.AcquireCombination(waitContext, components[1], 2, TargetRegionDomestic, now)
+		_, err := coordinator.AcquireCombination(waitContext, components[1], 2, TargetRegionDomestic, now, 730, market.SideAsk)
 		waitResult <- err
 	}()
 	select {
@@ -725,7 +792,7 @@ func TestCoordinatorCoordWaitHonorsContext(t *testing.T) {
 	if err := coordinator.Release(acquired.lease.Token); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(context.Background(), components[1], 2, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatalf("AcquireCombination() after canceled waiter error = %v", err)
 	}
@@ -744,7 +811,7 @@ func TestCoordinatorMaintenanceOwnsRevalidationAndCredentials(t *testing.T) {
 	coordinator := newTestCoordinator(t, repository)
 	components := registerTestComponents(t, coordinator, 2)
 
-	requestLease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+	requestLease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,7 +830,7 @@ func TestCoordinatorMaintenanceOwnsRevalidationAndCredentials(t *testing.T) {
 		t.Fatalf("OpenNodeProxyCredential(request) = %q, %v", nodeSecret, err)
 	}
 	if opened := repository.openedNode(); opened.id != 21 || opened.egressRevision != 4 ||
-		opened.assignmentRevision != 2 || opened.platform != "steam" {
+		opened.assignmentRevision != 2 {
 		t.Fatalf("OpenNodeProxyCredentialAt(request) arguments = %+v", opened)
 	}
 	if err := coordinator.Release(requestLease.Token); err != nil {
@@ -777,7 +844,7 @@ func TestCoordinatorMaintenanceOwnsRevalidationAndCredentials(t *testing.T) {
 	if maintenance.Kind != LeaseKindNodeMaintenance || maintenance.Snapshot.EgressRevision != 4 {
 		t.Fatalf("maintenance snapshot = %+v", maintenance)
 	}
-	if _, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+	if _, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 		t.Fatalf("request while maintenance active error = %v", err)
 	}
 	revalidating, err := coordinator.BeginNodeRevalidation(context.Background(), maintenance.Token, 4)
@@ -792,7 +859,7 @@ func TestCoordinatorMaintenanceOwnsRevalidationAndCredentials(t *testing.T) {
 		t.Fatalf("OpenNodeProxyCredential(maintenance) = %q, %v", nodeSecret, err)
 	}
 	if opened := repository.openedNode(); opened.id != 21 || opened.egressRevision != 5 ||
-		opened.assignmentRevision != 2 || opened.platform != "steam" {
+		opened.assignmentRevision != 2 {
 		t.Fatalf("OpenNodeProxyCredentialAt(maintenance) arguments = %+v", opened)
 	}
 	verifiedAt := now.Add(time.Minute)
@@ -874,7 +941,7 @@ func TestCoordinatorNamedMutationsAreGuarded(t *testing.T) {
 	repository := newCoordinatorRepositoryStub(resources)
 	coordinator := newTestCoordinator(t, repository)
 	component := registerTestComponents(t, coordinator, 1)[0]
-	lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,17 +961,15 @@ func TestCoordinatorNamedMutationsAreGuarded(t *testing.T) {
 		Kind: NodeKindDirect, Region: NodeRegionDomestic, EgressMode: EgressModeStatic,
 	})
 	assertOccupied("ReplaceNodeConnection", err)
-	_, err = coordinator.AssignNodePlatform(context.Background(), 21, 2, "steam")
-	assertOccupied("AssignNodePlatform", err)
-	_, err = coordinator.UnassignNodePlatform(context.Background(), 21, 2, "steam")
-	assertOccupied("UnassignNodePlatform", err)
-	_, err = coordinator.ReassignNodePlatform(context.Background(), 21, 2, "steam", "buff")
-	assertOccupied("ReassignNodePlatform", err)
+	_, err = coordinator.AssignNodeGame(context.Background(), 21, 2, 730)
+	assertOccupied("AssignNodeGame", err)
+	_, err = coordinator.AssignNodeSide(context.Background(), 21, 2, "steam", market.SideAsk)
+	assertOccupied("AssignNodeSide", err)
 
 	if repository.callCount("delete_combination") != 0 || repository.callCount("delete_account") != 0 ||
 		repository.callCount("delete_node") != 0 || repository.callCount("replace_account") != 0 ||
-		repository.callCount("replace_node") != 0 || repository.callCount("assign_node") != 0 ||
-		repository.callCount("unassign_node") != 0 || repository.callCount("reassign_node") != 0 {
+		repository.callCount("replace_node") != 0 || repository.callCount("assign_node_game") != 0 ||
+		repository.callCount("assign_node_side") != 0 {
 		t.Fatal("guarded mutation reached repository while occupied")
 	}
 	if err := coordinator.Release(lease.Token); err != nil {
@@ -930,7 +995,7 @@ func TestCoordinatorAcquireDeleteLinearization(t *testing.T) {
 	leaseResult := make(chan Lease, 1)
 	errorResult := make(chan error, 2)
 	go func() {
-		lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now)
+		lease, err := coordinator.AcquireCombination(context.Background(), component, 1, TargetRegionDomestic, now, 730, market.SideAsk)
 		leaseResult <- lease
 		errorResult <- err
 	}()
@@ -980,7 +1045,7 @@ func TestCoordinatorCredentialOpenRechecksCanceledCallerAndWipes(t *testing.T) {
 			repository.openContinue = make(chan struct{})
 			coordinator := newTestCoordinator(t, repository)
 			components := registerTestComponents(t, coordinator, 2)
-			lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now)
+			lease, err := coordinator.AcquireCombination(context.Background(), components[0], 1, TargetRegionDomestic, now, 730, market.SideAsk)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1012,7 +1077,7 @@ func TestCoordinatorCredentialOpenRechecksCanceledCallerAndWipes(t *testing.T) {
 					t.Fatalf("plaintext byte %d was not wiped", index)
 				}
 			}
-			if _, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now); !errors.Is(err, ErrResourceOccupied) {
+			if _, err := coordinator.AcquireCombination(context.Background(), components[1], 1, TargetRegionDomestic, now, 730, market.SideAsk); !errors.Is(err, ErrResourceOccupied) {
 				t.Fatalf("canceled open released occupation: %v", err)
 			}
 			if err := coordinator.Release(lease.Token); err != nil {
@@ -1045,6 +1110,21 @@ func registerTestComponents(t *testing.T, coordinator *Coordinator, count int) [
 		components[index] = component
 	}
 	return components
+}
+
+func usableCombinationResourcesFor(
+	now time.Time,
+	combinationID CombinationID,
+	accountID AccountID,
+	nodeID NodeID,
+	platform Platform,
+	side market.Side,
+) CombinationResources {
+	value := usableCombinationResources(now, combinationID, accountID, nodeID)
+	value.Combination.Platform = platform
+	value.Account.Platform = platform
+	value.Node.Sides = []NodeSideAssignment{{Platform: platform, Side: side}}
+	return value
 }
 
 var _ CoordinatorRepository = (*coordinatorRepositoryStub)(nil)

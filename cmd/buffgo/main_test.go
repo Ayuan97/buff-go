@@ -40,7 +40,7 @@ func TestExecuteSignalCancellationWaitsForCleanup(t *testing.T) {
 		}
 	}
 	run := func(ctx context.Context, opt app.Options) error {
-		if opt.ConfigPath != "runtime.toml" || opt.Sources != "steam.ask" || opt.AppID != 252490 {
+		if opt.APIListen != "127.0.0.1:18080" || opt.PostgresDSN != "postgres://local/buffgo" {
 			t.Fatalf("options=%+v", opt)
 		}
 		close(started)
@@ -50,7 +50,7 @@ func TestExecuteSignalCancellationWaitsForCleanup(t *testing.T) {
 	}
 	done := make(chan int, 1)
 	go func() {
-		done <- execute([]string{"-config", "runtime.toml", "-sources", "steam.ask", "-appid", "252490"}, &bytes.Buffer{}, notify, run)
+		done <- execute([]string{"-api-listen", "127.0.0.1:18080", "-pg-dsn", "postgres://local/buffgo"}, &bytes.Buffer{}, notify, run)
 	}()
 
 	<-started
@@ -83,7 +83,7 @@ func TestExecuteStartupFailure(t *testing.T) {
 			cancel()
 		}
 	}
-	code := execute([]string{"-config", "runtime.toml"}, &stderr, notify, func(context.Context, app.Options) error {
+	code := execute([]string{"-api-listen", "127.0.0.1:18080", "-pg-dsn", "postgres://local/buffgo"}, &stderr, notify, func(context.Context, app.Options) error {
 		return errors.New(secret)
 	})
 	if code != 1 {
@@ -99,8 +99,7 @@ func TestExecuteStartupFailure(t *testing.T) {
 
 func TestExecuteParseErrorsDoNotEchoArguments(t *testing.T) {
 	tests := [][]string{
-		{"-config", "runtime.toml", "-appid", "postgres://user:password@host/database"},
-		{"-config", "runtime.toml", "-cookie", "session-secret\nsecond-line"},
+		{"-api-listen", "127.0.0.1:18080", "-cookie", "session-secret\nsecond-line"},
 	}
 	for _, args := range tests {
 		var stderr bytes.Buffer
@@ -115,7 +114,7 @@ func TestExecuteParseErrorsDoNotEchoArguments(t *testing.T) {
 			t.Fatalf("args=%v exit code=%d", args, code)
 		}
 		output := stderr.String()
-		for _, secret := range []string{"postgres://", "password", "session-secret", "second-line"} {
+		for _, secret := range []string{"session-secret", "second-line"} {
 			if strings.Contains(output, secret) {
 				t.Fatalf("parse error echoed %q: %s", secret, output)
 			}
@@ -133,13 +132,16 @@ func TestExecuteArgumentExitCodes(t *testing.T) {
 		want int
 	}{
 		{name: "help", args: []string{"-h"}, want: 0},
-		{name: "missing config", want: 2},
-		{name: "negative appid", args: []string{"-config", "runtime.toml", "-appid", "-1"}, want: 2},
-		{name: "positional argument", args: []string{"-config", "runtime.toml", "extra"}, want: 2},
+		{name: "missing api listen", want: 2},
+		{name: "empty api listen equals", args: []string{"-api-listen="}, want: 2},
+		{name: "missing pg dsn", args: []string{"-api-listen", "127.0.0.1:18080"}, want: 2},
+		{name: "unknown legacy config flag", args: []string{"-config", "runtime.toml"}, want: 2},
+		{name: "positional argument", args: []string{"-api-listen", "127.0.0.1:18080", "-pg-dsn", "postgres://local/buffgo", "extra"}, want: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			code := execute(tc.args, &bytes.Buffer{}, func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
+			var stderr bytes.Buffer
+			code := execute(tc.args, &stderr, func(context.Context, ...os.Signal) (context.Context, context.CancelFunc) {
 				t.Fatal("invalid arguments installed signal handlers")
 				return nil, nil
 			}, func(context.Context, app.Options) error {
@@ -147,23 +149,39 @@ func TestExecuteArgumentExitCodes(t *testing.T) {
 				return nil
 			})
 			if code != tc.want {
-				t.Fatalf("exit code=%d want %d", code, tc.want)
+				t.Fatalf("exit code=%d want %d stderr=%s", code, tc.want, stderr.String())
+			}
+			for _, secret := range []string{"runtime.toml", "password", "session-secret"} {
+				if strings.Contains(stderr.String(), secret) {
+					t.Fatalf("stderr echoed %q: %s", secret, stderr.String())
+				}
 			}
 		})
 	}
 }
 
-func TestExecuteRejectsUnsupportedSourcesWithoutEcho(t *testing.T) {
-	const secret = "cookie=session-secret"
-	var stderr bytes.Buffer
-	code := execute([]string{"-config", "runtime.toml", "-sources", secret}, &stderr,
-		func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
-			return context.WithCancel(parent)
-		}, app.Run)
-	if code != 2 {
-		t.Fatalf("exit code=%d", code)
+func TestExecuteRejectsUnsafeListenViaApp(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		echo  string
+	}{
+		{name: "wildcard", value: "0.0.0.0:8080", echo: "0.0.0.0"},
+		{name: "hostname", value: "localhost:8080", echo: "localhost"},
 	}
-	if strings.Contains(stderr.String(), secret) {
-		t.Fatalf("stderr echoed source value: %s", stderr.String())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := execute([]string{"-api-listen", tc.value, "-pg-dsn", "postgres://local/buffgo"}, &stderr,
+				func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+					return context.WithCancel(parent)
+				}, app.Run)
+			if code != 2 {
+				t.Fatalf("exit code=%d stderr=%s", code, stderr.String())
+			}
+			if strings.Contains(stderr.String(), tc.echo) {
+				t.Fatalf("stderr echoed listen address: %s", stderr.String())
+			}
+		})
 	}
 }

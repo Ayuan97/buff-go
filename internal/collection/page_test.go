@@ -13,7 +13,7 @@ func pageDigest() [32]byte {
 func pageInput(t *testing.T) PageInput {
 	t.Helper()
 	return PageInput{
-		RunID:         1,
+		RunID:         5,
 		PageSequence:  1,
 		CursorBefore:  mustCursor(t, "first"),
 		CursorAfter:   mustCursor(t, "second"),
@@ -93,8 +93,9 @@ func TestPageValidationAndCopyIsolation(t *testing.T) {
 }
 
 func TestRunCommitPageRequiresContiguousCausalPage(t *testing.T) {
-	pendingInput := catalogRunInput(t)
-	pending, err := NewCatalogRun(pendingInput)
+	pendingInput := summaryRunInput(t)
+	pendingInput.CurrentCursor = mustCursor(t, "first")
+	pending, err := NewSummaryRun(pendingInput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,9 +162,9 @@ func TestRunCurrentCursorIsCopyIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := catalogRunInput(t)
+	input := summaryRunInput(t)
 	input.CurrentCursor = cursor
-	run, err := NewCatalogRun(input)
+	run, err := NewSummaryRun(input)
 	if err != nil {
 		t.Fatal(err)
 	}

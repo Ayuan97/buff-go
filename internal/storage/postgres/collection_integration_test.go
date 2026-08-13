@@ -34,19 +34,19 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 	ctx := t.Context()
 	empty := mustCollectionCursor(t, nil)
 
-	target, err := store.CreateCatalogTarget(ctx, 730, time.Minute, collection.DesiredEnabled)
+	target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.Revision() != 1 || target.SwitchVersion() != 1 || target.Actual() != collection.ActualStarting ||
 		target.ChangedAt().Location() != time.UTC || target.ChangedAt().Nanosecond()%int(time.Microsecond) != 0 {
-		t.Fatalf("new catalog target = %+v", target)
+		t.Fatalf("new summary target = %+v", target)
 	}
-	same, err := store.CreateCatalogTarget(ctx, 730, time.Minute, collection.DesiredEnabled)
+	same, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
 	if err != nil || same.ID() != target.ID() {
 		t.Fatalf("idempotent target = %+v err=%v", same, err)
 	}
-	if _, err := store.CreateCatalogTarget(ctx, 730, 2*time.Minute, collection.DesiredEnabled); !errors.Is(err, ErrCollectionConflict) {
+	if _, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredDisabled); !errors.Is(err, ErrCollectionConflict) {
 		t.Fatalf("changed create configuration error = %v", err)
 	}
 
@@ -76,13 +76,6 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 	if err != nil || retry.Revision() != target.Revision() || !retry.ChangedAt().Equal(target.ChangedAt()) {
 		t.Fatalf("exact target retry = %+v err=%v", retry, err)
 	}
-	if _, err := store.ChangeCatalogPeriod(ctx, target.ID(), 1, 2*time.Minute); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("stale period CAS error = %v", err)
-	}
-	target, err = store.ChangeCatalogPeriod(ctx, target.ID(), target.Revision(), 2*time.Minute)
-	if err != nil || target.Revision() != 3 || target.SwitchVersion() != 1 {
-		t.Fatalf("period target = %+v err=%v", target, err)
-	}
 	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{
 		State: collection.ActualBlocked, Reason: collection.TargetReasonSessionInvalid,
 	})
@@ -97,12 +90,12 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 		t.Fatalf("manual recovery = %+v err=%v", target, err)
 	}
 	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualRunning})
-	if err != nil || target.Revision() != 6 || target.SwitchVersion() != 1 {
+	if err != nil || target.Revision() != 5 || target.SwitchVersion() != 1 {
 		t.Fatalf("running target = %+v err=%v", target, err)
 	}
-	run, created, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), empty)
+	run, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
 	if err != nil || !created || run.State() != collection.RunPending || run.RunSequence() != 1 {
-		t.Fatalf("catalog run = %+v created=%v err=%v", run, created, err)
+		t.Fatalf("summary run = %+v created=%v err=%v", run, created, err)
 	}
 	var cursorIsNull bool
 	if err := db.QueryRowContext(ctx, `SELECT current_cursor IS NULL FROM collection_runs WHERE run_id = $1`, int64(run.ID())).Scan(&cursorIsNull); err != nil {
@@ -111,7 +104,7 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 	if cursorIsNull {
 		t.Fatal("empty cursor was stored as SQL NULL")
 	}
-	repeated, created, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, []byte("ignored-on-active")))
+	repeated, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, []byte("ignored-on-active")))
 	if err != nil || created || repeated.ID() != run.ID() {
 		t.Fatalf("active run retry = %+v created=%v err=%v", repeated, created, err)
 	}
@@ -175,7 +168,7 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run
 		t.Fatalf("terminal begin error = %v", err)
 	}
 
-	failed, created, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), empty)
+	failed, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
 	if err != nil || !created || failed.RunSequence() != 2 {
 		t.Fatalf("second run = %+v created=%v err=%v", failed, created, err)
 	}
@@ -184,7 +177,7 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run
 		t.Fatalf("pending failure = %+v err=%v", failed, err)
 	}
 
-	old, created, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), empty)
+	old, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
 	if err != nil || !created || old.RunSequence() != 3 {
 		t.Fatalf("old-switch run = %+v created=%v err=%v", old, created, err)
 	}
@@ -203,7 +196,7 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run
 	if err != nil || target.SwitchVersion() != 3 || target.Actual() != collection.ActualStarting {
 		t.Fatalf("re-enable target = %+v err=%v", target, err)
 	}
-	if _, _, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), empty); !errors.Is(err, ErrCollectionConflict) {
+	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty); !errors.Is(err, ErrCollectionConflict) {
 		t.Fatalf("old active switch create error = %v", err)
 	}
 	if _, err := store.BeginRun(ctx, old.ID()); !errors.Is(err, ErrCollectionConflict) {
@@ -212,7 +205,7 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run
 	if _, err := store.FinishRun(ctx, old.ID(), collection.RunStopped, collection.CompletenessPartial, collection.RunReasonSwitchDisabled); err != nil {
 		t.Fatal(err)
 	}
-	current, created, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), empty)
+	current, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
 	if err != nil || !created || current.RunSequence() != 4 {
 		t.Fatalf("new-switch run = %+v created=%v err=%v", current, created, err)
 	}
@@ -224,7 +217,7 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run
 	if err != nil || len(runs) != 4 || runs[0].RunSequence() != 4 || runs[3].RunSequence() != 1 {
 		t.Fatalf("target runs = %+v err=%v", runs, err)
 	}
-	if _, err := store.CreateCatalogTarget(ctx, 730, 2*time.Minute, collection.DesiredEnabled); err != nil {
+	if _, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled); err != nil {
 		t.Fatalf("create with current explicit configuration: %v", err)
 	}
 }
@@ -241,19 +234,19 @@ func testCollectionActiveRuns(t *testing.T, dsn string) {
 	}
 
 	var empty collection.Cursor
-	catalogTarget, err := store.CreateCatalogTarget(ctx, 730, time.Minute, collection.DesiredEnabled)
+	askTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	summaryTarget, err := store.CreateSummaryTarget(ctx, "steam", market.SideAsk, collection.DesiredEnabled)
+	bidTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideBid, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, _, err := store.CreateCatalogRun(ctx, catalogTarget.ID(), catalogTarget.SwitchVersion(), empty)
+	pending, _, err := store.CreateSummaryRun(ctx, askTarget.ID(), askTarget.SwitchVersion(), empty)
 	if err != nil {
 		t.Fatal(err)
 	}
-	running, _, err := store.CreateSummaryRun(ctx, summaryTarget.ID(), 730, summaryTarget.SwitchVersion(), empty)
+	running, _, err := store.CreateSummaryRun(ctx, bidTarget.ID(), bidTarget.SwitchVersion(), empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +282,7 @@ func testCollectionActiveRuns(t *testing.T, dsn string) {
 		t.Fatalf("terminal runs must leave the active set, got %+v err=%v", active, err)
 	}
 	// 恢复后可以重新建立运行。
-	if _, created, err := store.CreateCatalogRun(ctx, catalogTarget.ID(), catalogTarget.SwitchVersion(), empty); err != nil || !created {
+	if _, created, err := store.CreateSummaryRun(ctx, askTarget.ID(), askTarget.SwitchVersion(), empty); err != nil || !created {
 		t.Fatalf("run after recovery created=%v err=%v", created, err)
 	}
 }
@@ -368,20 +361,16 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 	ctx := t.Context()
 	empty := mustCollectionCursor(t, nil)
 
-	summary, err := store.CreateSummaryTarget(ctx, "buff", market.SideAsk, collection.DesiredEnabled)
+	summary, err := store.CreateSummaryTarget(ctx, "buff", 730, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, created, err := store.CreateSummaryRun(ctx, summary.ID(), 730, summary.SwitchVersion(), empty)
+	first, created, err := store.CreateSummaryRun(ctx, summary.ID(), summary.SwitchVersion(), empty)
 	if err != nil || !created {
 		t.Fatalf("first summary run = %+v created=%v err=%v", first, created, err)
 	}
-	second, created, err := store.CreateSummaryRun(ctx, summary.ID(), 252490, summary.SwitchVersion(), empty)
-	if err != nil || !created || second.RunSequence() != first.RunSequence()+1 {
-		t.Fatalf("second app run = %+v created=%v err=%v", second, created, err)
-	}
-	if repeated, created, err := store.CreateSummaryRun(ctx, summary.ID(), 730, summary.SwitchVersion(), empty); err != nil || created || repeated.ID() != first.ID() {
-		t.Fatalf("same app active = %+v created=%v err=%v", repeated, created, err)
+	if repeated, created, err := store.CreateSummaryRun(ctx, summary.ID(), summary.SwitchVersion(), empty); err != nil || created || repeated.ID() != first.ID() {
+		t.Fatalf("active run retry = %+v created=%v err=%v", repeated, created, err)
 	}
 
 	const workers = 8
@@ -399,7 +388,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		go func() {
 			defer group.Done()
 			<-start
-			target, err := store.CreateCatalogTarget(ctx, 440, time.Minute, collection.DesiredEnabled)
+			target, err := store.CreateSummaryTarget(ctx, "steam", 440, market.SideAsk, collection.DesiredEnabled)
 			targetResults <- createResult{target: target, err: err}
 		}()
 	}
@@ -418,7 +407,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		}
 	}
 
-	concurrentTarget, err := store.CreateSummaryTarget(ctx, "steam", market.SideBid, collection.DesiredEnabled)
+	concurrentTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideBid, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +418,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		go func() {
 			defer group.Done()
 			<-start
-			run, created, err := store.CreateSummaryRun(ctx, concurrentTarget.ID(), 730, concurrentTarget.SwitchVersion(), empty)
+			run, created, err := store.CreateSummaryRun(ctx, concurrentTarget.ID(), concurrentTarget.SwitchVersion(), empty)
 			runResults <- createResult{run: run, created: created, err: err}
 		}()
 	}
@@ -455,7 +444,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		t.Fatalf("created count = %d, want 1", createdCount)
 	}
 
-	casTarget, err := store.CreateCatalogTarget(ctx, 570, time.Minute, collection.DesiredEnabled)
+	casTarget, err := store.CreateSummaryTarget(ctx, "steam", 570, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +455,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 	go func() {
 		defer group.Done()
 		<-start
-		_, err := store.ChangeCatalogPeriod(ctx, casTarget.ID(), casTarget.Revision(), 2*time.Minute)
+		_, err := store.SetTargetDesired(ctx, casTarget.ID(), casTarget.Revision(), collection.DesiredDisabled)
 		casResults <- err
 	}()
 	go func() {
@@ -495,23 +484,23 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		t.Fatalf("CAS race successes=%d conflicts=%d", successes, conflicts)
 	}
 	stored, found, err := store.Target(ctx, casTarget.ID())
-	if err != nil || !found || stored.Revision() != 2 || stored.SwitchVersion() != 1 {
+	if err != nil || !found || stored.Revision() != 2 {
 		t.Fatalf("CAS target = %+v found=%v err=%v", stored, found, err)
 	}
 
-	disabled, err := store.CreateSummaryTarget(ctx, "igxe", market.SideBid, collection.DesiredDisabled)
+	disabled, err := store.CreateSummaryTarget(ctx, "igxe", 730, market.SideBid, collection.DesiredDisabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.CreateSummaryRun(ctx, disabled.ID(), 730, disabled.SwitchVersion(), empty); !errors.Is(err, ErrCollectionTargetDisabled) {
+	if _, _, err := store.CreateSummaryRun(ctx, disabled.ID(), disabled.SwitchVersion(), empty); !errors.Is(err, ErrCollectionTargetDisabled) {
 		t.Fatalf("disabled create error = %v", err)
 	}
 
-	snapshotTarget, err := store.CreateCatalogTarget(ctx, 10, time.Minute, collection.DesiredEnabled)
+	snapshotTarget, err := store.CreateSummaryTarget(ctx, "steam", 10, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotRun, _, err := store.CreateCatalogRun(ctx, snapshotTarget.ID(), snapshotTarget.SwitchVersion(), empty)
+	snapshotRun, _, err := store.CreateSummaryRun(ctx, snapshotTarget.ID(), snapshotTarget.SwitchVersion(), empty)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,11 +567,11 @@ func testCollectionIntegrityErrors(t *testing.T, dsn string) {
 	t.Run("run target mismatch", func(t *testing.T) {
 		store, db := migratedStore(t, dsn)
 		ctx := t.Context()
-		target, err := store.CreateSummaryTarget(ctx, "buff", market.SideBid, collection.DesiredEnabled)
+		target, err := store.CreateSummaryTarget(ctx, "buff", 730, market.SideBid, collection.DesiredEnabled)
 		if err != nil {
 			t.Fatal(err)
 		}
-		run, _, err := store.CreateSummaryRun(ctx, target.ID(), 730, target.SwitchVersion(), mustCollectionCursor(t, nil))
+		run, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,11 +586,11 @@ func testCollectionIntegrityErrors(t *testing.T, dsn string) {
 	t.Run("page gap", func(t *testing.T) {
 		store, db := migratedStore(t, dsn)
 		ctx := t.Context()
-		target, err := store.CreateCatalogTarget(ctx, 730, time.Minute, collection.DesiredEnabled)
+		target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
 		if err != nil {
 			t.Fatal(err)
 		}
-		run, _, err := store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
+		run, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -641,10 +630,10 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 2 WHERE run
 		store, db := migratedStore(t, dsn)
 		ctx := t.Context()
 		const marker = "secretmarker"
-		if _, err := store.CreateSummaryTarget(ctx, marker, market.SideAsk, collection.DesiredEnabled); err != nil {
+		if _, err := store.CreateSummaryTarget(ctx, marker, 730, market.SideAsk, collection.DesiredEnabled); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.CreateSummaryTarget(ctx, marker, market.SideAsk, collection.DesiredDisabled); err != ErrCollectionConflict || strings.Contains(err.Error(), marker) {
+		if _, err := store.CreateSummaryTarget(ctx, marker, 730, market.SideAsk, collection.DesiredDisabled); err != ErrCollectionConflict || strings.Contains(err.Error(), marker) {
 			t.Fatalf("configuration conflict leaked input: %v", err)
 		}
 		if err := db.Close(); err != nil {

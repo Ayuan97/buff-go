@@ -1,6 +1,6 @@
 # 平台接口资料
 
-本目录保存平台采集接口文档、真实入参语义和脱敏后的响应证据。
+
 
 开发调试 Cookie 只允许放在 `platforms/private/<platform>/cookie.md`。该目录必须被 Git 忽略，文件权限必须为 `0600`；接口文档不得记录 Cookie 值、账号标识、完整响应正文或 `Set-Cookie`。
 

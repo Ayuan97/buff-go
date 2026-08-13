@@ -64,13 +64,31 @@ type LastPresent struct {
 	Order       market.WriteOrder
 }
 
+// MarketQuote is one latest attempt joined with catalog identity and last present.
+type MarketQuote struct {
+	ProductID          catalog.ProductID
+	AppID              int64
+	Name               string
+	Platform           string
+	Side               market.Side
+	Status             market.ObservationStatus
+	ReasonCode         string
+	CollectedAt        time.Time
+	SourceTime         *time.Time
+	PresentCents       *market.CNYCents
+	PresentOrderCount  *int64
+	PresentCollectedAt *time.Time
+}
+
 type attemptSnapshot struct {
-	productID   catalog.ProductID
-	status      market.ObservationStatus
-	sourceTime  *time.Time
-	collectedAt time.Time
-	reasonCode  string
-	present     *presentSnapshot
+	productID      catalog.ProductID
+	platformItemID string
+	exactName      string
+	status         market.ObservationStatus
+	sourceTime     *time.Time
+	collectedAt    time.Time
+	reasonCode     string
+	present        *presentSnapshot
 }
 
 type presentSnapshot struct {
@@ -196,6 +214,69 @@ func savePreparedObservationsTx(
 		}
 	}
 	return true, nil
+}
+
+// ListMarketQuotes lists latest attempts with catalog names and last present prices.
+func (s *Store) ListMarketQuotes(ctx context.Context, appid int64, platform string, limit int) ([]MarketQuote, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("PostgreSQL store is required")
+	}
+	if limit < 1 || limit > 500 {
+		return nil, fmt.Errorf("quote limit must be between 1 and 500")
+	}
+	if appid != 0 {
+		if err := validateAppID(appid); err != nil {
+			return nil, err
+		}
+	}
+	if platform != "" {
+		if err := validatePlatform(platform); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT p.product_id, p.appid, p.name, a.platform, a.side, a.status, a.reason_code,
+       a.collected_at, a.source_time,
+       lp.price_cny_cents, lp.order_count, lp.collected_at
+FROM market_latest_attempts a
+JOIN steam_products p ON p.product_id = a.product_id
+LEFT JOIN market_last_present lp
+  ON lp.product_id = a.product_id AND lp.platform = a.platform AND lp.side = a.side
+WHERE ($1 = 0 OR p.appid = $1)
+  AND ($2 = '' OR a.platform = $2)
+ORDER BY p.product_id, a.platform, a.side
+LIMIT $3`, appid, platform, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list market quotes: %w", err)
+	}
+	defer rows.Close()
+	quotes := make([]MarketQuote, 0)
+	for rows.Next() {
+		var quote MarketQuote
+		var sourceTime sql.NullTime
+		var presentCents sql.NullInt64
+		var presentCount sql.NullInt64
+		var presentAt sql.NullTime
+		if err := rows.Scan(
+			&quote.ProductID, &quote.AppID, &quote.Name, &quote.Platform, &quote.Side,
+			&quote.Status, &quote.ReasonCode, &quote.CollectedAt, &sourceTime,
+			&presentCents, &presentCount, &presentAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan market quote: %w", err)
+		}
+		quote.SourceTime = cloneTime(timeFromNull(sourceTime))
+		if presentCents.Valid {
+			cents := market.CNYCents(presentCents.Int64)
+			quote.PresentCents = &cents
+		}
+		quote.PresentOrderCount = int64FromNull(presentCount)
+		quote.PresentCollectedAt = cloneTime(timeFromNull(presentAt))
+		quotes = append(quotes, quote)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list market quotes: %w", err)
+	}
+	return quotes, nil
 }
 
 // LatestAttempt reads the latest explicit state independently of historical price.
@@ -342,11 +423,13 @@ func prepareBatch(batch observationBatch, allowEmpty bool) ([]attemptSnapshot, e
 		}
 
 		snapshot := attemptSnapshot{
-			productID:   attempt.ProductID,
-			status:      attempt.Observation.Status,
-			sourceTime:  normalizedTimePointer(attempt.Observation.SourceTime),
-			collectedAt: normalizePostgresTime(attempt.Observation.CollectedAt),
-			reasonCode:  attempt.ReasonCode,
+			productID:      attempt.ProductID,
+			platformItemID: attempt.PlatformItemID,
+			exactName:      attempt.ExactName,
+			status:         attempt.Observation.Status,
+			sourceTime:     normalizedTimePointer(attempt.Observation.SourceTime),
+			collectedAt:    normalizePostgresTime(attempt.Observation.CollectedAt),
+			reasonCode:     attempt.ReasonCode,
 		}
 		if snapshot.collectedAt.IsZero() || (snapshot.sourceTime != nil && snapshot.sourceTime.IsZero()) {
 			return nil, fmt.Errorf("market observation time is outside PostgreSQL precision")

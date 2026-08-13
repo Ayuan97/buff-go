@@ -3,6 +3,8 @@ package resource
 import (
 	"fmt"
 	"time"
+
+	"buff-go/internal/market"
 )
 
 // CombinationID is the stable identity of one explicit account-node binding.
@@ -70,14 +72,18 @@ func (resources CombinationResources) Validate() error {
 	if resources.Combination.Platform != resources.Account.Platform {
 		return fmt.Errorf("combination platform does not match account")
 	}
-	if resources.Node.AssignedPlatform != resources.Combination.Platform {
-		return fmt.Errorf("combination platform does not match node assignment")
+	if resources.Node.AppID < 1 {
+		return fmt.Errorf("combination node is not assigned to a game")
+	}
+	if _, ok := resources.Node.SideFor(resources.Combination.Platform); !ok {
+		return fmt.Errorf("combination platform is not assigned on the node")
 	}
 	return nil
 }
 
-// ValidateForUse checks whether a current combination can dispatch a request.
-func (resources CombinationResources) ValidateForUse(now time.Time, target TargetRegion) error {
+// ValidateForUse checks whether a current combination can dispatch a request
+// for one game, platform direction, and target region.
+func (resources CombinationResources) ValidateForUse(now time.Time, target TargetRegion, appID int64, side market.Side) error {
 	if err := resources.Validate(); err != nil {
 		return err
 	}
@@ -86,6 +92,15 @@ func (resources CombinationResources) ValidateForUse(now time.Time, target Targe
 	}
 	if now.IsZero() {
 		return fmt.Errorf("acquisition time is required")
+	}
+	if appID < 1 {
+		return fmt.Errorf("appid must be positive")
+	}
+	if side != market.SideBid && side != market.SideAsk {
+		return fmt.Errorf("invalid side %q", side)
+	}
+	if !resources.Node.AssignedTo(appID, resources.Combination.Platform, side) {
+		return fmt.Errorf("access node is not assigned to the requested game direction")
 	}
 	if resources.Account.SessionState != AccountSessionStateValid {
 		return fmt.Errorf("account session is not valid")

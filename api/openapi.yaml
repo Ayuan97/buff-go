@@ -29,6 +29,16 @@ paths:
           $ref: "#/components/responses/Error"
         "415":
           $ref: "#/components/responses/Error"
+  /api/capabilities:
+    get:
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: Control-plane capability flags
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capabilities"
   /api/accounts:
     get:
       operationId: listAccounts
@@ -121,9 +131,376 @@ paths:
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
+  /api/nodes:
+    get:
+      operationId: listNodes
+      responses:
+        "200":
+          description: Credential-safe access nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Node"
+    post:
+      operationId: createNode
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeCreate"
+      responses:
+        "201":
+          description: Node created in validating state; proxy credential is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    get:
+      operationId: getNode
+      responses:
+        "200":
+          description: Credential-safe node
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}/connection:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      operationId: replaceNodeConnection
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeConnectionReplace"
+      responses:
+        "200":
+          description: Connection replaced; node returns to validating
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}/exit:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      operationId: recordNodeExit
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeExit"
+      responses:
+        "200":
+          description: Manual exit evidence recorded; node becomes available when valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}/assign-game:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      operationId: assignNodeGame
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeAssignGame"
+      responses:
+        "200":
+          description: Game quota assigned or cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}/assign-side:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      operationId: assignNodeSide
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeAssignSide"
+      responses:
+        "200":
+          description: Game-platform-side assignment set or cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/nodes/{id}/delete:
+    parameters:
+      - $ref: "#/components/parameters/NodeID"
+    post:
+      operationId: deleteNode
+      security:
+        - controlSession: []
+          csrfToken: []
+      responses:
+        "200":
+          description: Node deleted
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/combinations:
+    get:
+      operationId: listCombinations
+      responses:
+        "200":
+          description: Account-node combinations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Combination"
+    post:
+      operationId: createCombination
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CombinationCreate"
+      responses:
+        "201":
+          description: Combination created; platform is derived from the account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Combination"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/combinations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CombinationID"
+    get:
+      operationId: getCombination
+      responses:
+        "200":
+          description: One account-node combination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Combination"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/combinations/{id}/delete:
+    parameters:
+      - $ref: "#/components/parameters/CombinationID"
+    post:
+      operationId: deleteCombination
+      security:
+        - controlSession: []
+          csrfToken: []
+      responses:
+        "200":
+          description: Combination deleted
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/targets:
+    get:
+      operationId: listTargets
+      responses:
+        "200":
+          description: Summary collection targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Target"
+    post:
+      operationId: createTarget
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetCreate"
+      responses:
+        "201":
+          description: Target created or existing identical target returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/targets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TargetID"
+    get:
+      operationId: getTarget
+      responses:
+        "200":
+          description: One summary target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/targets/{id}/desired:
+    parameters:
+      - $ref: "#/components/parameters/TargetID"
+    post:
+      operationId: setTargetDesired
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetDesired"
+      responses:
+        "200":
+          description: Desired state applied; actual state follows scheduler
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/runs:
+    get:
+      operationId: listRuns
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        "200":
+          description: Recent collection runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Run"
+  /api/quotes:
+    get:
+      operationId: listQuotes
+      parameters:
+        - name: appid
+          in: query
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: platform
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+      responses:
+        "200":
+          description: Latest attempts with last present prices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Quote"
 components:
   parameters:
     AccountID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    NodeID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    CombinationID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    TargetID:
       name: id
       in: path
       required: true
@@ -180,9 +557,44 @@ components:
             - session_too_large
             - invalid_json
             - body_not_allowed
-            - credential_store_unavailable
             - resource_storage_unavailable
             - resource_integrity
+            - resource_error
+            - not_found
+            - invalid_account
+            - account_conflict
+            - invalid_node_id
+            - node_not_found
+            - node_occupied
+            - node_in_use
+            - node_revision_conflict
+            - node_assignment_conflict
+            - node_name_conflict
+            - invalid_node
+            - invalid_exit_address
+            - invalid_combination_id
+            - combination_not_found
+            - combination_occupied
+            - combination_incompatible
+            - combination_conflict
+            - invalid_combination
+            - resource_in_use
+            - invalid_target_id
+            - target_not_found
+            - collection_not_found
+            - collection_conflict
+            - invalid_collection
+            - collection_storage_unavailable
+            - collection_error
+            - invalid_limit
+            - invalid_appid
+            - invalid_quotes
+    Capabilities:
+      type: object
+      additionalProperties: false
+      required: [detail]
+      properties:
+        detail: {type: string, enum: [detail_unavailable]}
     Account:
       type: object
       additionalProperties: false
@@ -209,6 +621,173 @@ components:
       properties:
         expected_revision: {type: integer, format: int64, minimum: 1}
         session: {type: string, writeOnly: true, minLength: 1, maxLength: 262144}
+    Node:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, region, egress_mode, state, egress_revision, assignment_revision, sides, has_proxy_credential]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        name: {type: string}
+        kind: {type: string, enum: [direct, proxy]}
+        region: {type: string, enum: [domestic, foreign, hongkong]}
+        egress_mode: {type: string, enum: [static, sticky]}
+        state: {type: string, enum: [validating, available, unavailable]}
+        egress_revision: {type: integer, format: int64, minimum: 1}
+        assignment_revision: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 1}
+        sides:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeSide"
+        has_proxy_credential: {type: boolean}
+        sticky_session_valid_until: {type: string, format: date-time}
+        exit:
+          $ref: "#/components/schemas/NodeExitView"
+    NodeSide:
+      type: object
+      additionalProperties: false
+      required: [platform, side]
+      properties:
+        platform: {type: string}
+        side: {type: string, enum: [bid, ask]}
+    NodeExitView:
+      type: object
+      additionalProperties: false
+      required: [address, verified_at, valid_until]
+      properties:
+        address: {type: string}
+        verified_at: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+    NodeCreate:
+      type: object
+      additionalProperties: false
+      required: [name, kind, region, egress_mode]
+      properties:
+        name: {type: string}
+        kind: {type: string, enum: [direct, proxy]}
+        region: {type: string, enum: [domestic, foreign, hongkong]}
+        egress_mode: {type: string, enum: [static, sticky]}
+        sticky_session_valid_until: {type: string, format: date-time}
+        proxy_credential: {type: string, writeOnly: true}
+    NodeConnectionReplace:
+      type: object
+      additionalProperties: false
+      required: [expected_egress_revision, kind, region, egress_mode]
+      properties:
+        expected_egress_revision: {type: integer, format: int64, minimum: 1}
+        kind: {type: string, enum: [direct, proxy]}
+        region: {type: string, enum: [domestic, foreign, hongkong]}
+        egress_mode: {type: string, enum: [static, sticky]}
+        sticky_session_valid_until: {type: string, format: date-time}
+        proxy_credential: {type: string, writeOnly: true}
+    NodeExit:
+      type: object
+      additionalProperties: false
+      required: [expected_egress_revision, address, valid_until]
+      properties:
+        expected_egress_revision: {type: integer, format: int64, minimum: 1}
+        address: {type: string}
+        valid_until: {type: string, format: date-time}
+    NodeAssignGame:
+      type: object
+      additionalProperties: false
+      required: [expected_assignment_revision]
+      properties:
+        expected_assignment_revision: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 0}
+    NodeAssignSide:
+      type: object
+      additionalProperties: false
+      required: [expected_assignment_revision, platform]
+      properties:
+        expected_assignment_revision: {type: integer, format: int64, minimum: 1}
+        platform: {type: string}
+        side: {type: string, enum: [bid, ask]}
+    Combination:
+      type: object
+      additionalProperties: false
+      required: [id, platform, account_id, node_id]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        platform: {type: string}
+        account_id: {type: integer, format: int64, minimum: 1}
+        node_id: {type: integer, format: int64, minimum: 1}
+    CombinationCreate:
+      type: object
+      additionalProperties: false
+      required: [account_id, node_id]
+      properties:
+        account_id: {type: integer, format: int64, minimum: 1}
+        node_id: {type: integer, format: int64, minimum: 1}
+    Target:
+      type: object
+      additionalProperties: false
+      required: [id, revision, platform, appid, side, desired, actual, switch_version, changed_at]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        revision: {type: integer, format: int64, minimum: 1}
+        platform: {type: string}
+        appid: {type: integer, format: int64, minimum: 1}
+        side: {type: string, enum: [bid, ask]}
+        desired: {type: string, enum: [enabled, disabled]}
+        actual: {type: string, enum: [starting, waiting, running, blocked, stopping, stopped, error]}
+        switch_version: {type: integer, format: int64, minimum: 1}
+        reason: {type: string}
+        recovery: {type: string}
+        recheck_at: {type: string, format: date-time}
+        changed_at: {type: string, format: date-time}
+    TargetCreate:
+      type: object
+      additionalProperties: false
+      required: [platform, appid, side]
+      properties:
+        platform: {type: string}
+        appid: {type: integer, format: int64, minimum: 1}
+        side: {type: string, enum: [bid, ask]}
+        desired: {type: string, enum: [enabled, disabled]}
+    TargetDesired:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, desired]
+      properties:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        desired: {type: string, enum: [enabled, disabled]}
+    Run:
+      type: object
+      additionalProperties: false
+      required: [id, task_type, platform, appid, state, last_page_sequence, created_at]
+      properties:
+        id: {type: integer, format: int64, minimum: 1}
+        target_id: {type: integer, format: int64, minimum: 1}
+        task_type: {type: string, enum: [summary, detail]}
+        platform: {type: string}
+        appid: {type: integer, format: int64, minimum: 1}
+        side: {type: string, enum: [bid, ask]}
+        state: {type: string, enum: [pending, running, succeeded, failed, stopped]}
+        completeness: {type: string, enum: [complete, partial]}
+        reason: {type: string}
+        cursor: {type: string}
+        last_page_sequence: {type: integer, format: int64, minimum: 0}
+        created_at: {type: string, format: date-time}
+        started_at: {type: string, format: date-time}
+        finished_at: {type: string, format: date-time}
+    Quote:
+      type: object
+      additionalProperties: false
+      required: [product_id, appid, name, platform, side, status, collected_at]
+      properties:
+        product_id: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 1}
+        name: {type: string}
+        platform: {type: string}
+        side: {type: string, enum: [bid, ask]}
+        status: {type: string, enum: [present, empty, unavailable, failed]}
+        reason_code: {type: string}
+        collected_at: {type: string, format: date-time}
+        source_time: {type: string, format: date-time}
+        present_cents: {type: integer, format: int64, minimum: 0}
+        present_order_count: {type: integer, format: int64, minimum: 0}
+        present_collected_at: {type: string, format: date-time}
   responses:
     Error:
       description: Request rejected without reflecting request data or credentials

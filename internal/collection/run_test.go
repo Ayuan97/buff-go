@@ -17,20 +17,6 @@ func mustCursor(t *testing.T, value string) Cursor {
 	return cursor
 }
 
-func catalogRunInput(t *testing.T) CatalogRunInput {
-	t.Helper()
-	return CatalogRunInput{
-		ID:            1,
-		TargetID:      2,
-		AppID:         730,
-		SwitchVersion: 3,
-		RunSequence:   4,
-		State:         RunPending,
-		CurrentCursor: mustCursor(t, "first"),
-		CreatedAt:     targetTime(0),
-	}
-}
-
 func summaryRunInput(t *testing.T) SummaryRunInput {
 	t.Helper()
 	return SummaryRunInput{
@@ -61,42 +47,25 @@ func detailRunInput(t *testing.T) DetailRunInput {
 }
 
 func TestRunConstructorsEnforceTaskShapes(t *testing.T) {
-	catalogCases := []struct {
-		name   string
-		mutate func(*CatalogRunInput)
-	}{
-		{"zero id", func(input *CatalogRunInput) { input.ID = 0 }},
-		{"zero target", func(input *CatalogRunInput) { input.TargetID = 0 }},
-		{"zero appid", func(input *CatalogRunInput) { input.AppID = 0 }},
-		{"zero switch", func(input *CatalogRunInput) { input.SwitchVersion = 0 }},
-		{"zero sequence", func(input *CatalogRunInput) { input.RunSequence = 0 }},
-		{"negative last page", func(input *CatalogRunInput) { input.LastPageSequence = -1 }},
-		{"pending page", func(input *CatalogRunInput) {
-			input.LastPageSequence = 1
-			started := targetTime(0)
-			input.StartedAt = &started
-		}},
-		{"non UTC created", func(input *CatalogRunInput) { input.CreatedAt = input.CreatedAt.In(time.FixedZone("offset", 0)) }},
-		{"nanosecond created", func(input *CatalogRunInput) { input.CreatedAt = input.CreatedAt.Add(time.Nanosecond) }},
-	}
-	for _, test := range catalogCases {
-		t.Run("catalog "+test.name, func(t *testing.T) {
-			input := catalogRunInput(t)
-			test.mutate(&input)
-			if _, err := NewCatalogRun(input); err == nil {
-				t.Fatal("NewCatalogRun() accepted invalid input")
-			}
-		})
-	}
-
 	summaryCases := []struct {
 		name   string
 		mutate func(*SummaryRunInput)
 	}{
+		{"zero id", func(input *SummaryRunInput) { input.ID = 0 }},
+		{"zero target", func(input *SummaryRunInput) { input.TargetID = 0 }},
+		{"zero appid", func(input *SummaryRunInput) { input.AppID = 0 }},
+		{"zero switch", func(input *SummaryRunInput) { input.SwitchVersion = 0 }},
+		{"zero sequence", func(input *SummaryRunInput) { input.RunSequence = 0 }},
 		{"invalid platform", func(input *SummaryRunInput) { input.Platform = "BUFF" }},
 		{"invalid side", func(input *SummaryRunInput) { input.Side = "sell" }},
-		{"zero appid", func(input *SummaryRunInput) { input.AppID = 0 }},
-		{"zero target", func(input *SummaryRunInput) { input.TargetID = 0 }},
+		{"negative last page", func(input *SummaryRunInput) { input.LastPageSequence = -1 }},
+		{"pending page", func(input *SummaryRunInput) {
+			input.LastPageSequence = 1
+			started := targetTime(0)
+			input.StartedAt = &started
+		}},
+		{"non UTC created", func(input *SummaryRunInput) { input.CreatedAt = input.CreatedAt.In(time.FixedZone("offset", 0)) }},
+		{"nanosecond created", func(input *SummaryRunInput) { input.CreatedAt = input.CreatedAt.Add(time.Nanosecond) }},
 	}
 	for _, test := range summaryCases {
 		t.Run("summary "+test.name, func(t *testing.T) {
@@ -162,23 +131,23 @@ func TestRunLifecycleShapeMatrix(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			input := catalogRunInput(t)
+			input := summaryRunInput(t)
 			input.State = test.state
 			input.Completeness = test.completeness
 			input.Reason = test.reason
 			input.StartedAt = test.startedAt
 			input.FinishedAt = test.finishedAt
 			input.LastPageSequence = test.lastPage
-			_, err := NewCatalogRun(input)
+			_, err := NewSummaryRun(input)
 			if (err != nil) != test.wantErr {
-				t.Fatalf("NewCatalogRun() error = %v, wantErr %v", err, test.wantErr)
+				t.Fatalf("NewSummaryRun() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
 	}
 }
 
 func TestRunTransitionsAndTerminalImmutability(t *testing.T) {
-	pending, err := NewCatalogRun(catalogRunInput(t))
+	pending, err := NewSummaryRun(summaryRunInput(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +222,7 @@ func TestRunTransitionsAndTerminalImmutability(t *testing.T) {
 }
 
 func TestRunRejectsTimestampRegression(t *testing.T) {
-	input := catalogRunInput(t)
+	input := summaryRunInput(t)
 	started := targetTime(2)
 	finished := targetTime(1)
 	input.State = RunFailed
@@ -261,11 +230,11 @@ func TestRunRejectsTimestampRegression(t *testing.T) {
 	input.Reason = RunReasonTimeout
 	input.StartedAt = &started
 	input.FinishedAt = &finished
-	if _, err := NewCatalogRun(input); err == nil {
-		t.Fatal("NewCatalogRun accepted finished_at before started_at")
+	if _, err := NewSummaryRun(input); err == nil {
+		t.Fatal("NewSummaryRun accepted finished_at before started_at")
 	}
 
-	pending, err := NewCatalogRun(catalogRunInput(t))
+	pending, err := NewSummaryRun(summaryRunInput(t))
 	if err != nil {
 		t.Fatal(err)
 	}

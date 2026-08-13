@@ -77,7 +77,7 @@ func TestExecuteSignalHelper(t *testing.T) {
 	if os.Getenv("BUFFGO_SIGNAL_HELPER") != "1" {
 		return
 	}
-	code := execute([]string{"-config", "unused.toml"}, os.Stderr, signal.NotifyContext,
+	code := execute([]string{"-api-listen", "127.0.0.1:0", "-pg-dsn", "postgres://local/buffgo"}, os.Stderr, signal.NotifyContext,
 		func(ctx context.Context, _ app.Options) error {
 			_, _ = fmt.Fprintln(os.Stdout, "ready")
 			<-ctx.Done()

@@ -15,10 +15,19 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 5 {
-		t.Fatalf("migration count = %d, want 5", len(migrations))
+	if len(migrations) != 8 {
+		t.Fatalf("migration count = %d, want 8", len(migrations))
 	}
-	wantVersions := []string{"000001_catalog_market", "000002_resources", "000003_resource_combinations", "000004_rate_limits", "000005_collection"}
+	wantVersions := []string{
+		"000001_catalog_market",
+		"000002_resources",
+		"000003_resource_combinations",
+		"000004_rate_limits",
+		"000005_collection",
+		"000006_plaintext_credentials",
+		"000007_game_direction_summary",
+		"000008_steam_product_identity",
+	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
 			t.Fatalf("version[%d] = %q, want %q", index, current.Version, wantVersions[index])
@@ -538,6 +547,53 @@ func TestStorageMigrationMetadataIsIndependent(t *testing.T) {
 	if strings.Contains(metadata, "schema_migrations") {
 		t.Fatal("storage migrations must not reuse the legacy migration table")
 	}
+}
+
+func TestGameDirectionSummaryMigrationConstraints(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[6].Version != "000007_game_direction_summary" {
+		t.Fatalf("version[6] = %q", migrations[6].Version)
+	}
+	compact := compactSQL(migrations[6].SQL)
+	for _, required := range []string{
+		"drop column assigned_platform",
+		"create table node_direction_assignments",
+		"foreign key (node_id, platform) references node_direction_assignments (node_id, platform)",
+		"kind = 'summary' and appid is not null and appid > 0 and side is not null and side in ('bid', 'ask') and period_microseconds is null",
+		"drop index collection_targets_catalog_identity_key",
+		"create unique index collection_targets_summary_identity_key on collection_targets (platform, appid, side) where kind = 'summary'",
+		"drop index collection_runs_active_catalog_key",
+		"create unique index collection_runs_active_summary_key on collection_runs (target_id) where kind = 'summary' and status in ('pending', 'running')",
+		"kind in ('summary', 'detail')",
+		"check (kind = 'summary')",
+	} {
+		assertContains(t, compact, required)
+	}
+	for _, forbidden := range []string{
+		"unique (node_id, assigned_platform)",
+		"references access_nodes (node_id, assigned_platform)",
+		"create unique index collection_targets_catalog_identity_key",
+		"on collection_runs (target_id, appid)",
+	} {
+		if strings.Contains(compact, forbidden) {
+			t.Fatalf("000007 still contains %q", forbidden)
+		}
+	}
+}
+
+func TestSteamProductIdentityMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[7].Version != "000008_steam_product_identity" {
+		t.Fatalf("version[7] = %q", migrations[7].Version)
+	}
+	compact := compactSQL(migrations[7].SQL)
+	assertContains(t, compact, "create unique index steam_products_appid_name_key on steam_products (appid, name)")
 }
 
 func tableDefinition(t *testing.T, sqlText, table string) string {

@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"buff-go/internal/market"
 )
 
 var (
@@ -36,14 +38,14 @@ type CoordinatorRepository interface {
 	DeleteNode(context.Context, NodeID) error
 	ReplaceAccountSession(context.Context, AccountID, int64, []byte) (PlatformAccount, error)
 	OpenAccountSessionAt(context.Context, AccountID, int64) ([]byte, error)
+	RecordAccountSessionCheck(context.Context, AccountID, int64, AccountSessionState, time.Time) (PlatformAccount, error)
 	ReplaceNodeConnection(context.Context, NodeID, int64, NodeConnectionInput) (AccessNode, error)
 	BeginNodeRevalidation(context.Context, NodeID, int64) (AccessNode, error)
-	OpenNodeProxyCredentialAt(context.Context, NodeID, int64, int64, Platform) ([]byte, error)
+	OpenNodeProxyCredentialAt(context.Context, NodeID, int64, int64) ([]byte, error)
 	RecordNodeExit(context.Context, NodeID, int64, netip.Addr, time.Time, time.Time) (AccessNode, error)
 	MarkNodeUnavailable(context.Context, NodeID, int64) (AccessNode, error)
-	AssignNodePlatform(context.Context, NodeID, int64, Platform) (AccessNode, error)
-	UnassignNodePlatform(context.Context, NodeID, int64, Platform) (AccessNode, error)
-	ReassignNodePlatform(context.Context, NodeID, int64, Platform, Platform) (AccessNode, error)
+	AssignNodeGame(context.Context, NodeID, int64, int64) (AccessNode, error)
+	AssignNodeSide(context.Context, NodeID, int64, Platform, market.Side) (AccessNode, error)
 }
 
 // ComponentID identifies one runtime cancellation generation. It is valid only
@@ -204,6 +206,13 @@ func (mutex contextMutex) Unlock() {
 	mutex <- struct{}{}
 }
 
+// nodePlatformKey is the combination occupancy identity: one node may run
+// different platforms in parallel, but the same platform remains exclusive.
+type nodePlatformKey struct {
+	nodeID   NodeID
+	platform Platform
+}
+
 // Coordinator serializes runtime occupations and guarded configuration
 // mutations for the supported single-process architecture.
 type Coordinator struct {
@@ -217,6 +226,7 @@ type Coordinator struct {
 	components        map[ComponentID]*componentState
 	leases            map[LeaseToken]leaseRecord
 	accounts          map[AccountID]LeaseToken
+	nodePlatforms     map[nodePlatformKey]LeaseToken
 	nodes             map[NodeID]LeaseToken
 	combinations      map[CombinationID]LeaseToken
 }
@@ -227,13 +237,14 @@ func NewCoordinator(repository CoordinatorRepository) (*Coordinator, error) {
 		return nil, fmt.Errorf("nil resource coordinator repository")
 	}
 	coordinator := &Coordinator{
-		repository:   repository,
-		coordMu:      newContextMutex(),
-		components:   make(map[ComponentID]*componentState),
-		leases:       make(map[LeaseToken]leaseRecord),
-		accounts:     make(map[AccountID]LeaseToken),
-		nodes:        make(map[NodeID]LeaseToken),
-		combinations: make(map[CombinationID]LeaseToken),
+		repository:    repository,
+		coordMu:       newContextMutex(),
+		components:    make(map[ComponentID]*componentState),
+		leases:        make(map[LeaseToken]leaseRecord),
+		accounts:      make(map[AccountID]LeaseToken),
+		nodePlatforms: make(map[nodePlatformKey]LeaseToken),
+		nodes:         make(map[NodeID]LeaseToken),
+		combinations:  make(map[CombinationID]LeaseToken),
 	}
 	if _, err := rand.Read(coordinator.epoch[:]); err != nil {
 		return nil, fmt.Errorf("create resource coordinator epoch: %w", err)
@@ -258,14 +269,17 @@ func (coordinator *Coordinator) RegisterComponent() (ComponentID, error) {
 	return id, nil
 }
 
-// AcquireCombination re-reads one authoritative combination and atomically
-// occupies its combination, account, and node identities.
+// AcquireCombination re-reads one authoritative combination and occupies its
+// combination, account, and (node, platform) identities. Maintenance that
+// holds the whole node still blocks this path.
 func (coordinator *Coordinator) AcquireCombination(
 	ctx context.Context,
 	component ComponentID,
 	id CombinationID,
 	target TargetRegion,
 	now time.Time,
+	appID int64,
+	side market.Side,
 ) (Lease, error) {
 	if coordinator == nil {
 		return Lease{}, fmt.Errorf("nil resource coordinator")
@@ -306,7 +320,7 @@ func (coordinator *Coordinator) AcquireCombination(
 	if resources.Combination.ID != id {
 		return Lease{}, ErrCoordinatorIntegrity
 	}
-	if err := resources.ValidateForUse(now, target); err != nil {
+	if err := resources.ValidateForUse(now, target, appID, side); err != nil {
 		return Lease{}, fmt.Errorf("%w: %w", ErrResourceUnusable, err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -325,6 +339,10 @@ func (coordinator *Coordinator) AcquireCombination(
 		return Lease{}, fmt.Errorf("%w: account", ErrResourceOccupied)
 	}
 	if _, occupied := coordinator.nodes[resources.Node.ID]; occupied {
+		return Lease{}, fmt.Errorf("%w: node", ErrResourceOccupied)
+	}
+	platformKey := nodePlatformKey{nodeID: resources.Node.ID, platform: resources.Combination.Platform}
+	if _, occupied := coordinator.nodePlatforms[platformKey]; occupied {
 		return Lease{}, fmt.Errorf("%w: node", ErrResourceOccupied)
 	}
 
@@ -385,7 +403,7 @@ func (coordinator *Coordinator) AcquireNodeMaintenance(ctx context.Context, comp
 	if err != nil {
 		return Lease{}, err
 	}
-	if _, occupied := coordinator.nodes[id]; occupied {
+	if coordinator.nodeBusy(id) {
 		return Lease{}, fmt.Errorf("%w: node", ErrResourceOccupied)
 	}
 
@@ -406,10 +424,7 @@ func (coordinator *Coordinator) Release(token LeaseToken) error {
 		return ErrLeaseNotHeld
 	}
 	component, found := coordinator.components[record.lease.Component]
-	if !found || !ownsTokenSet(component.leases, token) ||
-		!ownsToken(coordinator.nodes, record.lease.Snapshot.NodeID, token) ||
-		(record.lease.Snapshot.AccountID != 0 && !ownsToken(coordinator.accounts, record.lease.Snapshot.AccountID, token)) ||
-		(record.lease.Snapshot.CombinationID != 0 && !ownsToken(coordinator.combinations, record.lease.Snapshot.CombinationID, token)) {
+	if !found || !ownsTokenSet(component.leases, token) || !coordinator.leaseOwnsKeysLocked(record.lease, token) {
 		coordinator.ownerMu.Unlock()
 		return ErrCoordinatorIntegrity
 	}
@@ -417,13 +432,7 @@ func (coordinator *Coordinator) Release(token LeaseToken) error {
 
 	delete(coordinator.leases, token)
 	delete(component.leases, token)
-	delete(coordinator.nodes, record.lease.Snapshot.NodeID)
-	if record.lease.Snapshot.AccountID != 0 {
-		delete(coordinator.accounts, record.lease.Snapshot.AccountID)
-	}
-	if record.lease.Snapshot.CombinationID != 0 {
-		delete(coordinator.combinations, record.lease.Snapshot.CombinationID)
-	}
+	coordinator.clearLeaseKeysLocked(record.lease)
 	if component.closing && len(component.leases) == 0 {
 		close(component.drain)
 		delete(coordinator.components, record.lease.Component)
@@ -526,8 +535,7 @@ func (coordinator *Coordinator) DeleteNode(ctx context.Context, id NodeID) error
 		return err
 	}
 	return coordinator.withIdle(ctx, "node", func() bool {
-		_, occupied := coordinator.nodes[id]
-		return occupied
+		return coordinator.nodeBusy(id)
 	}, func() error {
 		return coordinator.repository.DeleteNode(ctx, id)
 	})
@@ -557,8 +565,7 @@ func (coordinator *Coordinator) ReplaceNodeConnection(ctx context.Context, id No
 	}
 	var node AccessNode
 	err := coordinator.withIdle(ctx, "node", func() bool {
-		_, occupied := coordinator.nodes[id]
-		return occupied
+		return coordinator.nodeBusy(id)
 	}, func() error {
 		var err error
 		node, err = coordinator.repository.ReplaceNodeConnection(ctx, id, expectedRevision, input)
@@ -635,6 +642,28 @@ func (coordinator *Coordinator) OpenAccountSession(ctx context.Context, token Le
 	return plaintext, nil
 }
 
+// RecordAccountSessionCheck records a valid or invalid check for the account
+// occupied by an exact combination lease.
+func (coordinator *Coordinator) RecordAccountSessionCheck(ctx context.Context, token LeaseToken, state AccountSessionState, checkedAt time.Time) (PlatformAccount, error) {
+	record, operationContext, stop, err := coordinator.leaseOperation(ctx, token, LeaseKindCombination)
+	if err != nil {
+		return PlatformAccount{}, err
+	}
+	defer stop()
+	snapshot := record.lease.Snapshot
+	account, err := coordinator.repository.RecordAccountSessionCheck(operationContext, snapshot.AccountID, snapshot.SessionRevision, state, checkedAt)
+	if err != nil {
+		if cause := context.Cause(operationContext); cause != nil {
+			return PlatformAccount{}, cause
+		}
+		return PlatformAccount{}, err
+	}
+	if cause := context.Cause(operationContext); cause != nil {
+		return account, cause
+	}
+	return account, nil
+}
+
 // OpenNodeProxyCredential opens connection material only for an exact current
 // combination or node-maintenance lease generation.
 func (coordinator *Coordinator) OpenNodeProxyCredential(ctx context.Context, token LeaseToken) ([]byte, error) {
@@ -654,7 +683,6 @@ func (coordinator *Coordinator) OpenNodeProxyCredential(ctx context.Context, tok
 		snapshot.NodeID,
 		snapshot.EgressRevision,
 		snapshot.AssignmentRevision,
-		snapshot.Platform,
 	)
 	if err != nil {
 		wipeBytes(plaintext)
@@ -730,58 +758,37 @@ func (coordinator *Coordinator) MarkNodeUnavailable(ctx context.Context, token L
 	return node, nil
 }
 
-// AssignNodePlatform applies an assignment CAS while the node is idle.
-func (coordinator *Coordinator) AssignNodePlatform(ctx context.Context, id NodeID, expectedRevision int64, platform Platform) (AccessNode, error) {
-	if err := validateAssignmentInput(id, expectedRevision, platform); err != nil {
+// AssignNodeGame applies a game CAS while the node is idle. appID 0 clears it.
+func (coordinator *Coordinator) AssignNodeGame(ctx context.Context, id NodeID, expectedRevision int64, appID int64) (AccessNode, error) {
+	if err := validateExpectedRevision(id.Validate(), expectedRevision); err != nil {
 		return AccessNode{}, err
+	}
+	if appID < 0 {
+		return AccessNode{}, fmt.Errorf("appid must be non-negative")
 	}
 	var node AccessNode
 	err := coordinator.withIdle(ctx, "node", func() bool {
-		_, occupied := coordinator.nodes[id]
-		return occupied
+		return coordinator.nodeBusy(id)
 	}, func() error {
 		var err error
-		node, err = coordinator.repository.AssignNodePlatform(ctx, id, expectedRevision, platform)
+		node, err = coordinator.repository.AssignNodeGame(ctx, id, expectedRevision, appID)
 		return err
 	})
 	return node, err
 }
 
-// UnassignNodePlatform applies an assignment CAS while the node is idle.
-func (coordinator *Coordinator) UnassignNodePlatform(ctx context.Context, id NodeID, expectedRevision int64, expectedPlatform Platform) (AccessNode, error) {
-	if err := validateAssignmentInput(id, expectedRevision, expectedPlatform); err != nil {
+// AssignNodeSide applies a direction CAS while the node is idle. Empty side
+// deletes that platform row.
+func (coordinator *Coordinator) AssignNodeSide(ctx context.Context, id NodeID, expectedRevision int64, platform Platform, side market.Side) (AccessNode, error) {
+	if err := validateNodeSideInput(id, expectedRevision, platform, side); err != nil {
 		return AccessNode{}, err
 	}
 	var node AccessNode
 	err := coordinator.withIdle(ctx, "node", func() bool {
-		_, occupied := coordinator.nodes[id]
-		return occupied
+		return coordinator.nodeBusy(id)
 	}, func() error {
 		var err error
-		node, err = coordinator.repository.UnassignNodePlatform(ctx, id, expectedRevision, expectedPlatform)
-		return err
-	})
-	return node, err
-}
-
-// ReassignNodePlatform atomically changes one observed assignment while idle.
-func (coordinator *Coordinator) ReassignNodePlatform(ctx context.Context, id NodeID, expectedRevision int64, expectedPlatform, newPlatform Platform) (AccessNode, error) {
-	if err := validateAssignmentInput(id, expectedRevision, expectedPlatform); err != nil {
-		return AccessNode{}, err
-	}
-	if err := newPlatform.Validate(); err != nil {
-		return AccessNode{}, err
-	}
-	if expectedPlatform == newPlatform {
-		return AccessNode{}, fmt.Errorf("new platform must differ from expected platform")
-	}
-	var node AccessNode
-	err := coordinator.withIdle(ctx, "node", func() bool {
-		_, occupied := coordinator.nodes[id]
-		return occupied
-	}, func() error {
-		var err error
-		node, err = coordinator.repository.ReassignNodePlatform(ctx, id, expectedRevision, expectedPlatform, newPlatform)
+		node, err = coordinator.repository.AssignNodeSide(ctx, id, expectedRevision, platform, side)
 		return err
 	})
 	return node, err
@@ -831,11 +838,20 @@ func validateExpectedRevision(identityErr error, revision int64) error {
 	return nil
 }
 
-func validateAssignmentInput(id NodeID, revision int64, platform Platform) error {
+func validateNodeSideInput(id NodeID, revision int64, platform Platform, side market.Side) error {
 	if err := validateExpectedRevision(id.Validate(), revision); err != nil {
 		return err
 	}
-	return platform.Validate()
+	if err := platform.Validate(); err != nil {
+		return err
+	}
+	if side == "" {
+		return nil
+	}
+	if side != market.SideBid && side != market.SideAsk {
+		return fmt.Errorf("invalid assignment side %q", side)
+	}
+	return nil
 }
 
 func (coordinator *Coordinator) leaseOperation(ctx context.Context, token LeaseToken, allowedKinds ...LeaseKind) (leaseRecord, context.Context, func(), error) {
@@ -913,8 +929,7 @@ func (coordinator *Coordinator) updateLeaseNodeSnapshot(token LeaseToken, expect
 	}
 	if node.ID != previous.NodeID ||
 		node.EgressRevision != wantEgressRevision ||
-		node.AssignmentRevision != previous.AssignmentRevision ||
-		node.AssignedPlatform != previous.Platform {
+		node.AssignmentRevision != previous.AssignmentRevision {
 		return ErrCoordinatorIntegrity
 	}
 	coordinator.ownerMu.Lock()
@@ -937,6 +952,7 @@ func (coordinator *Coordinator) updateLeaseNodeSnapshot(token LeaseToken, expect
 	}
 	updated := nodeLeaseSnapshot(node)
 	updated.CombinationID = previous.CombinationID
+	updated.Platform = previous.Platform
 	updated.AccountID = previous.AccountID
 	updated.SessionRevision = previous.SessionRevision
 	record.lease.Snapshot = updated
@@ -952,14 +968,12 @@ func (coordinator *Coordinator) leaseRecordLocked(token LeaseToken) (leaseRecord
 	}
 	component, found := coordinator.components[record.lease.Component]
 	if !found || component != record.lease.Component.state || !ownsTokenSet(component.leases, token) ||
-		record.lease.Snapshot.NodeID == 0 || !ownsToken(coordinator.nodes, record.lease.Snapshot.NodeID, token) {
+		record.lease.Snapshot.NodeID == 0 || !coordinator.leaseOwnsKeysLocked(record.lease, token) {
 		return leaseRecord{}, ErrCoordinatorIntegrity
 	}
 	switch record.lease.Kind {
 	case LeaseKindCombination:
-		if record.lease.Snapshot.AccountID == 0 || record.lease.Snapshot.CombinationID == 0 ||
-			!ownsToken(coordinator.accounts, record.lease.Snapshot.AccountID, token) ||
-			!ownsToken(coordinator.combinations, record.lease.Snapshot.CombinationID, token) {
+		if record.lease.Snapshot.AccountID == 0 || record.lease.Snapshot.CombinationID == 0 || record.lease.Snapshot.Platform == "" {
 			return leaseRecord{}, ErrCoordinatorIntegrity
 		}
 	case LeaseKindNodeMaintenance:
@@ -1010,14 +1024,51 @@ func (coordinator *Coordinator) newLeaseLocked(parent context.Context, state *co
 	}
 	coordinator.leases[token] = leaseRecord{lease: lease, cancel: cancel}
 	state.leases[token] = struct{}{}
-	coordinator.nodes[snapshot.NodeID] = token
-	if snapshot.AccountID != 0 {
+	switch kind {
+	case LeaseKindCombination:
+		coordinator.nodePlatforms[nodePlatformKey{nodeID: snapshot.NodeID, platform: snapshot.Platform}] = token
 		coordinator.accounts[snapshot.AccountID] = token
-	}
-	if snapshot.CombinationID != 0 {
 		coordinator.combinations[snapshot.CombinationID] = token
+	case LeaseKindNodeMaintenance:
+		coordinator.nodes[snapshot.NodeID] = token
 	}
 	return lease, nil
+}
+
+func (coordinator *Coordinator) nodeBusy(id NodeID) bool {
+	if _, occupied := coordinator.nodes[id]; occupied {
+		return true
+	}
+	for key := range coordinator.nodePlatforms {
+		if key.nodeID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (coordinator *Coordinator) leaseOwnsKeysLocked(lease Lease, token LeaseToken) bool {
+	switch lease.Kind {
+	case LeaseKindCombination:
+		return ownsToken(coordinator.nodePlatforms, nodePlatformKey{nodeID: lease.Snapshot.NodeID, platform: lease.Snapshot.Platform}, token) &&
+			ownsToken(coordinator.accounts, lease.Snapshot.AccountID, token) &&
+			ownsToken(coordinator.combinations, lease.Snapshot.CombinationID, token)
+	case LeaseKindNodeMaintenance:
+		return ownsToken(coordinator.nodes, lease.Snapshot.NodeID, token)
+	default:
+		return false
+	}
+}
+
+func (coordinator *Coordinator) clearLeaseKeysLocked(lease Lease) {
+	switch lease.Kind {
+	case LeaseKindCombination:
+		delete(coordinator.nodePlatforms, nodePlatformKey{nodeID: lease.Snapshot.NodeID, platform: lease.Snapshot.Platform})
+		delete(coordinator.accounts, lease.Snapshot.AccountID)
+		delete(coordinator.combinations, lease.Snapshot.CombinationID)
+	case LeaseKindNodeMaintenance:
+		delete(coordinator.nodes, lease.Snapshot.NodeID)
+	}
 }
 
 func ownsToken[K comparable](owners map[K]LeaseToken, key K, token LeaseToken) bool {
@@ -1032,7 +1083,6 @@ func ownsTokenSet(owners map[LeaseToken]struct{}, token LeaseToken) bool {
 
 func nodeLeaseSnapshot(node AccessNode) LeaseSnapshot {
 	snapshot := LeaseSnapshot{
-		Platform:           node.AssignedPlatform,
 		NodeID:             node.ID,
 		NodeKind:           node.Kind,
 		NodeRegion:         node.Region,

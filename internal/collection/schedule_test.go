@@ -30,10 +30,11 @@ type fakeScheduleStore struct {
 	pages             map[RunID][]Page
 	attempts          map[RunID][][]AttemptWrite
 	combinations      []resource.AccountNodeCombination
+	combinationMeta   map[resource.CombinationID]combinationFilter
 	nextTargetID      int64
 	nextRunID         int64
-	runSequences      map[string]int64
-	activeRuns        map[string]RunID
+	runSequences      map[TargetID]int64
+	activeRuns        map[TargetID]RunID
 	failListErr       error
 	failFinishErr     error
 	failTargetsErr    error
@@ -43,38 +44,25 @@ type fakeScheduleStore struct {
 	conflictTargets   map[TargetID]bool
 }
 
+type combinationFilter struct {
+	platform resource.Platform
+	appID    int64
+	side     market.Side
+}
+
 func newFakeScheduleStore() *fakeScheduleStore {
 	return &fakeScheduleStore{
-		targets:      make(map[TargetID]Target),
-		runs:         make(map[RunID]Run),
-		pages:        make(map[RunID][]Page),
-		attempts:     make(map[RunID][][]AttemptWrite),
-		runSequences: make(map[string]int64),
-		activeRuns:   make(map[string]RunID),
+		targets:         make(map[TargetID]Target),
+		runs:            make(map[RunID]Run),
+		pages:           make(map[RunID][]Page),
+		attempts:        make(map[RunID][][]AttemptWrite),
+		combinationMeta: make(map[resource.CombinationID]combinationFilter),
+		runSequences:    make(map[TargetID]int64),
+		activeRuns:      make(map[TargetID]RunID),
 	}
 }
 
-func (store *fakeScheduleStore) addCatalogTarget(t *testing.T, appID int64, period time.Duration, desired DesiredState) Target {
-	t.Helper()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	store.nextTargetID++
-	actual := ActualStarting
-	if desired == DesiredDisabled {
-		actual = ActualStopped
-	}
-	target, err := NewCatalogTarget(CatalogTargetInput{
-		ID: TargetID(store.nextTargetID), Revision: 1, AppID: appID, Period: period,
-		Desired: desired, Actual: actual, SwitchVersion: 1, ChangedAt: scheduleNow(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.targets[target.ID()] = target
-	return target
-}
-
-func (store *fakeScheduleStore) addSummaryTarget(t *testing.T, platform Platform, side market.Side, desired DesiredState) Target {
+func (store *fakeScheduleStore) addSummaryTarget(t *testing.T, platform Platform, appID int64, side market.Side, desired DesiredState) Target {
 	t.Helper()
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -84,7 +72,7 @@ func (store *fakeScheduleStore) addSummaryTarget(t *testing.T, platform Platform
 		actual = ActualStopped
 	}
 	target, err := NewSummaryTarget(SummaryTargetInput{
-		ID: TargetID(store.nextTargetID), Revision: 1, Platform: platform, Side: side,
+		ID: TargetID(store.nextTargetID), Revision: 1, Platform: platform, AppID: appID, Side: side,
 		Desired: desired, Actual: actual, SwitchVersion: 1, ChangedAt: scheduleNow(),
 	})
 	if err != nil {
@@ -223,19 +211,7 @@ func (store *fakeScheduleStore) TransitionTarget(ctx context.Context, id TargetI
 	return next, nil
 }
 
-func (store *fakeScheduleStore) runKey(targetID TargetID, appID int64) string {
-	return fmt.Sprintf("%d/%d", targetID, appID)
-}
-
-func (store *fakeScheduleStore) CreateCatalogRun(ctx context.Context, targetID TargetID, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error) {
-	return store.createRun(targetID, 0, expectedSwitch, initialCursor, TaskTypeCatalog)
-}
-
-func (store *fakeScheduleStore) CreateSummaryRun(ctx context.Context, targetID TargetID, appID int64, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error) {
-	return store.createRun(targetID, appID, expectedSwitch, initialCursor, TaskTypeSummary)
-}
-
-func (store *fakeScheduleStore) createRun(targetID TargetID, appID int64, expectedSwitch Revision, initialCursor Cursor, taskType TaskType) (Run, bool, error) {
+func (store *fakeScheduleStore) CreateSummaryRun(ctx context.Context, targetID TargetID, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	target, ok := store.targets[targetID]
@@ -248,45 +224,34 @@ func (store *fakeScheduleStore) createRun(targetID TargetID, appID int64, expect
 	if target.SwitchVersion() != expectedSwitch {
 		return Run{}, false, ErrConflict
 	}
-	if taskType == TaskTypeCatalog {
-		appID, _ = target.AppID()
+	appID, ok := target.AppID()
+	if !ok {
+		return Run{}, false, ErrIntegrity
 	}
-	key := store.runKey(targetID, appID)
-	if existingID, active := store.activeRuns[key]; active {
+	if existingID, active := store.activeRuns[targetID]; active {
 		existing := store.runs[existingID]
 		if !existing.State().Terminal() {
 			switchVersion, _ := existing.SwitchVersion()
 			if switchVersion != expectedSwitch {
-				// 活动运行唯一索引挡住旧开关的残留运行，与真实存储一致。
 				return Run{}, false, ErrConflict
 			}
 			return existing, false, nil
 		}
 	}
 	store.nextRunID++
-	store.runSequences[key]++
+	store.runSequences[targetID]++
 	now := scheduleNow()
-	var run Run
-	var err error
-	if taskType == TaskTypeCatalog {
-		run, err = NewCatalogRun(CatalogRunInput{
-			ID: RunID(store.nextRunID), TargetID: targetID, AppID: appID,
-			SwitchVersion: expectedSwitch, RunSequence: Sequence(store.runSequences[key]),
-			State: RunPending, CurrentCursor: initialCursor, CreatedAt: now,
-		})
-	} else {
-		side, _ := target.Side()
-		run, err = NewSummaryRun(SummaryRunInput{
-			ID: RunID(store.nextRunID), TargetID: targetID, Platform: target.Platform(), AppID: appID,
-			Side: side, SwitchVersion: expectedSwitch, RunSequence: Sequence(store.runSequences[key]),
-			State: RunPending, CurrentCursor: initialCursor, CreatedAt: now,
-		})
-	}
+	side, _ := target.Side()
+	run, err := NewSummaryRun(SummaryRunInput{
+		ID: RunID(store.nextRunID), TargetID: targetID, Platform: target.Platform(), AppID: appID,
+		Side: side, SwitchVersion: expectedSwitch, RunSequence: Sequence(store.runSequences[targetID]),
+		State: RunPending, CurrentCursor: initialCursor, CreatedAt: now,
+	})
 	if err != nil {
 		return Run{}, false, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	}
 	store.runs[run.ID()] = run
-	store.activeRuns[key] = run.ID()
+	store.activeRuns[targetID] = run.ID()
 	return run, true, nil
 }
 
@@ -333,7 +298,7 @@ func (store *fakeScheduleStore) FinishRun(ctx context.Context, id RunID, state R
 	}
 	store.runs[id] = next
 	targetID, _ := run.TargetID()
-	delete(store.activeRuns, store.runKey(targetID, run.AppID()))
+	delete(store.activeRuns, targetID)
 	return next, nil
 }
 
@@ -355,12 +320,7 @@ func (store *fakeScheduleStore) ActiveRuns(ctx context.Context) ([]Run, error) {
 
 func (store *fakeScheduleStore) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) (Page, bool, error) {
 	return store.commitPage(input.RunID, input.PageSequence, input.CursorBefore, input.CursorAfter,
-		input.CollectedAt, input.Attempts, TaskTypeSummary)
-}
-
-func (store *fakeScheduleStore) CommitCatalogPage(ctx context.Context, input CatalogPageCommit) (Page, bool, error) {
-	return store.commitPage(input.RunID, input.PageSequence, input.CursorBefore, input.CursorAfter,
-		input.CollectedAt, nil, TaskTypeCatalog)
+		input.CollectedAt, input.Attempts)
 }
 
 func (store *fakeScheduleStore) commitPage(
@@ -369,7 +329,6 @@ func (store *fakeScheduleStore) commitPage(
 	before, after Cursor,
 	collectedAt time.Time,
 	attempts []AttemptWrite,
-	taskType TaskType,
 ) (Page, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -377,7 +336,7 @@ func (store *fakeScheduleStore) commitPage(
 	if !ok {
 		return Page{}, false, ErrNotFound
 	}
-	if run.TaskType() != taskType {
+	if run.TaskType() != TaskTypeSummary {
 		return Page{}, false, ErrIntegrity
 	}
 	targetID, _ := run.TargetID()
@@ -427,13 +386,23 @@ func (store *fakeScheduleStore) commitPage(
 	return page, true, nil
 }
 
-func (store *fakeScheduleStore) ListCombinations(ctx context.Context) ([]resource.AccountNodeCombination, error) {
+func (store *fakeScheduleStore) ListCombinationsFor(ctx context.Context, platform Platform, appID int64, side market.Side) ([]resource.AccountNodeCombination, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.failListErr != nil {
 		return nil, store.failListErr
 	}
-	return append([]resource.AccountNodeCombination(nil), store.combinations...), nil
+	filtered := make([]resource.AccountNodeCombination, 0)
+	for _, combination := range store.combinations {
+		meta, ok := store.combinationMeta[combination.ID]
+		if !ok {
+			continue
+		}
+		if meta.platform == resource.Platform(platform) && meta.appID == appID && meta.side == side {
+			filtered = append(filtered, combination)
+		}
+	}
+	return filtered, nil
 }
 
 // ---- stub coordinator repository ----
@@ -484,13 +453,16 @@ func (repo *stubCoordinatorRepository) ReplaceAccountSession(context.Context, re
 func (repo *stubCoordinatorRepository) OpenAccountSessionAt(context.Context, resource.AccountID, int64) ([]byte, error) {
 	return nil, errStubUnsupported
 }
+func (repo *stubCoordinatorRepository) RecordAccountSessionCheck(context.Context, resource.AccountID, int64, resource.AccountSessionState, time.Time) (resource.PlatformAccount, error) {
+	return resource.PlatformAccount{}, errStubUnsupported
+}
 func (repo *stubCoordinatorRepository) ReplaceNodeConnection(context.Context, resource.NodeID, int64, resource.NodeConnectionInput) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
 func (repo *stubCoordinatorRepository) BeginNodeRevalidation(context.Context, resource.NodeID, int64) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
-func (repo *stubCoordinatorRepository) OpenNodeProxyCredentialAt(context.Context, resource.NodeID, int64, int64, resource.Platform) ([]byte, error) {
+func (repo *stubCoordinatorRepository) OpenNodeProxyCredentialAt(context.Context, resource.NodeID, int64, int64) ([]byte, error) {
 	return nil, errStubUnsupported
 }
 func (repo *stubCoordinatorRepository) RecordNodeExit(context.Context, resource.NodeID, int64, netip.Addr, time.Time, time.Time) (resource.AccessNode, error) {
@@ -499,17 +471,14 @@ func (repo *stubCoordinatorRepository) RecordNodeExit(context.Context, resource.
 func (repo *stubCoordinatorRepository) MarkNodeUnavailable(context.Context, resource.NodeID, int64) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
-func (repo *stubCoordinatorRepository) AssignNodePlatform(context.Context, resource.NodeID, int64, resource.Platform) (resource.AccessNode, error) {
+func (repo *stubCoordinatorRepository) AssignNodeGame(context.Context, resource.NodeID, int64, int64) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
-func (repo *stubCoordinatorRepository) UnassignNodePlatform(context.Context, resource.NodeID, int64, resource.Platform) (resource.AccessNode, error) {
-	return resource.AccessNode{}, errStubUnsupported
-}
-func (repo *stubCoordinatorRepository) ReassignNodePlatform(context.Context, resource.NodeID, int64, resource.Platform, resource.Platform) (resource.AccessNode, error) {
+func (repo *stubCoordinatorRepository) AssignNodeSide(context.Context, resource.NodeID, int64, resource.Platform, market.Side) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
 
-func combinationResources(id int64, platform resource.Platform, exit netip.Addr) resource.CombinationResources {
+func combinationResources(id int64, platform resource.Platform, appID int64, side market.Side, exit netip.Addr) resource.CombinationResources {
 	now := scheduleNow()
 	checkedAt := now.Add(-time.Minute)
 	return resource.CombinationResources{
@@ -525,7 +494,8 @@ func combinationResources(id int64, platform resource.Platform, exit netip.Addr)
 			ID: resource.NodeID(id*10 + 2), Name: fmt.Sprintf("node-%d", id), Kind: resource.NodeKindDirect,
 			Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
 			State: resource.NodeStateAvailable, EgressRevision: 1, AssignmentRevision: 1,
-			AssignedPlatform: platform,
+			AppID: appID,
+			Sides: []resource.NodeSideAssignment{{Platform: platform, Side: side}},
 			ExitVerification: &resource.ExitVerification{
 				VerifiedRevision: 1, Address: exit,
 				VerifiedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour),
@@ -737,7 +707,6 @@ func newScheduleHarness(t *testing.T, configure func(config *SchedulerConfig)) *
 		Profiles: map[Platform]PlatformProfile{
 			PlatformSteam: {
 				TargetRegion:    resource.TargetRegionDomestic,
-				CatalogEndpoint: "catalog_list",
 				SummaryEndpoint: "market_summary",
 			},
 		},
@@ -761,11 +730,12 @@ func newScheduleHarness(t *testing.T, configure func(config *SchedulerConfig)) *
 	}
 }
 
-func (harness *scheduleHarness) addCombination(id int64, platform resource.Platform, exit netip.Addr) {
-	resources := combinationResources(id, platform, exit)
+func (harness *scheduleHarness) addCombination(id int64, platform resource.Platform, appID int64, side market.Side, exit netip.Addr) {
+	resources := combinationResources(id, platform, appID, side, exit)
 	harness.repo.setResources(resources)
 	harness.store.mu.Lock()
 	harness.store.combinations = append(harness.store.combinations, resources.Combination)
+	harness.store.combinationMeta[resources.Combination.ID] = combinationFilter{platform: platform, appID: appID, side: side}
 	harness.store.mu.Unlock()
 }
 
@@ -778,11 +748,11 @@ func requireTargetState(t *testing.T, target Target, actual ActualState, reason 
 
 // ---- tests ----
 
-// 单目录目标完整成功：运行、逐页提交、目标回到 waiting(next_cycle)。
-func TestScheduleCatalogRunSucceeds(t *testing.T) {
+// 单摘要目标完整成功：运行、逐页提交、目标回到 waiting(next_cycle)。
+func TestScheduleSummaryRunSucceeds(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 3
 
 	report, err := harness.scheduler.RunCycle(context.Background())
@@ -803,7 +773,7 @@ func TestScheduleCatalogRunSucceeds(t *testing.T) {
 	requireTargetState(t, final, ActualWaiting, TargetReasonNextCycle)
 	recheck, _ := final.RecheckAt()
 	if recheck.Sub(final.ChangedAt()) < 59*time.Minute {
-		t.Fatalf("catalog recheck should honor the target period, got %s", recheck.Sub(final.ChangedAt()))
+		t.Fatalf("summary recheck should honor SummaryPeriod, got %s", recheck.Sub(final.ChangedAt()))
 	}
 	// 游标流串行且衔接。
 	calls := harness.fetcher.recordedCalls()
@@ -812,67 +782,32 @@ func TestScheduleCatalogRunSucceeds(t *testing.T) {
 	}
 }
 
-// 摘要目标按目录目标声明的游戏派发，并且不受目录开关影响。
-func TestScheduleSummaryUsesCatalogGamesIndependently(t *testing.T) {
+// 两个 appid 的摘要互不影响：禁用其中一个不影响另一个。
+func TestScheduleSummaryAppIDsAreIndependent(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
-	// 一个启用、一个禁用的目录目标：禁用目录只停目录同步，不停摘要。
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	harness.store.addCatalogTarget(t, 252490, time.Hour, DesiredDisabled)
-	summary := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", 252490, market.SideAsk, netip.MustParseAddr("2.2.2.3"))
+	enabled := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.store.addSummaryTarget(t, PlatformSteam, 252490, market.SideAsk, DesiredDisabled)
 
 	report, err := harness.scheduler.RunCycle(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var summaryOutcome TargetOutcome
-	for _, outcome := range report.Targets {
-		if outcome.TargetID == summary.ID() {
-			summaryOutcome = outcome
-		}
+	if len(report.Targets) != 1 || report.Targets[0].TargetID != enabled.ID() {
+		t.Fatalf("only the enabled appid should be dispatched, got %+v", report.Targets)
 	}
-	if len(summaryOutcome.Runs) != 2 {
-		t.Fatalf("summary runs = %d, want 2 (both catalog games)", len(summaryOutcome.Runs))
+	if len(report.Targets[0].Runs) != 1 || report.Targets[0].Runs[0].AppID != 730 {
+		t.Fatalf("enabled summary should dispatch its own appid, got %+v", report.Targets[0].Runs)
 	}
-	apps := map[int64]bool{}
-	for _, run := range summaryOutcome.Runs {
-		if run.State != RunSucceeded {
-			t.Fatalf("summary run %+v should succeed", run)
-		}
-		apps[run.AppID] = true
-	}
-	if !apps[730] || !apps[252490] {
-		t.Fatalf("summary should cover both games, got %v", apps)
-	}
-	requireTargetState(t, harness.store.target(summary.ID()), ActualWaiting, TargetReasonNextCycle)
+	requireTargetState(t, harness.store.target(enabled.ID()), ActualWaiting, TargetReasonNextCycle)
 }
 
-// 目录同步独立于摘要开关：摘要禁用时目录照常运行。
-func TestScheduleCatalogIndependentOfSummarySwitch(t *testing.T) {
-	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	catalogTarget := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredDisabled)
-
-	report, err := harness.scheduler.RunCycle(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(report.Targets) != 1 || report.Targets[0].TargetID != catalogTarget.ID() {
-		t.Fatalf("only the catalog target should be dispatched, got %+v", report.Targets)
-	}
-	if report.Targets[0].Runs[0].State != RunSucceeded {
-		t.Fatalf("catalog run should succeed, got %+v", report.Targets[0].Runs[0])
-	}
-}
-
-// 等待资源与逐页释放：两个运行共享一个组合，页面级租约保证全部完成且互斥。
+// 等待资源与逐页释放：单个摘要目标多页串行占用同一组合。
 func TestSchedulePageLevelOccupancyAndRelease(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	summary := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	summary := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 2
 	harness.fetcher.fetchDuration = 5 * time.Millisecond
 
@@ -880,44 +815,45 @@ func TestSchedulePageLevelOccupancyAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, outcome := range report.Targets {
-		for _, run := range outcome.Runs {
-			if run.State != RunSucceeded || run.PagesCommitted != 2 {
-				t.Fatalf("run %+v should complete two pages", run)
-			}
-		}
+	if len(report.Targets) != 1 || len(report.Targets[0].Runs) != 1 {
+		t.Fatalf("unexpected report %+v", report.Targets)
+	}
+	run := report.Targets[0].Runs[0]
+	if run.State != RunSucceeded || run.PagesCommitted != 2 {
+		t.Fatalf("run %+v should complete two pages", run)
 	}
 	if harness.fetcher.maxInFlight != 1 {
 		t.Fatalf("single combination must serialize page requests, max in flight = %d", harness.fetcher.maxInFlight)
 	}
 	calls := harness.fetcher.recordedCalls()
-	if len(calls) != 4 {
-		t.Fatalf("expected 4 page fetches, got %d", len(calls))
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 page fetches, got %d", len(calls))
 	}
-	// 每一页都重新占用：四次请求得到四个不同的租约。
 	tokens := map[string]bool{}
 	for _, call := range calls {
 		tokens[call.leaseToken] = true
 	}
-	if len(tokens) != 4 {
+	if len(tokens) != 2 {
 		t.Fatalf("each page must acquire a fresh lease, distinct tokens = %d", len(tokens))
 	}
 	requireTargetState(t, harness.store.target(summary.ID()), ActualWaiting, TargetReasonNextCycle)
 }
 
-// 并发容量上限：三个可并行运行、两个组合，同时在途请求不超过 2。
+// 并发容量上限：ask 与 bid 各一条组合，同时在途请求不超过 2。
 func TestScheduleConcurrencyBoundedByCombinations(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	harness.store.addCatalogTarget(t, 252490, time.Hour, DesiredEnabled)
-	harness.store.addCatalogTarget(t, 570, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", 730, market.SideBid, netip.MustParseAddr("2.2.2.3"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideBid, DesiredEnabled)
 	harness.fetcher.fetchDuration = 10 * time.Millisecond
 
 	report, err := harness.scheduler.RunCycle(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(report.Targets) != 2 {
+		t.Fatalf("both directions should dispatch, got %+v", report.Targets)
 	}
 	for _, outcome := range report.Targets {
 		if outcome.Runs[0].State != RunSucceeded {
@@ -927,15 +863,15 @@ func TestScheduleConcurrencyBoundedByCombinations(t *testing.T) {
 	if harness.fetcher.maxInFlight > 2 {
 		t.Fatalf("in-flight requests exceeded combination capacity: %d", harness.fetcher.maxInFlight)
 	}
-	if len(harness.fetcher.recordedCalls()) != 3 {
-		t.Fatalf("all three targets should eventually fetch")
+	if len(harness.fetcher.recordedCalls()) != 2 {
+		t.Fatalf("both directions should fetch")
 	}
 }
 
 // 没有任何组合：目标 blocked(no_combination)，不创建运行。
 func TestScheduleBlockedWithoutCombination(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	report, err := harness.scheduler.RunCycle(context.Background())
 	if err != nil {
@@ -955,13 +891,16 @@ func TestScheduleBlockedWithoutCombination(t *testing.T) {
 // 出口验证过期：调度前拒绝该节点，目标 blocked(egress_unavailable)。
 func TestScheduleRejectsExpiredEgress(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	resources := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	resources := combinationResources(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
 	resources.Node.ExitVerification.ValidUntil = scheduleNow().Add(-time.Minute)
 	harness.repo.setResources(resources)
 	harness.store.mu.Lock()
 	harness.store.combinations = append(harness.store.combinations, resources.Combination)
+	harness.store.combinationMeta[resources.Combination.ID] = combinationFilter{
+		platform: resources.Combination.Platform, appID: 730, side: market.SideAsk,
+	}
 	harness.store.mu.Unlock()
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -975,14 +914,17 @@ func TestScheduleRejectsExpiredEgress(t *testing.T) {
 // 正在重新验证的节点同样被拒绝。
 func TestScheduleRejectsValidatingNode(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	resources := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	resources := combinationResources(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
 	resources.Node.State = resource.NodeStateValidating
 	resources.Node.ExitVerification = nil
 	harness.repo.setResources(resources)
 	harness.store.mu.Lock()
 	harness.store.combinations = append(harness.store.combinations, resources.Combination)
+	harness.store.combinationMeta[resources.Combination.ID] = combinationFilter{
+		platform: resources.Combination.Platform, appID: 730, side: market.SideAsk,
+	}
 	harness.store.mu.Unlock()
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -998,8 +940,8 @@ func TestScheduleUsesNewExitAddressAfterChange(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	oldExit := netip.MustParseAddr("2.2.2.2")
 	newExit := netip.MustParseAddr("3.3.3.3")
-	harness.addCombination(1, "steam", oldExit)
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, oldExit)
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 3
 
 	var once sync.Once
@@ -1007,7 +949,7 @@ func TestScheduleUsesNewExitAddressAfterChange(t *testing.T) {
 		if request.PageSequence == 1 {
 			once.Do(func() {
 				// 页面一处理完成后节点重新验证出新出口。
-				updated := combinationResources(1, "steam", newExit)
+				updated := combinationResources(1, "steam", 730, market.SideAsk, newExit)
 				updated.Node.EgressRevision = 2
 				updated.Node.ExitVerification.VerifiedRevision = 2
 				harness.repo.setResources(updated)
@@ -1036,8 +978,8 @@ func TestScheduleUsesNewExitAddressAfterChange(t *testing.T) {
 // 冷却：准入拒绝时运行保留续点，目标 blocked(cooldown) 且复查时间来自决定。
 func TestScheduleCooldownKeepsRunForContinuation(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 2
 
 	retryAt := scheduleNow().Add(250 * time.Millisecond)
@@ -1087,8 +1029,8 @@ func TestScheduleCooldownKeepsRunForContinuation(t *testing.T) {
 // 缺少限频策略：fail closed，目标 blocked(missing_rate_policy) 且需人工恢复。
 func TestScheduleMissingRatePolicyBlocksManually(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.admitter.script = func(int, ratelimit.Request) (ratelimit.Decision, error) {
 		return ratelimit.Decision{}, ratelimit.ErrPolicyUnavailable
 	}
@@ -1110,8 +1052,8 @@ func TestScheduleMissingRatePolicyBlocksManually(t *testing.T) {
 // 下一周期不会自动再派发。
 func TestScheduleSessionInvalidBlocksUntilRecovery(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.hook = func(PageFetch) error { return ErrFetchSessionInvalid }
 
 	report, err := harness.scheduler.RunCycle(context.Background())
@@ -1143,8 +1085,8 @@ func TestScheduleTimeoutFailsRunAndRetriesNextCycle(t *testing.T) {
 		config.PageTimeout = 15 * time.Millisecond
 		config.TransientRetry = 10 * time.Millisecond
 	})
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.fetchDuration = 200 * time.Millisecond
 
 	report, err := harness.scheduler.RunCycle(context.Background())
@@ -1175,8 +1117,8 @@ func TestScheduleTimeoutFailsRunAndRetriesNextCycle(t *testing.T) {
 // 网络错误映射为 failed(network_error)。
 func TestScheduleNetworkErrorFailsRun(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.hook = func(PageFetch) error { return fmt.Errorf("dial: %w", ErrFetchNetwork) }
 
 	report, err := harness.scheduler.RunCycle(context.Background())
@@ -1192,8 +1134,8 @@ func TestScheduleNetworkErrorFailsRun(t *testing.T) {
 // 平台限频信号：反馈进入准入器，目标 blocked(cooldown)，运行保留续点。
 func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.hook = func(PageFetch) error {
 		return &RateLimitSignal{
 			Scopes:   []ratelimit.Scope{ratelimit.ScopePlatform},
@@ -1222,8 +1164,8 @@ func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 // 页间禁用：提交被 fence，运行 stopped(switch_disabled)，已提交页保留。
 func TestScheduleDisableBetweenPagesStopsRun(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 3
 
 	var once sync.Once
@@ -1254,9 +1196,8 @@ func TestScheduleDisableBetweenPagesStopsRun(t *testing.T) {
 // 平台档案缺失：blocked(invalid_config) 手动恢复。
 func TestScheduleMissingProfileBlocksManually(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(3, "buff", netip.MustParseAddr("2.2.2.4"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	target := harness.store.addSummaryTarget(t, "buff", market.SideAsk, DesiredEnabled)
+	harness.addCombination(3, "buff", 730, market.SideAsk, netip.MustParseAddr("2.2.2.4"))
+	target := harness.store.addSummaryTarget(t, "buff", 730, market.SideAsk, DesiredEnabled)
 
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1268,26 +1209,28 @@ func TestScheduleMissingProfileBlocksManually(t *testing.T) {
 	}
 }
 
-// 摘要目标没有任何目录目标声明的游戏：waiting(next_cycle)。
+// 没有目录任务时，已启用的摘要仍应派发。
 func TestScheduleSummaryWithoutGamesWaits(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	requireTargetState(t, harness.store.target(target.ID()), ActualWaiting, TargetReasonNextCycle)
-	if len(harness.fetcher.recordedCalls()) != 0 {
-		t.Fatalf("no games means no requests")
+	if len(harness.fetcher.recordedCalls()) != 1 {
+		t.Fatalf("enabled summary must still dispatch, got %d fetches", len(harness.fetcher.recordedCalls()))
 	}
 }
 
-// 目录周期：waiting(next_cycle) 未到期不派发，到期后派发。
-func TestScheduleCatalogPeriodGatesNextRun(t *testing.T) {
-	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, 250*time.Millisecond, DesiredEnabled)
+// 摘要周期：waiting(next_cycle) 未到期不派发，到期后派发。
+func TestScheduleSummaryPeriodGatesNextRun(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		config.SummaryPeriod = 250 * time.Millisecond
+	})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1308,7 +1251,7 @@ func TestScheduleCatalogPeriodGatesNextRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(report.Targets) != 1 || report.Targets[0].Runs[0].State != RunSucceeded {
-		t.Fatalf("after the period the catalog target must run again, got %+v", report.Targets)
+		t.Fatalf("after the period the summary target must run again, got %+v", report.Targets)
 	}
 }
 
@@ -1317,8 +1260,8 @@ func TestScheduleToleratesLaggingSchedulerClock(t *testing.T) {
 	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
 		config.Clock = func() time.Time { return time.Now().Add(-2 * time.Second) }
 	})
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	report, err := harness.scheduler.RunCycle(context.Background())
 	if err != nil {
@@ -1336,9 +1279,8 @@ func TestScheduleClampsAttemptTimesWithLaggingClock(t *testing.T) {
 	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
 		config.Clock = laggingNow
 	})
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredDisabled)
-	summary := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	summary := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.attempts = func(PageFetch) []AttemptWrite {
 		return []AttemptWrite{{
 			ProductID: 1,
@@ -1380,9 +1322,9 @@ func TestScheduleClampsAttemptTimesWithLaggingClock(t *testing.T) {
 // 目标停留在 running 且存在中途活动运行时，下一周期续点同一运行而不是新建。
 func TestScheduleResumesMidflightRunWhenTargetRunning(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	existing, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	existing, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1410,8 +1352,8 @@ func TestScheduleResumesMidflightRunWhenTargetRunning(t *testing.T) {
 // 目标停留在 running（上一周期处置写回失败或进程中断）时下一周期照常派发。
 func TestScheduleResumesTargetStuckInRunning(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	if _, err := harness.store.TransitionTarget(context.Background(), target.ID(), target.Revision(), target.SwitchVersion(),
 		TargetTransition{State: ActualRunning}); err != nil {
 		t.Fatal(err)
@@ -1430,8 +1372,8 @@ func TestScheduleResumesTargetStuckInRunning(t *testing.T) {
 // 周期取消：在途运行以 stopped(cancelled) 结束，页保留。
 func TestScheduleCycleCancellationStopsRun(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 5
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1455,28 +1397,6 @@ func TestScheduleCycleCancellationStopsRun(t *testing.T) {
 	if harness.store.pageCount(outcome.RunID) != 1 {
 		t.Fatalf("committed pages must survive cancellation")
 	}
-}
-
-// 摘要多游戏共用同一目标：部分游戏失败时目标记录最严重处置。
-func TestScheduleSummaryAggregatesWorstDisposition(t *testing.T) {
-	harness := newScheduleHarness(t, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	harness.store.addCatalogTarget(t, 252490, time.Hour, DesiredEnabled)
-	summary := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
-	harness.fetcher.hook = func(request PageFetch) error {
-		if request.TaskType == TaskTypeSummary && request.AppID == 252490 {
-			return ErrFetchSessionInvalid
-		}
-		return nil
-	}
-
-	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	final := harness.store.target(summary.ID())
-	requireTargetState(t, final, ActualBlocked, TargetReasonSessionInvalid)
 }
 
 // 无效调度器依赖与配置被拒绝。

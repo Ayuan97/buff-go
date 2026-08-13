@@ -29,10 +29,8 @@ func execute(args []string, stderr io.Writer, notify notifyContextFunc, run appR
 	var flagOutput bytes.Buffer
 	flags := flag.NewFlagSet("buffgo", flag.ContinueOnError)
 	flags.SetOutput(&flagOutput)
-	configPath := flags.String("config", "", "path to the runtime configuration file")
-	sources := flags.String("sources", "", "comma-separated source allowlist")
-	appid := flags.Int64("appid", 0, "restrict collection to one appid")
-	apiListen := flags.String("api-listen", "", "optional loopback API listen address, for example 127.0.0.1:8080")
+	apiListen := flags.String("api-listen", "", "loopback API listen address, for example 127.0.0.1:8080")
+	pgDSN := flags.String("pg-dsn", "", "PostgreSQL connection string")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, _ = io.Copy(stderr, &flagOutput)
@@ -45,18 +43,21 @@ func execute(args []string, stderr io.Writer, notify notifyContextFunc, run appR
 		_, _ = fmt.Fprintln(stderr, "buffgo: positional arguments are not supported")
 		return 2
 	}
-	if strings.TrimSpace(*configPath) == "" {
-		_, _ = fmt.Fprintln(stderr, "buffgo: -config is required")
+	if strings.TrimSpace(*apiListen) == "" {
+		_, _ = fmt.Fprintln(stderr, "buffgo: -api-listen is required")
 		return 2
 	}
-	if *appid < 0 {
-		_, _ = fmt.Fprintln(stderr, "buffgo: -appid cannot be negative")
+	if strings.TrimSpace(*pgDSN) == "" {
+		*pgDSN = strings.TrimSpace(os.Getenv("BUFFGO_DSN"))
+	}
+	if strings.TrimSpace(*pgDSN) == "" {
+		_, _ = fmt.Fprintln(stderr, "buffgo: -pg-dsn is required")
 		return 2
 	}
 
 	ctx, stop := notify(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, app.Options{ConfigPath: *configPath, Sources: *sources, AppID: *appid, APIListen: *apiListen}); err != nil {
+	if err := run(ctx, app.Options{APIListen: *apiListen, PostgresDSN: *pgDSN}); err != nil {
 		if errors.Is(err, app.ErrInvalidOptions) {
 			_, _ = fmt.Fprintf(stderr, "buffgo: %v\n", err)
 			return 2

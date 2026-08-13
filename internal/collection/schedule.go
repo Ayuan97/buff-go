@@ -44,11 +44,13 @@ type TargetTransition struct {
 	RecheckAt *time.Time
 }
 
-// AttemptWrite 是一条以内部商品身份声明的显式行情事实。
+// AttemptWrite 是一条行情事实，可携带尚未解析的平台身份。
 type AttemptWrite struct {
-	ProductID   catalog.ProductID
-	Observation market.Observation
-	ReasonCode  string
+	ProductID      catalog.ProductID // 0 表示尚未解析
+	PlatformItemID string            // 可空（0B 前可能没有稳定键）
+	ExactName      string            // Steam/平台展示名，逐字节
+	Observation    market.Observation
+	ReasonCode     string
 }
 
 // SummaryPageCommit 是一个显式摘要页面。作用域与因果顺序由持久运行派生，
@@ -62,27 +64,15 @@ type SummaryPageCommit struct {
 	Attempts     []AttemptWrite
 }
 
-// CatalogPageCommit 是一个显式目录页面清单。目录页当前只记录覆盖证据与游标，
-// 商品内容写入由目录同步实现补充。
-type CatalogPageCommit struct {
-	RunID        RunID
-	PageSequence Sequence
-	CursorBefore Cursor
-	CursorAfter  Cursor
-	CollectedAt  time.Time
-}
-
 // ScheduleStore 是调度器需要的持久化端口，由 storage/postgres 的 Store 满足。
 type ScheduleStore interface {
 	Targets(ctx context.Context) ([]Target, error)
 	TransitionTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision, transition TargetTransition) (Target, error)
-	CreateCatalogRun(ctx context.Context, targetID TargetID, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error)
-	CreateSummaryRun(ctx context.Context, targetID TargetID, appID int64, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error)
+	CreateSummaryRun(ctx context.Context, targetID TargetID, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error)
 	BeginRun(ctx context.Context, id RunID) (Run, error)
 	FinishRun(ctx context.Context, id RunID, state RunState, completeness Completeness, reason RunReason) (Run, error)
 	CommitSummaryPage(ctx context.Context, input SummaryPageCommit) (Page, bool, error)
-	CommitCatalogPage(ctx context.Context, input CatalogPageCommit) (Page, bool, error)
-	ListCombinations(ctx context.Context) ([]resource.AccountNodeCombination, error)
+	ListCombinationsFor(ctx context.Context, platform Platform, appID int64, side market.Side) ([]resource.AccountNodeCombination, error)
 }
 
 // RateLimitAdmitter 是限频准入端口，由 storage/postgres 的 Store 满足。
@@ -133,12 +123,13 @@ type RateLimitSignal struct {
 // Error 只输出固定文案，不携带平台原文。
 func (signal *RateLimitSignal) Error() string { return "platform signaled rate limiting" }
 
-// PlatformProfile 描述一个平台的调度事实：目标线路与接口类别。
-// 具体取值由平台证据 Goal 确认后在装配层提供，这里不预置任何平台数字。
+// PlatformProfile 描述一个平台的调度事实：目标线路与摘要接口类别。
 type PlatformProfile struct {
 	TargetRegion    resource.TargetRegion
-	CatalogEndpoint ratelimit.EndpointClass
 	SummaryEndpoint ratelimit.EndpointClass
+	// BidEndpoint is the independently evidenced bid interface class. Empty
+	// keeps using SummaryEndpoint.
+	BidEndpoint ratelimit.EndpointClass
 }
 
 // SchedulerConfig 是单周期调度参数。
@@ -170,14 +161,14 @@ func (config SchedulerConfig) validate() error {
 		if err := profile.TargetRegion.Validate(); err != nil {
 			return fmt.Errorf("profile %s target region: %w", platform, err)
 		}
-		if profile.CatalogEndpoint != "" {
-			if err := profile.CatalogEndpoint.Validate(); err != nil {
-				return fmt.Errorf("profile %s catalog endpoint: %w", platform, err)
-			}
-		}
 		if profile.SummaryEndpoint != "" {
 			if err := profile.SummaryEndpoint.Validate(); err != nil {
 				return fmt.Errorf("profile %s summary endpoint: %w", platform, err)
+			}
+		}
+		if profile.BidEndpoint != "" {
+			if err := profile.BidEndpoint.Validate(); err != nil {
+				return fmt.Errorf("profile %s bid endpoint: %w", platform, err)
 			}
 		}
 	}
@@ -291,7 +282,6 @@ func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 	// 周期结束时所有页面租约都已释放，取消只回收组件登记。
 	defer func() { _ = s.coordinator.CancelComponent(context.Background(), component) }()
 
-	appIDs := catalogAppIDs(targets)
 	now := s.now()
 	due := make([]Target, 0, len(targets))
 	for _, target := range targets {
@@ -307,7 +297,7 @@ func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 		group.Add(1)
 		go func(slot int, target Target) {
 			defer group.Done()
-			outcomes[slot] = s.processTarget(ctx, component, target, appIDs, semaphore)
+			outcomes[slot] = s.processTarget(ctx, component, target, semaphore)
 		}(index, target)
 	}
 	group.Wait()
@@ -316,29 +306,6 @@ func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 		return outcomes[left].TargetID < outcomes[right].TargetID
 	})
 	return CycleReport{StartedAt: startedAt, Targets: outcomes}, nil
-}
-
-// catalogAppIDs 返回全部目录目标声明的游戏集合。目录目标的存在定义系统
-// 跟踪哪些游戏；目录开关只控制目录同步本身，不控制摘要方向。
-func catalogAppIDs(targets []Target) []int64 {
-	seen := make(map[int64]struct{})
-	ids := make([]int64, 0)
-	for _, target := range targets {
-		if target.TaskType() != TaskTypeCatalog {
-			continue
-		}
-		appID, ok := target.AppID()
-		if !ok || appID < 1 {
-			continue
-		}
-		if _, exists := seen[appID]; exists {
-			continue
-		}
-		seen[appID] = struct{}{}
-		ids = append(ids, appID)
-	}
-	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
-	return ids
 }
 
 // targetDue 判断目标是否应在本周期派发。actual 为 running 的目标同样派发：
@@ -396,14 +363,12 @@ func errorDisposition(reason TargetReason) disposition {
 type runSpec struct {
 	appID    int64
 	endpoint ratelimit.EndpointClass
-	catalog  bool
 }
 
 func (s *Scheduler) processTarget(
 	ctx context.Context,
 	component resource.ComponentID,
 	target Target,
-	appIDs []int64,
 	semaphore chan struct{},
 ) TargetOutcome {
 	outcome := TargetOutcome{
@@ -413,23 +378,16 @@ func (s *Scheduler) processTarget(
 		Target:   target,
 	}
 	profile, hasProfile := s.config.Profiles[target.Platform()]
-	specs, specErr := buildRunSpecs(target, profile, hasProfile, appIDs)
+	spec, specErr := buildRunSpec(target, profile, hasProfile)
 	if specErr != nil {
 		outcome.Target, outcome.Superseded, outcome.Err =
 			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonInvalidConfig, time.Time{}))
-		return outcome
-	}
-	if len(specs) == 0 {
-		// 摘要目标没有任何目录目标声明的游戏可采：等待下一周期。
-		outcome.Target, outcome.Superseded, outcome.Err = s.applyDisposition(ctx, target,
-			waitingDisposition(TargetReasonNextCycle, s.now().Add(s.config.SummaryPeriod)))
 		return outcome
 	}
 
 	updated, err := s.store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(),
 		TargetTransition{State: ActualRunning})
 	if errors.Is(err, ErrConflict) {
-		// 目标被并发修改（例如被禁用），本周期放弃该目标。
 		outcome.Superseded = true
 		return outcome
 	}
@@ -441,111 +399,46 @@ func (s *Scheduler) processTarget(
 	outcome.Target = target
 	outcome.Dispatched = true
 
-	runOutcomes := make([]RunOutcome, len(specs))
-	dispositions := make([]disposition, len(specs))
-	var group sync.WaitGroup
-	for index, spec := range specs {
-		group.Add(1)
-		go func(slot int, spec runSpec) {
-			defer group.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			runOutcomes[slot], dispositions[slot] = s.executeRun(ctx, component, target, spec)
-		}(index, spec)
-	}
-	group.Wait()
-	outcome.Runs = runOutcomes
-
-	for _, runOutcome := range runOutcomes {
-		outcome.Err = errors.Join(outcome.Err, runOutcome.Err)
-	}
-	final := s.aggregateDispositions(target, dispositions)
-	if final.kind == dispositionDetached {
+	semaphore <- struct{}{}
+	runOutcome, disp := s.executeRun(ctx, component, target, spec)
+	<-semaphore
+	outcome.Runs = []RunOutcome{runOutcome}
+	outcome.Err = runOutcome.Err
+	if disp.kind == dispositionDetached {
 		return outcome
 	}
+	if disp.kind == dispositionCompleted {
+		disp = s.completedDisposition()
+	}
 	var applyErr error
-	outcome.Target, outcome.Superseded, applyErr = s.applyDisposition(ctx, target, final)
+	outcome.Target, outcome.Superseded, applyErr = s.applyDisposition(ctx, target, disp)
 	outcome.Err = errors.Join(outcome.Err, applyErr)
 	return outcome
 }
 
-func buildRunSpecs(target Target, profile PlatformProfile, hasProfile bool, appIDs []int64) ([]runSpec, error) {
+func buildRunSpec(target Target, profile PlatformProfile, hasProfile bool) (runSpec, error) {
 	if !hasProfile {
-		return nil, fmt.Errorf("platform profile is missing")
+		return runSpec{}, fmt.Errorf("platform profile is missing")
 	}
-	switch target.TaskType() {
-	case TaskTypeCatalog:
-		if profile.CatalogEndpoint == "" {
-			return nil, fmt.Errorf("catalog endpoint class is missing")
-		}
-		appID, ok := target.AppID()
-		if !ok {
-			return nil, fmt.Errorf("catalog target appid is missing")
-		}
-		return []runSpec{{appID: appID, endpoint: profile.CatalogEndpoint, catalog: true}}, nil
-	case TaskTypeSummary:
-		if profile.SummaryEndpoint == "" {
-			return nil, fmt.Errorf("summary endpoint class is missing")
-		}
-		specs := make([]runSpec, 0, len(appIDs))
-		for _, appID := range appIDs {
-			specs = append(specs, runSpec{appID: appID, endpoint: profile.SummaryEndpoint})
-		}
-		return specs, nil
-	default:
-		return nil, fmt.Errorf("detail targets are not schedulable")
+	if target.TaskType() != TaskTypeSummary {
+		return runSpec{}, fmt.Errorf("detail targets are not schedulable")
 	}
+	if profile.SummaryEndpoint == "" {
+		return runSpec{}, fmt.Errorf("summary endpoint class is missing")
+	}
+	endpoint := profile.SummaryEndpoint
+	if side, ok := target.Side(); ok && side == market.SideBid && profile.BidEndpoint != "" {
+		endpoint = profile.BidEndpoint
+	}
+	appID, ok := target.AppID()
+	if !ok || appID < 1 {
+		return runSpec{}, fmt.Errorf("summary target appid is missing")
+	}
+	return runSpec{appID: appID, endpoint: endpoint}, nil
 }
 
-// aggregateDispositions 取多游戏运行结果中最严重的目标处置。
-func (s *Scheduler) aggregateDispositions(target Target, dispositions []disposition) disposition {
-	final := disposition{kind: dispositionCompleted}
-	rank := func(kind dispositionKind) int {
-		switch kind {
-		case dispositionDetached:
-			return 4
-		case dispositionError:
-			return 3
-		case dispositionBlocked:
-			return 2
-		case dispositionWaiting:
-			return 1
-		default:
-			return 0
-		}
-	}
-	for _, candidate := range dispositions {
-		if rank(candidate.kind) > rank(final.kind) {
-			final = candidate
-			continue
-		}
-		if candidate.kind != final.kind {
-			continue
-		}
-		switch candidate.kind {
-		case dispositionBlocked:
-			// 手动阻塞优先于自动阻塞；同为自动时取最晚复查时间。
-			if final.recheckAt.IsZero() {
-				continue
-			}
-			if candidate.recheckAt.IsZero() || candidate.recheckAt.After(final.recheckAt) {
-				final = candidate
-			}
-		case dispositionWaiting:
-			if candidate.recheckAt.After(final.recheckAt) {
-				final = candidate
-			}
-		}
-	}
-	if final.kind == dispositionCompleted {
-		now := s.now()
-		interval := s.config.SummaryPeriod
-		if period, ok := target.Period(); ok {
-			interval = period
-		}
-		final = waitingDisposition(TargetReasonNextCycle, now.Add(interval))
-	}
-	return final
+func (s *Scheduler) completedDisposition() disposition {
+	return waitingDisposition(TargetReasonNextCycle, s.now().Add(s.config.SummaryPeriod))
 }
 
 // applyDisposition 把处置写回目标状态；CAS 冲突表示状态已被其他所有者接管，
@@ -592,13 +485,7 @@ func (s *Scheduler) executeRun(
 	spec runSpec,
 ) (RunOutcome, disposition) {
 	outcome := RunOutcome{AppID: spec.appID}
-	var run Run
-	var err error
-	if spec.catalog {
-		run, _, err = s.store.CreateCatalogRun(ctx, target.ID(), target.SwitchVersion(), Cursor{})
-	} else {
-		run, _, err = s.store.CreateSummaryRun(ctx, target.ID(), spec.appID, target.SwitchVersion(), Cursor{})
-	}
+	run, _, err := s.store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		if errors.Is(err, ErrTargetDisabled) || errors.Is(err, ErrConflict) {
 			return outcome, disposition{kind: dispositionDetached}
@@ -619,12 +506,13 @@ func (s *Scheduler) executeRun(
 		}
 	}
 	outcome.State = run.State()
+	side, _ := target.Side()
 
 	for {
 		if ctx.Err() != nil {
 			return s.stopRun(ctx, run, outcome)
 		}
-		lease, acquireDisp, acquired := s.acquireLease(ctx, component, target.Platform())
+		lease, acquireDisp, acquired := s.acquireLease(ctx, component, target.Platform(), spec.appID, side)
 		if !acquired {
 			if acquireDisp.kind == dispositionDetached {
 				return s.stopRun(ctx, run, outcome)
@@ -746,25 +634,14 @@ func (s *Scheduler) executePage(
 		}
 		attempts = clampAttemptTimes(attempts, startedAt)
 	}
-	var page Page
-	if spec.catalog {
-		page, _, err = s.store.CommitCatalogPage(ctx, CatalogPageCommit{
-			RunID:        run.ID(),
-			PageSequence: pageSequence,
-			CursorBefore: run.CurrentCursor(),
-			CursorAfter:  fetched.CursorAfter,
-			CollectedAt:  collectedAt,
-		})
-	} else {
-		page, _, err = s.store.CommitSummaryPage(ctx, SummaryPageCommit{
-			RunID:        run.ID(),
-			PageSequence: pageSequence,
-			CursorBefore: run.CurrentCursor(),
-			CursorAfter:  fetched.CursorAfter,
-			CollectedAt:  collectedAt,
-			Attempts:     attempts,
-		})
-	}
+	page, _, err := s.store.CommitSummaryPage(ctx, SummaryPageCommit{
+		RunID:        run.ID(),
+		PageSequence: pageSequence,
+		CursorBefore: run.CurrentCursor(),
+		CursorAfter:  fetched.CursorAfter,
+		CollectedAt:  collectedAt,
+		Attempts:     attempts,
+	})
 	if err != nil {
 		return s.mapCommitError(ctx, run, err, outcome)
 	}
@@ -916,6 +793,8 @@ func (s *Scheduler) acquireLease(
 	ctx context.Context,
 	component resource.ComponentID,
 	platform Platform,
+	appID int64,
+	side market.Side,
 ) (resource.Lease, disposition, bool) {
 	region := s.config.Profiles[platform].TargetRegion
 	deadline := time.Now().Add(s.config.ResourceWait)
@@ -923,23 +802,17 @@ func (s *Scheduler) acquireLease(
 		if ctx.Err() != nil {
 			return resource.Lease{}, disposition{kind: dispositionDetached}, false
 		}
-		combinations, err := s.store.ListCombinations(ctx)
+		combinations, err := s.store.ListCombinationsFor(ctx, platform, appID, side)
 		if err != nil {
 			return resource.Lease{}, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), false
 		}
-		candidates := make([]resource.CombinationID, 0, len(combinations))
-		for _, combination := range combinations {
-			if string(combination.Platform) == string(platform) {
-				candidates = append(candidates, combination.ID)
-			}
-		}
-		if len(candidates) == 0 {
+		if len(combinations) == 0 {
 			return resource.Lease{}, blockedDisposition(TargetReasonNoCombination, s.now().Add(s.config.TransientRetry)), false
 		}
 		occupied := false
 		infrastructure := false
-		for _, id := range candidates {
-			lease, err := s.coordinator.AcquireCombination(ctx, component, id, region, s.now())
+		for _, combination := range combinations {
+			lease, err := s.coordinator.AcquireCombination(ctx, component, combination.ID, region, s.now(), appID, side)
 			if err == nil {
 				return lease, disposition{}, true
 			}

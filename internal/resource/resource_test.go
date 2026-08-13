@@ -204,7 +204,8 @@ func TestAccessNodeValidate(t *testing.T) {
 		State:                   NodeStateAvailable,
 		EgressRevision:          4,
 		AssignmentRevision:      2,
-		AssignedPlatform:        "buff",
+		AppID:                   730,
+		Sides:                   []NodeSideAssignment{{Platform: "buff", Side: "ask"}},
 		HasProxyCredential:      true,
 		StickySessionValidUntil: timePtr(now.Add(2 * time.Hour)),
 		ExitVerification: &ExitVerification{
@@ -235,7 +236,8 @@ func TestAccessNodeValidate(t *testing.T) {
 		{name: "invalid state", mutate: func(node *AccessNode) { node.State = "healthy" }},
 		{name: "missing revision", mutate: func(node *AccessNode) { node.EgressRevision = 0 }},
 		{name: "missing assignment revision", mutate: func(node *AccessNode) { node.AssignmentRevision = 0 }},
-		{name: "invalid assignment", mutate: func(node *AccessNode) { node.AssignedPlatform = "BUFF" }},
+		{name: "invalid assignment", mutate: func(node *AccessNode) { node.Sides = []NodeSideAssignment{{Platform: "BUFF", Side: "ask"}} }},
+		{name: "sides without game", mutate: func(node *AccessNode) { node.AppID = 0 }},
 		{name: "proxy without credential", mutate: func(node *AccessNode) { node.HasProxyCredential = false }},
 		{name: "sticky without deadline", mutate: func(node *AccessNode) { node.StickySessionValidUntil = nil }},
 		{name: "sticky deadline before verification", mutate: func(node *AccessNode) {

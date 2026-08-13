@@ -12,8 +12,7 @@ import (
 // ErrMappingConflict means a platform identity already targets another product.
 var ErrMappingConflict = errors.New("platform mapping targets another product")
 
-// CreateSteamProduct creates a new product and lets PostgreSQL allocate ProductID.
-// Names are Steam-owned data: they are neither normalized nor used as an upsert key.
+// CreateSteamProduct inserts a Steam catalog row keyed by (appid, market_hash_name).
 func (s *Store) CreateSteamProduct(ctx context.Context, appid int64, name string) (catalog.SteamProduct, error) {
 	var product catalog.SteamProduct
 	if err := s.validate(); err != nil {
@@ -27,6 +26,7 @@ func (s *Store) CreateSteamProduct(ctx context.Context, appid int64, name string
 	err := s.db.QueryRowContext(ctx, `
 INSERT INTO steam_products (appid, name)
 VALUES ($1, $2)
+ON CONFLICT (appid, name) DO UPDATE SET name = EXCLUDED.name
 RETURNING product_id`, appid, name).Scan(&productID)
 	if err != nil {
 		return product, fmt.Errorf("create steam product: %w", err)
@@ -104,6 +104,50 @@ ORDER BY product_id`, appid)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list steam products: %w", err)
+	}
+	return products, nil
+}
+
+// ListSteamProductsAfter returns products with product_id greater than after,
+// in stable identity order, limited to limit rows.
+func (s *Store) ListSteamProductsAfter(ctx context.Context, appid int64, after catalog.ProductID, limit int) ([]catalog.SteamProduct, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateAppID(appid); err != nil {
+		return nil, err
+	}
+	if after < 0 {
+		return nil, fmt.Errorf("after product_id must be non-negative")
+	}
+	if limit < 1 {
+		return nil, fmt.Errorf("limit must be positive")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT product_id, appid, name
+FROM steam_products
+WHERE appid = $1 AND product_id > $2
+ORDER BY product_id
+LIMIT $3`, appid, int64(after), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list steam products after: %w", err)
+	}
+	defer rows.Close()
+	products := make([]catalog.SteamProduct, 0)
+	for rows.Next() {
+		var product catalog.SteamProduct
+		var productID int64
+		if err := rows.Scan(&productID, &product.AppID, &product.Name); err != nil {
+			return nil, fmt.Errorf("scan steam product: %w", err)
+		}
+		product.ProductID = catalog.ProductID(productID)
+		if err := validateSteamProduct(product); err != nil {
+			return nil, fmt.Errorf("stored steam product: %w", err)
+		}
+		products = append(products, product)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list steam products after: %w", err)
 	}
 	return products, nil
 }

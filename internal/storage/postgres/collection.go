@@ -12,6 +12,7 @@ import (
 	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
+	"buff-go/internal/resource"
 )
 
 // Collection contract errors are canonical in the collection domain package so
@@ -43,39 +44,21 @@ last_page_sequence, created_at, started_at, finished_at`
 type TargetTransition = collection.TargetTransition
 
 type targetCreate struct {
-	taskType collection.TaskType
 	platform collection.Platform
-	appID    *int64
-	side     *market.Side
-	period   *time.Duration
+	appID    int64
+	side     market.Side
 	desired  collection.DesiredState
 }
 
-// CreateCatalogTarget creates or reads the natural (steam, appid) target.
-// Repeating the same desired state and period is idempotent; configuration
-// changes must use their explicit CAS operations.
-func (s *Store) CreateCatalogTarget(ctx context.Context, appID int64, period time.Duration, desired collection.DesiredState) (collection.Target, error) {
-	if appID < 1 || validateStoredPeriod(period) != nil || desired.Validate() != nil {
+// CreateSummaryTarget creates or reads the natural (platform, appid, side) target.
+func (s *Store) CreateSummaryTarget(ctx context.Context, platform collection.Platform, appID int64, side market.Side, desired collection.DesiredState) (collection.Target, error) {
+	if platform.Validate() != nil || appID < 1 || !validCollectionSide(side) || desired.Validate() != nil {
 		return collection.Target{}, ErrCollectionInvalidInput
 	}
 	return s.createCollectionTarget(ctx, targetCreate{
-		taskType: collection.TaskTypeCatalog,
-		platform: collection.PlatformSteam,
-		appID:    &appID,
-		period:   &period,
-		desired:  desired,
-	})
-}
-
-// CreateSummaryTarget creates or reads the natural (platform, side) target.
-func (s *Store) CreateSummaryTarget(ctx context.Context, platform collection.Platform, side market.Side, desired collection.DesiredState) (collection.Target, error) {
-	if platform.Validate() != nil || !validCollectionSide(side) || desired.Validate() != nil {
-		return collection.Target{}, ErrCollectionInvalidInput
-	}
-	return s.createCollectionTarget(ctx, targetCreate{
-		taskType: collection.TaskTypeSummary,
 		platform: platform,
-		side:     &side,
+		appID:    appID,
+		side:     side,
 		desired:  desired,
 	})
 }
@@ -98,10 +81,8 @@ func (s *Store) createCollectionTarget(ctx context.Context, input targetCreate) 
 	existing, _, found, err := queryCollectionTarget(ctx, tx, `
 SELECT `+collectionTargetColumns+`
 FROM collection_targets
-WHERE kind = $1 AND platform = $2
-  AND appid IS NOT DISTINCT FROM $3
-  AND side IS NOT DISTINCT FROM $4
-FOR UPDATE`, string(input.taskType), string(input.platform), nullableCollectionInt64(input.appID), nullableSide(input.side))
+WHERE kind = 'summary' AND platform = $1 AND appid = $2 AND side = $3
+FOR UPDATE`, string(input.platform), input.appID, string(input.side))
 	if err != nil {
 		return collection.Target{}, err
 	}
@@ -121,13 +102,12 @@ FOR UPDATE`, string(input.taskType), string(input.platform), nullableCollectionI
 	}
 	created, _, err := scanCollectionTarget(tx.QueryRowContext(ctx, `
 INSERT INTO collection_targets (
-    kind, platform, appid, side, desired_state, actual_state,
-    period_microseconds, changed_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7,
+    kind, platform, appid, side, desired_state, actual_state, changed_at
+) VALUES ('summary', $1, $2, $3, $4, $5,
           date_trunc('microseconds', clock_timestamp()))
 RETURNING `+collectionTargetColumns,
-		string(input.taskType), string(input.platform), nullableCollectionInt64(input.appID), nullableSide(input.side),
-		string(input.desired), string(actual), nullablePeriod(input.period),
+		string(input.platform), input.appID, string(input.side),
+		string(input.desired), string(actual),
 	))
 	if err != nil {
 		return collection.Target{}, mapCollectionWriteError(ctx, err)
@@ -200,19 +180,6 @@ func (s *Store) SetTargetDesired(ctx context.Context, id collection.TargetID, ex
 			return current.Enable(at)
 		}
 		return current.Disable(at)
-	})
-}
-
-// ChangeCatalogPeriod changes only the catalog period and never advances the switch fence.
-func (s *Store) ChangeCatalogPeriod(ctx context.Context, id collection.TargetID, expected collection.Revision, period time.Duration) (collection.Target, error) {
-	if validateStoredPeriod(period) != nil {
-		return collection.Target{}, ErrCollectionInvalidInput
-	}
-	return s.mutateCollectionTarget(ctx, id, expected, nil, func(current collection.Target, at time.Time) (collection.Target, error) {
-		if current.TaskType() != collection.TaskTypeCatalog {
-			return collection.Target{}, ErrCollectionInvalidInput
-		}
-		return current.ChangePeriod(period, at)
 	})
 }
 
@@ -336,23 +303,17 @@ RETURNING `+collectionTargetColumns,
 	return stored, nil
 }
 
-// CreateCatalogRun creates one active catalog run or returns the current-switch active run.
-func (s *Store) CreateCatalogRun(ctx context.Context, targetID collection.TargetID, expectedSwitch collection.Revision, initialCursor collection.Cursor) (collection.Run, bool, error) {
-	return s.createCollectionRun(ctx, targetID, 0, expectedSwitch, initialCursor, collection.TaskTypeCatalog)
+// CreateSummaryRun creates one active summary run for the target's game, or
+// returns the current-switch active run.
+func (s *Store) CreateSummaryRun(ctx context.Context, targetID collection.TargetID, expectedSwitch collection.Revision, initialCursor collection.Cursor) (collection.Run, bool, error) {
+	return s.createCollectionRun(ctx, targetID, expectedSwitch, initialCursor)
 }
 
-// CreateSummaryRun creates one active summary run for (target, appid), allowing
-// different appids under the same platform-side switch to run concurrently.
-func (s *Store) CreateSummaryRun(ctx context.Context, targetID collection.TargetID, appID int64, expectedSwitch collection.Revision, initialCursor collection.Cursor) (collection.Run, bool, error) {
-	return s.createCollectionRun(ctx, targetID, appID, expectedSwitch, initialCursor, collection.TaskTypeSummary)
-}
-
-func (s *Store) createCollectionRun(ctx context.Context, targetID collection.TargetID, appID int64, expectedSwitch collection.Revision, initialCursor collection.Cursor, taskType collection.TaskType) (collection.Run, bool, error) {
+func (s *Store) createCollectionRun(ctx context.Context, targetID collection.TargetID, expectedSwitch collection.Revision, initialCursor collection.Cursor) (collection.Run, bool, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return collection.Run{}, false, err
 	}
-	if targetID.Validate() != nil || expectedSwitch.Validate() != nil || initialCursor.Validate() != nil ||
-		(taskType == collection.TaskTypeSummary && appID < 1) {
+	if targetID.Validate() != nil || expectedSwitch.Validate() != nil || initialCursor.Validate() != nil {
 		return collection.Run{}, false, ErrCollectionInvalidInput
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -372,17 +333,18 @@ FOR UPDATE`, int64(targetID))
 	if !found {
 		return collection.Run{}, false, ErrCollectionNotFound
 	}
-	if target.TaskType() != taskType || target.SwitchVersion() != expectedSwitch {
+	if target.TaskType() != collection.TaskTypeSummary || target.SwitchVersion() != expectedSwitch {
 		return collection.Run{}, false, ErrCollectionConflict
 	}
 	if target.Desired() != collection.DesiredEnabled {
 		return collection.Run{}, false, ErrCollectionTargetDisabled
 	}
-	if taskType == collection.TaskTypeCatalog {
-		appID, _ = target.AppID()
+	appID, ok := target.AppID()
+	if !ok || appID < 1 {
+		return collection.Run{}, false, ErrCollectionIntegrity
 	}
 
-	active, activeFound, err := activeCollectionRun(ctx, tx, target, appID)
+	active, activeFound, err := activeCollectionRun(ctx, tx, target)
 	if err != nil {
 		return collection.Run{}, false, err
 	}
@@ -410,20 +372,16 @@ WHERE target_id = $1 AND next_run_sequence = $2`, int64(targetID), nextSequence)
 		return collection.Run{}, false, ErrCollectionIntegrity
 	}
 
-	var side any
-	if target.TaskType() == collection.TaskTypeSummary {
-		value, _ := target.Side()
-		side = string(value)
-	}
+	side, _ := target.Side()
 	created, err := scanCollectionRun(tx.QueryRowContext(ctx, `
 INSERT INTO collection_runs (
     target_id, kind, platform, appid, side, switch_version, run_sequence,
     status, completeness, reason_code, current_cursor, last_page_sequence,
     created_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NULL, '', $8, 0,
+) VALUES ($1, 'summary', $2, $3, $4, $5, $6, 'pending', NULL, '', $7, 0,
           date_trunc('microseconds', clock_timestamp()))
 RETURNING `+collectionRunColumns,
-		int64(targetID), string(taskType), string(target.Platform()), appID, side,
+		int64(targetID), string(target.Platform()), appID, string(side),
 		int64(target.SwitchVersion()), nextSequence, collectionCursorBytes(initialCursor),
 	))
 	if err != nil {
@@ -646,10 +604,42 @@ LIMIT $2`, int64(targetID), limit)
 	return runs, nil
 }
 
+// ListRecentRuns returns the newest collection runs across all targets.
+func (s *Store) ListRecentRuns(ctx context.Context, limit int) ([]collection.Run, error) {
+	if err := s.validateCollectionStore(); err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > maxRunListLimit {
+		return nil, ErrCollectionInvalidInput
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT `+collectionRunColumns+`
+FROM collection_runs
+ORDER BY run_id DESC
+LIMIT $1`, limit)
+	if err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	defer rows.Close()
+
+	runs := make([]collection.Run, 0)
+	for rows.Next() {
+		run, err := scanCollectionRun(rows)
+		if err != nil {
+			return nil, mapCollectionReadError(ctx, err)
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	return runs, nil
+}
+
 // ActiveRuns returns every non-terminal scheduler-owned run ordered by
 // identity. Detail runs are excluded because they have no target and are not
-// dispatched by the resident scheduler. Catalog and summary active runs are
-// bounded by their active-run unique indexes, so no limit is required.
+// dispatched by the resident scheduler. Summary active runs are bounded by
+// their active-run unique index, so no limit is required.
 func (s *Store) ActiveRuns(ctx context.Context) ([]collection.Run, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return nil, err
@@ -657,7 +647,7 @@ func (s *Store) ActiveRuns(ctx context.Context) ([]collection.Run, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT `+collectionRunColumns+`
 FROM collection_runs
-WHERE kind IN ('catalog', 'summary') AND status IN ('pending', 'running')
+WHERE kind = 'summary' AND status IN ('pending', 'running')
 ORDER BY run_id`)
 	if err != nil {
 		return nil, collectionStorageError(ctx)
@@ -676,6 +666,40 @@ ORDER BY run_id`)
 		return nil, collectionStorageError(ctx)
 	}
 	return runs, nil
+}
+
+// ListCombinationsFor returns pairings assigned to this game direction.
+func (s *Store) ListCombinationsFor(ctx context.Context, platform collection.Platform, appID int64, side market.Side) ([]resource.AccountNodeCombination, error) {
+	if err := s.validateCollectionStore(); err != nil {
+		return nil, err
+	}
+	if platform.Validate() != nil || appID < 1 || !validCollectionSide(side) {
+		return nil, ErrCollectionInvalidInput
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT c.combination_id, c.platform, c.account_id, c.node_id
+FROM account_node_combinations c
+JOIN access_nodes n ON n.node_id = c.node_id
+JOIN node_direction_assignments d ON d.node_id = c.node_id AND d.platform = c.platform
+WHERE c.platform = $1 AND n.appid = $2 AND d.side = $3
+ORDER BY c.combination_id`, string(platform), appID, string(side))
+	if err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	defer rows.Close()
+
+	combinations := make([]resource.AccountNodeCombination, 0)
+	for rows.Next() {
+		combination, err := scanCombination(rows)
+		if err != nil {
+			return nil, ErrCollectionIntegrity
+		}
+		combinations = append(combinations, combination)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	return combinations, nil
 }
 
 // collectionInstanceLockSQL scopes the resident-scheduler lock to the current
@@ -949,25 +973,19 @@ RETURNING `+collectionRunColumns,
 	return stored, nil
 }
 
-func activeCollectionRun(ctx context.Context, tx *sql.Tx, target collection.Target, appID int64) (collection.Run, bool, error) {
-	query := `
-SELECT ` + collectionRunColumns + `
+func activeCollectionRun(ctx context.Context, tx *sql.Tx, target collection.Target) (collection.Run, bool, error) {
+	run, err := scanCollectionRun(tx.QueryRowContext(ctx, `
+SELECT `+collectionRunColumns+`
 FROM collection_runs
-WHERE target_id = $1 AND kind = $2 AND status IN ('pending', 'running')`
-	args := []any{int64(target.ID()), string(target.TaskType())}
-	if target.TaskType() == collection.TaskTypeSummary {
-		query += ` AND appid = $3`
-		args = append(args, appID)
-	}
-	query += ` FOR UPDATE`
-	run, err := scanCollectionRun(tx.QueryRowContext(ctx, query, args...))
+WHERE target_id = $1 AND kind = 'summary' AND status IN ('pending', 'running')
+FOR UPDATE`, int64(target.ID())))
 	if errors.Is(err, sql.ErrNoRows) {
 		return collection.Run{}, false, nil
 	}
 	if err != nil {
 		return collection.Run{}, false, mapCollectionReadError(ctx, err)
 	}
-	if !runMatchesTarget(run, target) || (target.TaskType() == collection.TaskTypeSummary && run.AppID() != appID) {
+	if !runMatchesTarget(run, target) {
 		return collection.Run{}, false, ErrCollectionIntegrity
 	}
 	return run, true, nil
@@ -1012,13 +1030,6 @@ func mapCollectionWriteError(ctx context.Context, err error) error {
 
 func validCollectionSide(side market.Side) bool {
 	return side == market.SideBid || side == market.SideAsk
-}
-
-func validateStoredPeriod(period time.Duration) error {
-	if period <= 0 || period%time.Microsecond != 0 {
-		return ErrCollectionInvalidInput
-	}
-	return nil
 }
 
 func validTargetTransition(transition TargetTransition) bool {
@@ -1091,24 +1102,17 @@ func validCollectionTime(value time.Time) bool {
 }
 
 func collectionTargetLockKey(input targetCreate) string {
-	key := "collection-target:" + string(input.taskType) + ":" + string(input.platform) + ":"
-	if input.appID != nil {
-		return key + strconv.FormatInt(*input.appID, 10)
-	}
-	return key + string(*input.side)
+	return "collection-target:summary:" + string(input.platform) + ":" +
+		strconv.FormatInt(input.appID, 10) + ":" + string(input.side)
 }
 
 func sameTargetCreate(target collection.Target, input targetCreate) bool {
-	if target.TaskType() != input.taskType || target.Platform() != input.platform || target.Desired() != input.desired {
+	if target.TaskType() != collection.TaskTypeSummary || target.Platform() != input.platform || target.Desired() != input.desired {
 		return false
 	}
-	if input.taskType == collection.TaskTypeCatalog {
-		appID, _ := target.AppID()
-		period, _ := target.Period()
-		return input.appID != nil && input.period != nil && appID == *input.appID && period == *input.period
-	}
-	side, _ := target.Side()
-	return input.side != nil && side == *input.side
+	appID, hasApp := target.AppID()
+	side, hasSide := target.Side()
+	return hasApp && hasSide && appID == input.appID && side == input.side
 }
 
 func validTargetSuccessor(current, next collection.Target) bool {
@@ -1140,12 +1144,10 @@ func sameTargetState(left, right collection.Target) bool {
 	rightApp, rightHasApp := right.AppID()
 	leftSide, leftHasSide := left.Side()
 	rightSide, rightHasSide := right.Side()
-	leftPeriod, leftHasPeriod := left.Period()
-	rightPeriod, rightHasPeriod := right.Period()
 	leftRecheck, leftHasRecheck := left.RecheckAt()
 	rightRecheck, rightHasRecheck := right.RecheckAt()
 	return leftHasApp == rightHasApp && leftApp == rightApp && leftHasSide == rightHasSide && leftSide == rightSide &&
-		leftHasPeriod == rightHasPeriod && leftPeriod == rightPeriod && leftHasRecheck == rightHasRecheck && leftRecheck.Equal(rightRecheck)
+		leftHasRecheck == rightHasRecheck && leftRecheck.Equal(rightRecheck)
 }
 
 func runMatchesTarget(run collection.Run, target collection.Target) bool {
@@ -1153,14 +1155,13 @@ func runMatchesTarget(run collection.Run, target collection.Target) bool {
 	if !hasTarget || targetID != target.ID() || run.TaskType() != target.TaskType() || run.Platform() != target.Platform() {
 		return false
 	}
-	if target.TaskType() == collection.TaskTypeCatalog {
-		appID, _ := target.AppID()
-		_, hasSide := run.Side()
-		return run.AppID() == appID && !hasSide
+	if target.TaskType() != collection.TaskTypeSummary {
+		return false
 	}
-	targetSide, _ := target.Side()
-	runSide, hasSide := run.Side()
-	return hasSide && runSide == targetSide
+	targetApp, hasTargetApp := target.AppID()
+	targetSide, hasTargetSide := target.Side()
+	runSide, hasRunSide := run.Side()
+	return hasTargetApp && hasTargetSide && hasRunSide && run.AppID() == targetApp && runSide == targetSide
 }
 
 func sameRun(left, right collection.Run) bool {
@@ -1197,11 +1198,7 @@ func targetRecheckValue(target collection.Target) any {
 }
 
 func targetPeriodValue(target collection.Target) any {
-	value, present := target.Period()
-	if !present {
-		return nil
-	}
-	return value.Microseconds()
+	return nil
 }
 
 func runStartedValue(run collection.Run) any {
@@ -1218,27 +1215,6 @@ func runFinishedValue(run collection.Run) any {
 		return nil
 	}
 	return value
-}
-
-func nullableCollectionInt64(value *int64) any {
-	if value == nil {
-		return nil
-	}
-	return *value
-}
-
-func nullableSide(value *market.Side) any {
-	if value == nil {
-		return nil
-	}
-	return string(*value)
-}
-
-func nullablePeriod(value *time.Duration) any {
-	if value == nil {
-		return nil
-	}
-	return value.Microseconds()
 }
 
 func nullableCompleteness(value collection.Completeness) any {
@@ -1303,24 +1279,13 @@ func scanCollectionTarget(scanner rowScanner) (collection.Target, int64, error) 
 	var target collection.Target
 	var err error
 	switch collection.TaskType(data.kind) {
-	case collection.TaskTypeCatalog:
-		if !data.appID.Valid || data.side.Valid || !data.periodMicros.Valid || data.periodMicros.Int64 < 1 ||
-			data.periodMicros.Int64 > math.MaxInt64/int64(time.Microsecond) {
-			return collection.Target{}, 0, ErrCollectionIntegrity
-		}
-		target, err = collection.NewCatalogTarget(collection.CatalogTargetInput{
-			ID: collection.TargetID(data.id), Revision: collection.Revision(data.revision),
-			AppID: data.appID.Int64, Period: time.Duration(data.periodMicros.Int64) * time.Microsecond,
-			Desired: commonDesired, Actual: commonActual, SwitchVersion: collection.Revision(data.switchVersion),
-			Reason: commonReason, Recovery: commonRecovery, RecheckAt: recheckAt, ChangedAt: changedAt,
-		})
 	case collection.TaskTypeSummary:
-		if data.appID.Valid || !data.side.Valid || data.periodMicros.Valid {
+		if !data.appID.Valid || data.appID.Int64 < 1 || !data.side.Valid || data.periodMicros.Valid {
 			return collection.Target{}, 0, ErrCollectionIntegrity
 		}
 		target, err = collection.NewSummaryTarget(collection.SummaryTargetInput{
 			ID: collection.TargetID(data.id), Revision: collection.Revision(data.revision),
-			Platform: collection.Platform(data.platform), Side: market.Side(data.side.String),
+			Platform: collection.Platform(data.platform), AppID: data.appID.Int64, Side: market.Side(data.side.String),
 			Desired: commonDesired, Actual: commonActual, SwitchVersion: collection.Revision(data.switchVersion),
 			Reason: commonReason, Recovery: commonRecovery, RecheckAt: recheckAt, ChangedAt: changedAt,
 		})
@@ -1392,16 +1357,6 @@ func scanCollectionRun(scanner rowScanner) (collection.Run, error) {
 	commonReason := collection.RunReason(data.reason)
 	var run collection.Run
 	switch collection.TaskType(data.kind) {
-	case collection.TaskTypeCatalog:
-		if !data.targetID.Valid || data.side.Valid || data.productID.Valid || !data.switchVersion.Valid {
-			return collection.Run{}, ErrCollectionIntegrity
-		}
-		run, err = collection.NewCatalogRun(collection.CatalogRunInput{
-			ID: collection.RunID(data.id), TargetID: collection.TargetID(data.targetID.Int64), AppID: data.appID,
-			SwitchVersion: collection.Revision(data.switchVersion.Int64), RunSequence: collection.Sequence(data.runSequence),
-			State: commonState, Completeness: completeness, Reason: commonReason, CurrentCursor: cursor,
-			LastPageSequence: data.lastPageSequence, CreatedAt: createdAt, StartedAt: startedAt, FinishedAt: finishedAt,
-		})
 	case collection.TaskTypeSummary:
 		if !data.targetID.Valid || !data.side.Valid || data.productID.Valid || !data.switchVersion.Valid {
 			return collection.Run{}, ErrCollectionIntegrity

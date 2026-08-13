@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"buff-go/internal/market"
 	"buff-go/internal/ratelimit"
 	"buff-go/internal/resource"
 )
@@ -595,7 +596,7 @@ func testRateLimitConcurrentAdmission(t *testing.T, dsn string) {
 	}
 	persistedDeadline := *profileStates[0].CooldownUntil
 
-	restarted, err := NewWithCredentialCipher(db, mustResourceCipher(t, 0x45))
+	restarted, err := New(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1138,7 +1139,7 @@ func testRateLimitSameCombinationExitChange(t *testing.T, dsn string) {
 	}
 
 	lease, err := fixture.coordinator.AcquireCombination(
-		t.Context(), fixture.component, fixture.combinationID, resource.TargetRegionDomestic, verifiedAt,
+		t.Context(), fixture.component, fixture.combinationID, resource.TargetRegionDomestic, verifiedAt, 730, market.SideAsk,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1396,7 +1397,7 @@ func newRateLimitTestStore(t *testing.T, dsn string) (*Store, *sql.DB) {
 	if err := ApplyMigrations(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewWithCredentialCipher(db, mustResourceCipher(t, 0x45))
+	store, err := New(db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1450,7 +1451,11 @@ func newRateLimitRequestFixtureWithValidity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err = store.AssignNodePlatform(ctx, node.ID, node.AssignmentRevision, platform)
+	node, err = store.AssignNodeGame(ctx, node.ID, node.AssignmentRevision, 730)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err = store.AssignNodeSide(ctx, node.ID, node.AssignmentRevision, platform, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1466,7 +1471,7 @@ func newRateLimitRequestFixtureWithValidity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, resource.TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, resource.TargetRegionDomestic, now, 730, market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}

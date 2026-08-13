@@ -191,7 +191,7 @@ func requireCombinationFree(t *testing.T, harness *scheduleHarness, id int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	lease, err := harness.coordinator.AcquireCombination(ctx, component, resource.CombinationID(id),
-		resource.TargetRegionDomestic, scheduleNow())
+		resource.TargetRegionDomestic, scheduleNow(), 730, market.SideAsk)
 	if err != nil {
 		t.Fatalf("combination %d is still occupied: %v", id, err)
 	}
@@ -202,9 +202,11 @@ func requireCombinationFree(t *testing.T, harness *scheduleHarness, id int64) {
 
 // 常驻循环按间隔重复执行周期，取消后干净退出。
 func TestDaemonRunsRepeatedCyclesUntilCanceled(t *testing.T) {
-	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness := newDaemonHarness(t, 5*time.Millisecond, func(config *SchedulerConfig) {
+		config.SummaryPeriod = time.Millisecond
+	})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	stop := harness.start(t)
 	waitFor(t, "three resident cycles", func() bool { return len(harness.recorded()) >= 3 })
@@ -230,16 +232,15 @@ func TestDaemonRunsRepeatedCyclesUntilCanceled(t *testing.T) {
 	requireCombinationFree(t, harness.scheduleHarness, 1)
 }
 
-// 关闭一个方向后不再派发该方向的请求，另一方向与目录同步继续运行。
+// 关闭一个方向后不再派发该方向的请求，另一方向继续运行。
 func TestDaemonDisabledDirectionStopsWhileOthersContinue(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, func(config *SchedulerConfig) {
 		config.SummaryPeriod = time.Millisecond
 	})
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
-	catalogTarget := harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
-	ask := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
-	bid := harness.store.addSummaryTarget(t, PlatformSteam, market.SideBid, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", 730, market.SideBid, netip.MustParseAddr("2.2.2.3"))
+	ask := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	bid := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideBid, DesiredEnabled)
 
 	// 先跑一轮建立基线，再关闭 ask 方向。
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
@@ -254,9 +255,6 @@ func TestDaemonDisabledDirectionStopsWhileOthersContinue(t *testing.T) {
 	waitFor(t, "the other direction to keep running", func() bool {
 		return harness.store.runsForTarget(bid.ID()) >= 2
 	})
-	waitFor(t, "catalog sync to keep running", func() bool {
-		return harness.store.runsForTarget(catalogTarget.ID()) >= 2
-	})
 	stop()
 
 	if runs := harness.store.runsForTarget(ask.ID()); runs != 1 {
@@ -264,52 +262,36 @@ func TestDaemonDisabledDirectionStopsWhileOthersContinue(t *testing.T) {
 	}
 }
 
-// 关闭一个目录目标不影响其他 appid 的目录同步与摘要方向。
+// 禁用一个 appid 的摘要不影响另一个。
 func TestDaemonDisabledCatalogDoesNotAffectOtherGames(t *testing.T) {
-	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
-	first := harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
-	second := harness.store.addCatalogTarget(t, 252490, time.Millisecond, DesiredEnabled)
-	summary := harness.store.addSummaryTarget(t, PlatformSteam, market.SideAsk, DesiredEnabled)
+	harness := newDaemonHarness(t, 5*time.Millisecond, func(config *SchedulerConfig) {
+		config.SummaryPeriod = time.Millisecond
+	})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", 252490, market.SideAsk, netip.MustParseAddr("2.2.2.3"))
+	first := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	second := harness.store.addSummaryTarget(t, PlatformSteam, 252490, market.SideAsk, DesiredEnabled)
 	harness.store.disable(t, first.ID())
 
 	stop := harness.start(t)
-	waitFor(t, "the disabled catalog target to stop", func() bool {
+	waitFor(t, "the disabled summary target to stop", func() bool {
 		return harness.store.target(first.ID()).Actual() == ActualStopped
 	})
-	waitFor(t, "the other catalog target to run", func() bool {
+	waitFor(t, "the other summary target to run", func() bool {
 		return harness.store.runsForTarget(second.ID()) >= 1
-	})
-	// 摘要仍然覆盖两个游戏：目录开关只停目录同步本身。
-	coveredGames := func() map[int64]bool {
-		games := map[int64]bool{}
-		for _, call := range harness.fetcher.recordedCalls() {
-			if call.taskType == TaskTypeSummary {
-				games[call.appID] = true
-			}
-		}
-		return games
-	}
-	waitFor(t, "the summary direction to cover both games", func() bool {
-		games := coveredGames()
-		return games[730] && games[252490]
 	})
 	stop()
 
 	if runs := harness.store.runsForTarget(first.ID()); runs != 0 {
-		t.Fatalf("disabled catalog target must not run, got %d runs", runs)
-	}
-	if harness.store.runsForTarget(summary.ID()) < 2 {
-		t.Fatalf("summary must run once per game, got %d runs", harness.store.runsForTarget(summary.ID()))
+		t.Fatalf("disabled summary target must not run, got %d runs", runs)
 	}
 }
 
 // 运行中途关闭目标：已提交页保留、运行终结为部分覆盖、占用释放。
 func TestDaemonStopPreservesCommittedPages(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 4
 
 	var once sync.Once
@@ -342,8 +324,8 @@ func TestDaemonStopPreservesCommittedPages(t *testing.T) {
 // 开关仍启用的临时失败在下一周期新建运行。
 func TestDaemonTransientFailureStartsNewRunNextCycle(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	var once sync.Once
 	harness.fetcher.hook = func(PageFetch) error {
@@ -374,12 +356,12 @@ func TestDaemonTransientFailureStartsNewRunNextCycle(t *testing.T) {
 // 上一进程遗留的运行保留续点：重启不丢弃已提交的分页，也不重复消耗限频预算。
 func TestDaemonRecoverResumesInterruptedRun(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.pagesPerRun = 3
 
 	// 上一进程完成了第一页后中断：运行仍活动，目标停在 running。
-	orphan, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	orphan, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +372,7 @@ func TestDaemonRecoverResumesInterruptedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := harness.store.CommitCatalogPage(context.Background(), CatalogPageCommit{
+	if _, _, err := harness.store.CommitSummaryPage(context.Background(), SummaryPageCommit{
 		RunID: orphan.ID(), PageSequence: 1, CursorBefore: Cursor{}, CursorAfter: cursor,
 		CollectedAt: scheduleNow(),
 	}); err != nil {
@@ -434,9 +416,9 @@ func TestDaemonRecoverResumesInterruptedRun(t *testing.T) {
 // 开关已推进的遗留运行必须结束，否则活动运行唯一性会永久挡住新运行。
 func TestDaemonRecoverFinishesUnresumableRuns(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	stale := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	staleRun, _, err := harness.store.CreateCatalogRun(context.Background(), stale.ID(), stale.SwitchVersion(), Cursor{})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	stale := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	staleRun, _, err := harness.store.CreateSummaryRun(context.Background(), stale.ID(), stale.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +441,7 @@ func TestDaemonRecoverFinishesUnresumableRuns(t *testing.T) {
 	}
 	// 结束旧运行后当前开关可以新建运行。
 	current := harness.store.target(stale.ID())
-	if _, created, err := harness.store.CreateCatalogRun(context.Background(), current.ID(), current.SwitchVersion(), Cursor{}); err != nil || !created {
+	if _, created, err := harness.store.CreateSummaryRun(context.Background(), current.ID(), current.SwitchVersion(), Cursor{}); err != nil || !created {
 		t.Fatalf("recovered target must accept a new run, created=%v err=%v", created, err)
 	}
 }
@@ -467,8 +449,8 @@ func TestDaemonRecoverFinishesUnresumableRuns(t *testing.T) {
 // 进程在关闭受理与完成之间中断时，启动恢复补齐 stopped。
 func TestDaemonRecoverCompletesInterruptedStop(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	orphan, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	orphan, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +475,7 @@ func TestDaemonRecoverCompletesInterruptedStop(t *testing.T) {
 // 恢复的全局读取失败视为启动失败，常驻循环不会带着未知状态继续。
 func TestDaemonRunFailsWhenRecoveryFails(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.store.mu.Lock()
 	harness.store.failTargetsErr = errors.New("target store is unavailable")
 	harness.store.mu.Unlock()
@@ -506,12 +488,12 @@ func TestDaemonRunFailsWhenRecoveryFails(t *testing.T) {
 // 单个目标的恢复失败被隔离：其余目标照常收敛，常驻循环仍然启动。
 func TestDaemonRecoveryIsolatesTargetFailures(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	broken := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	if _, _, err := harness.store.CreateCatalogRun(context.Background(), broken.ID(), broken.SwitchVersion(), Cursor{}); err != nil {
+	broken := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	if _, _, err := harness.store.CreateSummaryRun(context.Background(), broken.ID(), broken.SwitchVersion(), Cursor{}); err != nil {
 		t.Fatal(err)
 	}
 	harness.store.disable(t, broken.ID())
-	healthy := harness.store.addCatalogTarget(t, 252490, time.Hour, DesiredEnabled)
+	healthy := harness.store.addSummaryTarget(t, PlatformSteam, 252490, market.SideAsk, DesiredEnabled)
 	harness.store.disable(t, healthy.ID())
 	harness.store.mu.Lock()
 	harness.store.failFinishErr = errors.New("run store is unavailable")
@@ -535,8 +517,8 @@ func TestDaemonRecoveryIsolatesTargetFailures(t *testing.T) {
 // 关闭请求的写回失败留下残留运行时，下一次收敛兜底结束它再写回 stopped。
 func TestDaemonReconcileStopsFinishesLeftoverRun(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	leftover, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	leftover, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,8 +547,8 @@ func TestDaemonReconcileStopsFinishesLeftoverRun(t *testing.T) {
 // 收敛失败时不写回 stopped，避免 stopped 目标下仍挂着活动运行。
 func TestDaemonReconcileStopsKeepsStoppingWhenRunSurvives(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	if _, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{}); err != nil {
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	if _, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{}); err != nil {
 		t.Fatal(err)
 	}
 	harness.store.disable(t, target.ID())
@@ -589,8 +571,8 @@ func TestDaemonReconcileStopsKeepsStoppingWhenRunSurvives(t *testing.T) {
 // 遗留运行的处置规则：只有目标仍启用、开关一致且未超寿命的运行才保留续点。
 func TestRecoverRunDisposition(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	run, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	run, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +623,7 @@ func TestRecoverRunDisposition(t *testing.T) {
 // 状态被其他所有者接管时放弃收敛，但必须留下可观测的痕迹。
 func TestDaemonReportsSkippedTargets(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.store.disable(t, target.ID())
 	harness.store.mu.Lock()
 	harness.store.conflictTargets = map[TargetID]bool{target.ID(): true}
@@ -670,8 +652,8 @@ func TestDaemonReportsSkippedTargets(t *testing.T) {
 // 启动恢复的结果必须上报，否则逐对象失败无处可查。
 func TestDaemonReportsRecoveryToObserver(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	if _, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{}); err != nil {
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	if _, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{}); err != nil {
 		t.Fatal(err)
 	}
 	harness.store.disable(t, target.ID())
@@ -697,8 +679,8 @@ func TestDaemonReportsRecoveryToObserver(t *testing.T) {
 func TestDaemonRecoverFinishesStaleRun(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, func(config *SchedulerConfig) {})
 	harness.daemon.config.MaxResumeAge = time.Nanosecond
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	stale, _, err := harness.store.CreateCatalogRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	stale, _, err := harness.store.CreateSummaryRun(context.Background(), target.ID(), target.SwitchVersion(), Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,8 +708,8 @@ func TestDaemonRecoverFinishesStaleRun(t *testing.T) {
 // 关闭时补齐已受理但未完成的关闭请求，否则目标既停不干净也无法重新启用。
 func TestDaemonConvergesPendingStopsOnShutdown(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	stop := harness.start(t)
 	waitFor(t, "the first cycle to finish", func() bool { return len(harness.recorded()) >= 1 })
@@ -743,7 +725,7 @@ func TestDaemonConvergesPendingStopsOnShutdown(t *testing.T) {
 // 调度周期本身失败时必须记入 DaemonCycle.Err，而关闭收敛照常完成。
 func TestDaemonReportsScheduleFailure(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.store.disable(t, target.ID())
 	// 只让本周期的第一次目标读取（调度器的那次）失败，收敛的那次照常成功。
 	harness.store.mu.Lock()
@@ -763,9 +745,9 @@ func TestDaemonReportsScheduleFailure(t *testing.T) {
 // 关闭收敛失败时同样记入 DaemonCycle.Err，而调度周期照常完成。
 func TestDaemonReportsStopConvergenceFailure(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	running := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
-	stopping := harness.store.addCatalogTarget(t, 252490, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	running := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	stopping := harness.store.addSummaryTarget(t, PlatformSteam, 252490, market.SideAsk, DesiredEnabled)
 	harness.store.disable(t, stopping.ID())
 	// ActiveRuns 只被关闭收敛使用，调度周期不受影响。
 	harness.store.mu.Lock()
@@ -792,9 +774,11 @@ func TestDaemonReportsStopConvergenceFailure(t *testing.T) {
 
 // 常驻循环不因单个周期失败退出：存储恢复后继续派发。
 func TestDaemonSurvivesCycleFailure(t *testing.T) {
-	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness := newDaemonHarness(t, 5*time.Millisecond, func(config *SchedulerConfig) {
+		config.SummaryPeriod = time.Millisecond
+	})
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	stop := harness.start(t)
 	waitFor(t, "the first cycle", func() bool { return len(harness.recorded()) >= 1 })
@@ -832,7 +816,7 @@ func TestDaemonSurvivesCycleFailure(t *testing.T) {
 // 活动运行读取失败同样是恢复的全局读取失败，常驻循环不得启动。
 func TestDaemonRunFailsWhenActiveRunsUnreadable(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.store.mu.Lock()
 	harness.store.failActiveRunsErr = errors.New("run store is unavailable")
 	harness.store.mu.Unlock()
@@ -845,8 +829,8 @@ func TestDaemonRunFailsWhenActiveRunsUnreadable(t *testing.T) {
 // 实例锁失效意味着可能已有接替进程，常驻循环必须立即停止写入并退出。
 func TestDaemonExitsWhenInstanceLockIsLost(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -871,8 +855,8 @@ func TestDaemonExitsWhenInstanceLockIsLost(t *testing.T) {
 // 另一个常驻进程持有实例锁时拒绝启动，退出后释放锁供接替者取得。
 func TestDaemonRefusesToRunWithoutInstanceLock(t *testing.T) {
 	harness := newDaemonHarness(t, 5*time.Millisecond, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addCatalogTarget(t, 730, time.Millisecond, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	stop := harness.start(t)
 	waitFor(t, "the running daemon to take the instance lock", func() bool {
@@ -909,8 +893,8 @@ func TestDaemonRefusesToRunWithoutInstanceLock(t *testing.T) {
 // 失去独占后不得再写库：关闭收敛在复验失败时必须被跳过。
 func TestDaemonSkipsShutdownConvergenceWithoutInstanceLock(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
-	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	target := harness.store.addCatalogTarget(t, 730, time.Hour, DesiredEnabled)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

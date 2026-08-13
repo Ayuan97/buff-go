@@ -13,25 +13,13 @@ func targetTime(second int) time.Time {
 	return time.Date(2026, 8, 11, 12, 0, second, 123000, time.UTC)
 }
 
-func catalogTargetInput() CatalogTargetInput {
-	return CatalogTargetInput{
-		ID:            1,
-		Revision:      1,
-		AppID:         730,
-		Period:        time.Hour,
-		Desired:       DesiredDisabled,
-		Actual:        ActualStopped,
-		SwitchVersion: 1,
-		ChangedAt:     targetTime(0),
-	}
-}
-
 func summaryTargetInput() SummaryTargetInput {
 	recheck := targetTime(2)
 	return SummaryTargetInput{
 		ID:            2,
 		Revision:      3,
 		Platform:      "steam",
+		AppID:         730,
 		Side:          market.SideAsk,
 		Desired:       DesiredEnabled,
 		Actual:        ActualWaiting,
@@ -43,38 +31,38 @@ func summaryTargetInput() SummaryTargetInput {
 	}
 }
 
-func TestTargetConstructorsRejectInvalidShapes(t *testing.T) {
-	catalogCases := []struct {
-		name   string
-		mutate func(*CatalogTargetInput)
-	}{
-		{"zero id", func(input *CatalogTargetInput) { input.ID = 0 }},
-		{"zero revision", func(input *CatalogTargetInput) { input.Revision = 0 }},
-		{"zero switch version", func(input *CatalogTargetInput) { input.SwitchVersion = 0 }},
-		{"zero appid", func(input *CatalogTargetInput) { input.AppID = 0 }},
-		{"zero period", func(input *CatalogTargetInput) { input.Period = 0 }},
-		{"nanosecond period", func(input *CatalogTargetInput) { input.Period = time.Hour + time.Nanosecond }},
-		{"enabled stopped", func(input *CatalogTargetInput) { input.Desired = DesiredEnabled }},
-		{"reason on stopped", func(input *CatalogTargetInput) { input.Reason = TargetReasonCooldown }},
-		{"non UTC time", func(input *CatalogTargetInput) { input.ChangedAt = input.ChangedAt.In(time.FixedZone("offset", 0)) }},
-		{"nanosecond time", func(input *CatalogTargetInput) { input.ChangedAt = input.ChangedAt.Add(time.Nanosecond) }},
+func stoppedSummaryTargetInput() SummaryTargetInput {
+	return SummaryTargetInput{
+		ID:            1,
+		Revision:      1,
+		Platform:      "steam",
+		AppID:         730,
+		Side:          market.SideAsk,
+		Desired:       DesiredDisabled,
+		Actual:        ActualStopped,
+		SwitchVersion: 1,
+		ChangedAt:     targetTime(0),
 	}
-	for _, test := range catalogCases {
-		t.Run("catalog "+test.name, func(t *testing.T) {
-			input := catalogTargetInput()
-			test.mutate(&input)
-			if _, err := NewCatalogTarget(input); err == nil {
-				t.Fatal("NewCatalogTarget() accepted invalid input")
-			}
-		})
-	}
+}
 
+func TestTargetConstructorsRejectInvalidShapes(t *testing.T) {
 	summaryCases := []struct {
 		name   string
 		mutate func(*SummaryTargetInput)
 	}{
+		{"zero id", func(input *SummaryTargetInput) { input.ID = 0 }},
+		{"zero revision", func(input *SummaryTargetInput) { input.Revision = 0 }},
+		{"zero switch version", func(input *SummaryTargetInput) { input.SwitchVersion = 0 }},
+		{"zero appid", func(input *SummaryTargetInput) { input.AppID = 0 }},
 		{"invalid platform", func(input *SummaryTargetInput) { input.Platform = "Steam" }},
 		{"invalid side", func(input *SummaryTargetInput) { input.Side = "sell" }},
+		{"enabled stopped", func(input *SummaryTargetInput) {
+			input.Desired = DesiredEnabled
+			input.Actual = ActualStopped
+			input.Reason = TargetReasonNone
+			input.Recovery = RecoveryNone
+			input.RecheckAt = nil
+		}},
 		{"missing waiting reason", func(input *SummaryTargetInput) { input.Reason = TargetReasonNone }},
 		{"manual waiting", func(input *SummaryTargetInput) { input.Recovery = RecoveryManual }},
 		{"missing waiting recheck", func(input *SummaryTargetInput) { input.RecheckAt = nil }},
@@ -83,6 +71,12 @@ func TestTargetConstructorsRejectInvalidShapes(t *testing.T) {
 			value := input.ChangedAt.Add(-time.Microsecond)
 			input.RecheckAt = &value
 		}},
+		{"reason on stopped", func(input *SummaryTargetInput) {
+			*input = stoppedSummaryTargetInput()
+			input.Reason = TargetReasonCooldown
+		}},
+		{"non UTC time", func(input *SummaryTargetInput) { input.ChangedAt = input.ChangedAt.In(time.FixedZone("offset", 0)) }},
+		{"nanosecond time", func(input *SummaryTargetInput) { input.ChangedAt = input.ChangedAt.Add(time.Nanosecond) }},
 	}
 	for _, test := range summaryCases {
 		t.Run("summary "+test.name, func(t *testing.T) {
@@ -139,7 +133,7 @@ func TestTargetReasonStateMatrix(t *testing.T) {
 }
 
 func TestTargetTransitionsAndFences(t *testing.T) {
-	target, err := NewCatalogTarget(catalogTargetInput())
+	target, err := NewSummaryTarget(stoppedSummaryTargetInput())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +144,9 @@ func TestTargetTransitionsAndFences(t *testing.T) {
 	}
 	if enabled.Desired() != DesiredEnabled || enabled.Actual() != ActualStarting || enabled.Revision() != 2 || enabled.SwitchVersion() != 2 {
 		t.Fatalf("enabled target = %+v", enabled)
+	}
+	if appID, ok := enabled.AppID(); !ok || appID != 730 {
+		t.Fatalf("summary AppID() = %d, %v", appID, ok)
 	}
 	if target.Desired() != DesiredDisabled || target.Revision() != 1 {
 		t.Fatal("Enable mutated its receiver")
@@ -178,26 +175,11 @@ func TestTargetTransitionsAndFences(t *testing.T) {
 		t.Fatalf("transient failure recovery = %+v", afterFailure)
 	}
 
-	periodChanged, err := afterFailure.ChangePeriod(2*time.Hour, targetTime(4))
+	disabled, err := afterFailure.Disable(targetTime(5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if periodChanged.Revision() != afterFailure.Revision()+1 || periodChanged.SwitchVersion() != afterFailure.SwitchVersion() {
-		t.Fatalf("period change fences = revision %d switch %d", periodChanged.Revision(), periodChanged.SwitchVersion())
-	}
-	if !periodChanged.ChangedAt().Equal(afterFailure.ChangedAt()) {
-		t.Fatal("period change moved the actual-state timestamp")
-	}
-	samePeriod, err := periodChanged.ChangePeriod(2*time.Hour, targetTime(4))
-	if err != nil || !reflect.DeepEqual(samePeriod, periodChanged) {
-		t.Fatalf("idempotent ChangePeriod() = %+v, %v", samePeriod, err)
-	}
-
-	disabled, err := periodChanged.Disable(targetTime(5))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if disabled.Desired() != DesiredDisabled || disabled.Actual() != ActualStopping || disabled.Revision() != periodChanged.Revision()+1 || disabled.SwitchVersion() != periodChanged.SwitchVersion()+1 {
+	if disabled.Desired() != DesiredDisabled || disabled.Actual() != ActualStopping || disabled.Revision() != afterFailure.Revision()+1 || disabled.SwitchVersion() != afterFailure.SwitchVersion()+1 {
 		t.Fatalf("disabled target = %+v", disabled)
 	}
 	if _, err := disabled.Enable(targetTime(5)); err == nil {
@@ -213,30 +195,27 @@ func TestTargetTransitionsAndFences(t *testing.T) {
 }
 
 func TestTargetTransitionBoundaries(t *testing.T) {
-	target, err := NewCatalogTarget(catalogTargetInput())
+	target, err := NewSummaryTarget(stoppedSummaryTargetInput())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := target.ChangePeriod(time.Hour+time.Nanosecond, targetTime(1)); err == nil {
-		t.Fatal("ChangePeriod accepted nanosecond precision")
 	}
 	if _, err := target.Enable(targetTime(0).Add(-time.Microsecond)); err == nil {
 		t.Fatal("Enable accepted a backwards timestamp")
 	}
 
-	maxRevisionInput := catalogTargetInput()
+	maxRevisionInput := stoppedSummaryTargetInput()
 	maxRevisionInput.Revision = Revision(math.MaxInt64)
-	maxRevision, err := NewCatalogTarget(maxRevisionInput)
+	maxRevision, err := NewSummaryTarget(maxRevisionInput)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := maxRevision.ChangePeriod(2*time.Hour, targetTime(1)); err == nil {
-		t.Fatal("ChangePeriod overflowed revision")
+	if _, err := maxRevision.Enable(targetTime(1)); err == nil {
+		t.Fatal("Enable overflowed revision")
 	}
 
-	maxSwitchInput := catalogTargetInput()
+	maxSwitchInput := stoppedSummaryTargetInput()
 	maxSwitchInput.SwitchVersion = Revision(math.MaxInt64)
-	maxSwitch, err := NewCatalogTarget(maxSwitchInput)
+	maxSwitch, err := NewSummaryTarget(maxSwitchInput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,9 +227,6 @@ func TestTargetTransitionBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := summary.ChangePeriod(time.Hour, targetTime(2)); err == nil {
-		t.Fatal("ChangePeriod accepted a summary target")
-	}
 	recheck := targetTime(3)
 	if _, err := summary.MarkBlocked(TargetReasonSessionInvalid, &recheck, targetTime(2)); err == nil {
 		t.Fatal("manual blocker accepted recheck_at")
@@ -258,7 +234,7 @@ func TestTargetTransitionBoundaries(t *testing.T) {
 }
 
 func TestTargetBlockedAndErrorTransitions(t *testing.T) {
-	target, err := NewCatalogTarget(catalogTargetInput())
+	target, err := NewSummaryTarget(stoppedSummaryTargetInput())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,27 +312,5 @@ func TestTargetAutomaticRecoveryWaitsForRecheck(t *testing.T) {
 	}
 	if running.Actual() != ActualRunning || running.Recovery() != RecoveryNone {
 		t.Fatalf("running target = %+v", running)
-	}
-}
-
-func TestTargetPeriodChangeDoesNotInvalidatePastRecheck(t *testing.T) {
-	target, err := NewCatalogTarget(catalogTargetInput())
-	if err != nil {
-		t.Fatal(err)
-	}
-	target, err = target.Enable(targetTime(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	waiting, err := target.MarkWaiting(TargetReasonNextCycle, targetTime(3), targetTime(2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed, err := waiting.ChangePeriod(2*time.Hour, targetTime(4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed.ChangedAt().Equal(waiting.ChangedAt()) || changed.Revision() != waiting.Revision()+1 {
-		t.Fatalf("period-only change = %+v", changed)
 	}
 }

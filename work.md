@@ -5,11 +5,12 @@
 1. README 定义产品；ARCHITECTURE 定义目标模块；REFERENCE 定义统一语义；CONSOLE 定义 Web 操作流程；`platforms/` 保存平台接口证据和开发探测材料。  
 2. `platforms/private/` 不作为正式运行时账号来源；运行账号由 PostgreSQL 和 Web 控制面维护。  
 3. 平台字段进入开发前，必须先在对应平台文档中达到“已验证”。  
-4. 完成一个 Goal 后勾选 `todo.md`，并在本文件写明输入、边界、产物、验收命令、结果和仍不确定项。  
+4. 仅在完成一个 Goal 时勾选 `todo.md`，并在本文件写明输入、边界、产物、验收命令、结果和仍不确定项；非 Goal 的日常改动不强制写这两份文件。  
 5. 当前 Go 验收命令：`go test ./...` 和 `go vet ./...`；引入 Web 嵌入后固定先执行 `npm ci`、`npm run typecheck`、`npm run build`，再执行 Go 测试与编译。  
 6. 平台适配器源码进入 `internal/platform/`；可执行入口进入 `cmd/buffgo/`。  
 7. Web 源码进入 `web/`；`internal/webui/` 只嵌入构建产物，不承载页面、数据库或采集逻辑。  
 8. 目录迁移按真实业务切片执行，不创建空目标包，不把移动与行为改写混入同一 Goal。  
+
 
 ## Goal 验收记录
 
@@ -270,17 +271,170 @@ Git 边界：当前是旧项目大量 tracked 删除、新项目整体未跟踪�
 - Host 与 Origin：API 只有显式 `-api-listen 127.0.0.1:<port>` 才启动；监听地址只接受回环 IP 和明确 TCP 端口。请求 Host 必须与监听 authority 精确一致；默认测试 Handler 仅接受 loopback，拒绝公网域名、通配地址、错端口、尾点和畸形 authority。不信任 `X-Forwarded-Host`，出现 Origin 时必须与请求 scheme、host、port 完全同源；POST 缺少 Origin 直接拒绝。
 - 请求与响应：全局只允许 GET/POST，显式拒绝 HEAD、OPTIONS、PUT、PATCH、DELETE 等方法；POST 要求 `application/json`（允许 charset 参数），否则返回固定错误码。响应不设置 CORS，统一写入 CSP、`nosniff`、`Referrer-Policy: no-referrer` 和 `X-Frame-Options: DENY`。
 - 控制会话：安全上下文 GET 生成进程内高熵 session cookie 和独立 CSRF token，Cookie 为 host-only、`HttpOnly`、`SameSite=Strict`、`Path=/`、短期过期；POST 必须同时携带 cookie、专用 CSRF header 和同源 JSON。token 绑定 session、过期和跨 session 均用固定 `csrf_rejected` 拒绝，比较使用 constant-time；GET 不创建业务数据。当前回环 HTTP 不设置 `Secure`，TLS/远程访问留后续安全任务。
-- 接线：`cmd/buffgo` 新增可选 `-api-listen`，默认空值不改变现有 legacy runtime 行为；设置后 app 在启动 legacy runtime 前绑定 HTTP listener，并在取消、runtime 退出或 server 错误时统一收敛。错误仅返回固定 code/error_ref，不回显请求数据或凭据。
+- 接线（本 Goal 当时状态，已被 Goal 2B 废止）：当时 `cmd/buffgo` 新增可选 `-api-listen`，默认仍走 legacy runtime；设置后在启动 legacy 前绑定 HTTP listener。Goal 2B 已删除 legacy，现行契约为**必填** `-api-listen` 的 API-only 进程。错误仅返回固定 code/error_ref，不回显请求数据或凭据。
 - 验收：`go test -count=1 ./internal/api ./internal/app ./cmd/buffgo`、API/app race 测试、`go test -count=1 ./...`、`go vet ./...`、`go build ./...` 均通过；测试覆盖 Host/DNS rebinding、Origin、POST JSON、CSRF 缺失/错误/过期/跨 session、方法白名单、无 CORS、CSP、GET 无业务副作用和显式 loopback listener 校验。PostgreSQL 集成测试本轮仍因未设置 `BUFFGO_TEST_DSN` 未执行。
-- 未完成与不确定：业务 API、OpenAPI 资源契约、Web 静态资源和 TLS 未实现；监听地址尚未加入 TOML，因为现有 legacy 配置加载路径不会读取 API 字段，硬编码或静默无效配置都不接受。Steam `429` 仍只保留一次匿名观察，用户确认恢复通常较快但具体窗口和限制范围尚未验证。
+- 未完成与不确定：业务 API、OpenAPI 资源契约、Web 静态资源和 TLS 未实现。Steam `429` 仍只保留一次匿名观察，用户确认恢复通常较快但具体窗口和限制范围尚未验证。
+
+### 2026-08-12 Goal 0B（Steam search/render 限流加压，部分）
+
+- 输入：用户要求多测，并假设存在约 2 秒间隔 + 约 3 分钟窗口等多重限制。Cookie 本地 private JSON；日志不输出 Cookie 值。
+- 变更边界：临时探测器只打 `search/render`；不解析正文、不进正式适配器。
+- 结果（登录）：冷等 180s 后 0.5s×12、1s×12、2s×12、2.1s×100、背靠背×80、5 并行×10 ≈ **266 次全 200**，无 `Retry-After`，**未打出登录 429**。假设的 2s/3min 登录限频在本窗未成立。
+- 结果（匿名对照）：同出口同接口首包 **429**（与 2026-08-11 一致）。
+- 结论：匿名与登录限流不是同一套；不能把匿名 429 写成登录采集策略。登录上限若存在，高于本次加压。
+- 文档：更新 `platforms/steam/*`、`todo.md` Goal 0B 注记。
+- 未完成：登录上限数值、其它接口预算、字段/人民币验收。
+
+### 2026-08-12 Goal 5D（凭据明文持久化）
+
+- 输入与前置条件：用户明确推翻 Goal 5A 的库内加密与密钥外置决策，要求去掉文档/规则中阻碍装配的加密限制；本 Goal 先于 7E。
+- 变更边界：新增 `000006_plaintext_credentials.sql`（清空 combinations/accounts/proxy 节点后改列）；Store 去掉 Cipher；删除 `internal/credential`；API 去掉 `credential_store_unavailable`；更新 ARCHITECTURE/REFERENCE/CONSOLE、todo Goal 5A/5D、AGENTS（禁止再以笼统安全为由阻塞明文凭据）。
+- 保留：控制面 GET 仍不返回原始 session；日志脱敏边界不变。
+- 产物位置：`migrations/000006_plaintext_credentials.sql`、`internal/storage/postgres/{store,resource,combination}.go` 及相关测试；无 `internal/credential/`。
+- 验收：Go 零引用 `internal/credential`；`go test ./internal/storage/postgres ./internal/resource ./internal/api ./internal/ratelimit` 通过（无 DSN 时集成 skip）。
+- 未确定事项：有已部署密文库时须跑迁移；未在本机带 `BUFFGO_TEST_DSN` 复跑集成。
+
+### 2026-08-12 Goal 2B（移除 legacy runtime）
+
+- 输入与前置条件：生产入口仍经 `app → internal/buffgo/run`；`collection.Daemon` 已实现但未装配；Goal 0B/6A 仍阻塞真实平台采集。本 Goal 未接线 collection，未读取 Cookie，未发送平台请求。
+- 变更边界：整树删除 `internal/buffgo/` 与根目录 `configs/`；重写 `internal/app` 与 `cmd/buffgo` 为仅本地 API 控制面；`Options` 只保留 `APIListen`；必填 `-api-listen`，删除 `-config`/`-sources`/`-appid`。保留根 `testdata/` 作为平台负例证据。`go mod tidy` 移除 `go-redis` 与 `viper`，保留 `pgx`。
+- 产物位置：删除后的仓库无 `internal/buffgo`；`internal/app/{app.go,app_test.go}`、`cmd/buffgo/{main.go,main_test.go,signal_test.go}`；文档更新见 `todo.md` Goal 2B、`docs/ARCHITECTURE.md` 入口说明。
+- 启动契约：`-api-listen` 必填且必须为回环 IP:端口；帮助/协作取消退出 `0`，启动失败 `1`，参数错误 `2`。进程只服务 `api.NewHandlerForAuthority(nil, …)` 直到取消，有界 Shutdown。
+- 验收命令与结果：Go 源码零引用 `internal/buffgo`、`go-redis`、`viper`；`go vet ./...`、`go test -count=1 ./...`、`go test -race -count=1 ./internal/app ./cmd/buffgo ./internal/api`、`go build ./...`、`go mod tidy -diff`、`./build.sh`、`gofmt -d` 均通过。无 DSN 时 storage 集成测试按既有门禁 skip。专项覆盖缺 `-api-listen`、空 `-api-listen=`、未知旧 flag `-config`、hostname/`0.0.0.0` 非法 listen 且不回显、API 就绪后取消退出、监听失败 `error_ref`、真实 SIGINT/SIGTERM。
+- 产品回归（有意）：删旧后**无可运行采集**。不能把 API-only 进程表述为采集迁移完成。下一步装配采集属 Goal 7G；Steam 证据与适配仍属 Goal 0B/6A。
+- 对抗收尾：已标明 Goal 7D「可选 api-listen + legacy」为废止历史；不切开 `storage/postgres → collection` 传递依赖（包依赖≠Daemon 已装配）。
+- 未确定事项：Goal 7E 账号 API 的 Coordinator facade 与生产注入仍未完成；API Handler 仍以 `nil` next/accounts 装配。
+
+### 2026-08-12 Web 页面先行（非 Goal，未接 API）
+
+- 输入与前置条件：用户明确要求“先不做接口对接，先把页面做好”。注意：这与 CONSOLE.md 验收“首个页面接入真实 API，不使用演示数据”存在已知冲突，本阶段为页面设计前置，Goal 8A 验收仍以真实 API 闭环为准。
+- 变更边界：新建 `web/`（Vue 3 + TS + Vite），六个页面（概览/采集控制/资源/运行/市场数据/规则与详情）对照 CONSOLE.md 页面边界；数据访问集中在 `web/src/api/` 门面，临时数据隔离在 `web/src/mock/`（接入后整目录删除）；所有 POST 操作明确报“未接入”，不伪装受理。构建产物输出到已被 Git 忽略的 `internal/webui/dist/`；`.gitignore` 补充 `node_modules/`。
+- 产物位置：`web/{package.json,vite.config.ts,tsconfig.json,index.html}`、`web/src/{main.ts,router.ts,App.vue}`、`web/src/styles/base.css`、`web/src/api/{types.ts,index.ts}`、`web/src/mock/data.ts`、`web/src/components/`（ActualStateBadge、RunBadges、QuoteStateCell、ConfirmDialog、EmptyState）、`web/src/pages/` 六个页面。
+- 验收命令与结果：`npm install`、`npm run build`（含 vue-tsc 类型检查）通过；dev server 下六个页面截图核验通过。子 agent 对抗性审查后修复：市场页平台列改为数据驱动（IGXE 不再缺席）、完整性/采集时间下沉到单元格、补齐 blocked 的 `nextCheckAt`、规则补触发依据、资源页补分配/解除与代理认证替换入口、占用拒绝带运行跳转、mock 修正 `succeeded+partial` 矛盾组合。
+- 未确定事项：POST 全部未接入；无轮询机制（接 API 时在门面层统一加）；错误状态“保留最近成功数据+过期横幅”模式待接 API 实现；`createWebHistory` 需要 Goal 8B 嵌入服务配置 SPA fallback，否则刷新子路径 404；模态框缺 Esc/焦点管理。
+
+### 2026-08-12 Web 页面重构（页面先行第二轮）
+
+- 输入与前置条件：用户指出第一版六页职责重复（概览/采集控制/运行互相重复）、资源页账号节点混排、市场数据不可点开。经确认的结构决策：三页职责切开（概览=正在运行实时列表；采集控制=纯开关与周期配置；运行=历史批次与诊断）；节点增加长短效代理模型；市场数据用抽屉式商品详情。
+- 变更边界：概览删除“需要关注/异常运行”区块，只保留进行中运行列表 + 阻塞目标分区；采集控制删除“最近运行”列；资源页改为按平台分区（账号/节点/组合归属平台工作区 + 未分配节点区），节点新增 `lifetime`（stable/sticky）、`stickyTtlMin`、`lastRotatedAt`、`rotationState`；市场数据行可点击打开右侧抽屉（各平台行情卡片、详情快照、同游戏映射失败）；CONSOLE.md 页面结构表同步更新。
+- 第二轮对抗审查后修复：删除账号/节点前检查显式组合引用；分配平台/替换认证/替换会话改为带输入的弹窗；行情单元格补数量口径（单/件）；平台筛选收敛列；详情快照按 `productId` 关联；概览运行与阻塞拆分区；空态区分三分；查表函数加枚举兜底；表单全部 v-model；修正 mock 容量限制文案因果。
+- 验收命令与结果：`npm run build`（含 vue-tsc）通过；概览/资源/市场/抽屉截图核验通过。
+- 未确定事项：POST 仍未接入；节点长短效模型为前端先行定义，Goal 5A 节点验证语义落地时需对齐 `stickyTtlMin` 与 `valid_until` 的关系；CONSOLE.md 本轮改动需在下次文档审查时确认。
+
+### 2026-08-12 概览再调整（页面先行第三轮）
+
+- 输入：用户明确概览要回答“哪个平台采集开着、开的是求购还是出售、有没有在跑、用什么账号和节点跑（无代理即本机直连）”。
+- 变更：`OverviewData` 改为按采集目标聚合（目录 + 平台×方向，仅已开启），每行含方向、实际状态、执行组合（账号 + 节点）、分页进度、阻塞原因与恢复方式；不再拆“运行/阻塞”两个分区。
+- 验收：`npm run build` 通过；截图核验：运行中目标显示组合与页数进度，等待中显示下周期时间，阻塞显示原因。
+- 资源页（按平台分区看账号与代理使用）与运行页（状态 + 已抓页数）经用户描述确认与现状一致，本轮未改。
+
+### 2026-08-12 资源节点占用 + 运行执行单元
+
+- 输入：节点跨平台共享出口、限频按平台+出口；执行单元=账号+出口 IP+平台。
+- 变更：
+  - 资源：节点详情补归属与按平台在用/空闲、同出口 peer 在途、跳转 runs；`nodeUsage` 用 `nodeId`。
+  - 运行：`workerKey=account|ip|platform`，平台筛选、同出口其他工人/节点、抽屉节点信息。
+  - mock：账号单请求一致；`occupiedBy` 与 live runs 对齐；hk-1/hk-5 共享出口；Run 补 `accountId`/`nodeId`。
+- 验收：`npm run typecheck` 通过；浏览器点验资源 modal、runs 抽屉与同出口链路。
+- 未确定：节点列表 busy 列；`occupiedBy` 仍是单 id 粗锁（多平台以 runs 为准）；历史 idle 工人会膨胀。
+
+### 2026-08-12 运行页可读性重做
+
+- 输入：用户反馈运行页不清楚、看不到。
+- 变更：默认「在跑+异常」；按出口 IP 分组；行内放大游戏/方向/进度；同出口写明对端；失败上板；右侧固定详情不挡列表。
+- 验收：`npm run typecheck`；浏览器可见 .11 两路对抢、失败 .12、进度 3/12。
+
+### 2026-08-12 账号编辑 / 更新 Cookie
+
+- 输入：账号可编辑登录账号+密码（列表不展示）；可更新 Cookie。
+- 变更：列表仅别名 / 登录已配置 / Cookie 状态 / 占用；编辑弹窗写凭据不回填；Cookie 弹窗独立；占用中禁用 Cookie。
+- 验收：`npm run typecheck`；资源页编辑弹窗与占用锁点验。
+
+### 2026-08-12 代理：长短效 + 多商 + 三地域水位
+
+- 输入：长效/短效（有效期内 IP 不变）；短效探测丢弃；多商；国内/国外/香港最少可用短效补齐。
+- 变更：REFERENCE/ARCHITECTURE/CONSOLE/README 去掉粘性轮换；类型 `stable|short` + ProxyProvider + 水位；资源页短效池与代理商样机。
+- 验收：`npm run typecheck`；资源页水位/代理商展示。
+- 未确定：真供应商 API 与探测闭环后置。
+
+### 2026-08-12 配置页独立
+
+- 输入：短效池/代理商不必塞在资源页。
+- 变更：新增 `/config` ConfigPage；资源页只留账号节点分配；导航增加「配置」。
+- 验收：`npm run typecheck`；配置/资源分页点验。
+
+### 2026-08-12 平台 × 节点地域
+
+- 输入：Steam 禁国内代理；BUFF/IGXE 用国内/香港；国外不划国内站。
+- 变更：文档矩阵；`platformRegion.ts`；资源分配过滤/拦截；概览 usable 含地域。
+- 验收：`npm run typecheck`。
+
+### 2026-08-12 资源列表重设计
+
+- 账号一张表 + 平台筛选；节点筛选（地域/时效/划入）+ 属性标签列；分配改为表格式未划/游戏池/平台方向。
+- 验收：`npm run typecheck`；资源页点验。
+
+### 2026-08-13 Goal 0B
+
+- 输入与前置条件：Steam 登录 Cookie 在 `platforms/private/steam/`；此前只有可达性/分桶，字段未钉死。
+- 变更边界：只补 `platforms/steam/` 文档与脱敏实测，不写半套猜测适配器。
+- 产物位置：`platforms/steam/`（search-render、orderbook、rate-limit 等）。
+- 验收命令与结果：文档结论已写入：稳定键 `(appid, market_hash_name)`；ask=`sell_price`；bid 登录 `orderbook` `eCurrency=23` 的 `amtMaxBuyOrder`；坏 Cookie 采集 path 不跟随 302。
+- 未确定事项：详情深度字段；冷却时长不可写成固定短间隔。
+
+### 2026-08-13 Goal 5A 分配纠偏 / 7E / 7F
+
+- 输入与前置条件：文档三层分配与代码 `assigned_platform` 冲突；生产 `accounts==nil`。
+- 变更边界：迁移去掉节点平台独占；游戏配额 + 游戏×平台×方向；账号/节点/组合 API 经 Coordinator；占用中禁删改。
+- 产物位置：`internal/storage/postgres/migrations/000007_*.sql`、`internal/app/control.go`、`internal/api/`、OpenAPI。
+- 验收命令与结果：`go test ./internal/api ./internal/app ./internal/resource ./internal/storage/postgres`。
+- 未确定事项：出口 IP 仍手工填写，自动探测未做。
+
+### 2026-08-13 Goal 6A～6C / 7G / 7H
+
+- 输入与前置条件：Goal 0B 已钉字段；摘要 unique `(appid, platform, side)`。
+- 变更边界：`internal/platform/steam` 实现 `PageFetcher`；ask=`search/render`，bid=按目录扫 orderbook；Daemon 装配进进程；目标开关 API。
+- 产物位置：`internal/platform/steam/`、`internal/app/collection.go`、`internal/api/collection.go`。
+- 验收命令与结果：`go test ./internal/platform/steam ./internal/collection ./internal/api ./internal/app ./cmd/buffgo`。
+- 未确定事项：本会话未用真实 Steam 账号做网页启停手工验收。
+
+### 2026-08-13 Goal 8A / 8B / 9A～9E / 10A
+
+- 输入与前置条件：控制面 API 已注入；网页曾走 mock。
+- 变更边界：删 mock；CSRF 客户端不静默重放 POST；页面接真 API；Vite 产物嵌入 `internal/webui`；失败保留上次数据。
+- 产物位置：`web/`、`internal/webui/`。
+- 验收命令与结果：`cd web && npm run build`；`go test ./internal/webui ./internal/api`。
+- 未确定事项：配置页水位/代理商仍未接入。
+
+### 2026-08-13 Goal 11A（部分）/ 11D（未开始）
+
+- 输入与前置条件：BUFF Cookie 在 `platforms/private/buff/`；IGXE 无 Cookie。
+- 变更边界：BUFF 只写摸底文档；限流/空买卖/非 CS2 game 码未过门，不写适配器。IGXE 未发请求。
+- 产物位置：`platforms/buff/`、`platforms/igxe/README.md`。
+- 验收命令与结果：`go test ./platforms/buff ./platforms/igxe`。
+- 未确定事项：11B 在限流与空数据验证前禁止开工。
+
+### 2026-08-13 Goal 12A（部分）
+
+- 输入与前置条件：调度已拒绝 detail target。
+- 变更边界：`GET /api/capabilities` 固定 `detail_unavailable`；规则页只读该标志；不创建详情运行。
+- 产物位置：`internal/api/handler.go`、`web/src/pages/RulesPage.vue`、OpenAPI。
+- 验收命令与结果：`go test ./internal/api -run Capabilities`。
+- 未确定事项：规则引擎与 12B 详情字段未做。
+
+### 2026-08-13 Goal 13A（未完整勾选）
+
+- 输入与前置条件：阶段 0～7 代码路径已落地。
+- 变更边界：更新 `todo.md` / `docs/ARCHITECTURE.md` 过时描述；诚实记录缺口。
+- 产物位置：本记录。
+- 验收命令与结果：前端构建 + 相关 Go 测试。未做真实 Steam 网页启停、429、杀进程恢复的手工证据；BUFF/IGXE 无采集；详情按设计不可用。
+- 未确定事项：13A 完整勾选依赖真实平台手工验收。
 
 ## 历史记录
 
 ### 2026-08-12 Goal 7E（账号管理 API，进行中）
 
-- 当前切片：已新增账号安全 DTO 与 GET/POST 路由草稿，覆盖列表、详情、新增、会话替换和删除；响应只包含凭据安全字段，原始 session 仅作为 write-only 请求字段并限制大小。
-- 已覆盖：非法 ID、空/超大 session、删除 body、账号路由前缀误匹配、无缓存响应，以及占用、依赖、revision、凭据存储和资源存储错误的固定码映射。
-- 尚未完成：生产装配必须注入经过同一 `resource.Coordinator` 的 facade，不能直接把 `*postgres.Store` 注入 API 而绕过活动占用保护；还需完成真实 OpenAPI 对账、全仓验收和最终复选框确认。
+- 当时切片：账号安全 DTO 与 GET/POST 路由草稿。生产装配与 Coordinator facade 在 2026-08-13 完成，见下方 Goal 7E 验收。
 
 > 以下内容只说明当时发生的工作，不代表目标架构中的对应能力已经完成；后续验收以 Goal 记录为准。
 

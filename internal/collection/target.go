@@ -7,29 +7,15 @@ import (
 	"buff-go/internal/market"
 )
 
-// PlatformSteam is the fixed catalog authority.
+// PlatformSteam is the Steam platform identifier.
 const PlatformSteam Platform = "steam"
 
-// CatalogTargetInput is the persisted shape of one Steam catalog target.
-type CatalogTargetInput struct {
-	ID            TargetID
-	Revision      Revision
-	AppID         int64
-	Period        time.Duration
-	Desired       DesiredState
-	Actual        ActualState
-	SwitchVersion Revision
-	Reason        TargetReason
-	Recovery      RecoveryMode
-	RecheckAt     *time.Time
-	ChangedAt     time.Time
-}
-
-// SummaryTargetInput is the persisted shape of one platform-side target.
+// SummaryTargetInput is the persisted shape of one game-direction target.
 type SummaryTargetInput struct {
 	ID            TargetID
 	Revision      Revision
 	Platform      Platform
+	AppID         int64
 	Side          market.Side
 	Desired       DesiredState
 	Actual        ActualState
@@ -40,7 +26,7 @@ type SummaryTargetInput struct {
 	ChangedAt     time.Time
 }
 
-// Target is an immutable controllable catalog or summary target.
+// Target is an immutable controllable summary target.
 type Target struct {
 	id            TargetID
 	revision      Revision
@@ -48,7 +34,6 @@ type Target struct {
 	platform      Platform
 	appID         int64
 	side          market.Side
-	period        time.Duration
 	desired       DesiredState
 	actual        ActualState
 	switchVersion Revision
@@ -58,29 +43,6 @@ type Target struct {
 	changedAt     time.Time
 }
 
-// NewCatalogTarget validates a catalog target restored from persistence.
-func NewCatalogTarget(input CatalogTargetInput) (Target, error) {
-	target := Target{
-		id:            input.ID,
-		revision:      input.Revision,
-		taskType:      TaskTypeCatalog,
-		platform:      PlatformSteam,
-		appID:         input.AppID,
-		period:        input.Period,
-		desired:       input.Desired,
-		actual:        input.Actual,
-		switchVersion: input.SwitchVersion,
-		reason:        input.Reason,
-		recovery:      input.Recovery,
-		recheckAt:     timeValue(input.RecheckAt),
-		changedAt:     input.ChangedAt,
-	}
-	if err := target.Validate(); err != nil {
-		return Target{}, err
-	}
-	return target, nil
-}
-
 // NewSummaryTarget validates a summary target restored from persistence.
 func NewSummaryTarget(input SummaryTargetInput) (Target, error) {
 	target := Target{
@@ -88,6 +50,7 @@ func NewSummaryTarget(input SummaryTargetInput) (Target, error) {
 		revision:      input.Revision,
 		taskType:      TaskTypeSummary,
 		platform:      input.Platform,
+		appID:         input.AppID,
 		side:          input.Side,
 		desired:       input.Desired,
 		actual:        input.Actual,
@@ -120,35 +83,14 @@ func (target Target) Validate() error {
 	if err := target.platform.Validate(); err != nil {
 		return err
 	}
-	switch target.taskType {
-	case TaskTypeCatalog:
-		if target.platform != PlatformSteam {
-			return fmt.Errorf("catalog target platform must be steam")
-		}
-		if target.appID < 1 {
-			return fmt.Errorf("catalog target appid must be positive")
-		}
-		if target.side != "" {
-			return fmt.Errorf("catalog target must not have a side")
-		}
-		if target.period <= 0 {
-			return fmt.Errorf("catalog target period must be positive")
-		}
-		if target.period%time.Microsecond != 0 {
-			return fmt.Errorf("catalog target period must use microsecond precision")
-		}
-	case TaskTypeSummary:
-		if target.appID != 0 {
-			return fmt.Errorf("summary target must not have an appid")
-		}
-		if err := validateSide(target.side); err != nil {
-			return err
-		}
-		if target.period != 0 {
-			return fmt.Errorf("summary target must not have a period")
-		}
-	default:
+	if target.taskType != TaskTypeSummary {
 		return fmt.Errorf("detail tasks do not have collection targets")
+	}
+	if target.appID < 1 {
+		return fmt.Errorf("summary target appid must be positive")
+	}
+	if err := validateSide(target.side); err != nil {
+		return err
 	}
 	if err := target.desired.Validate(); err != nil {
 		return err
@@ -295,36 +237,6 @@ func (target Target) Disable(at time.Time) (Target, error) {
 	target.switchVersion = nextSwitch
 	target.desired = DesiredDisabled
 	return target.changeActual(ActualStopping, TargetReasonNone, RecoveryNone, time.Time{}, at)
-}
-
-// ChangePeriod changes only a catalog target's next-cycle period. It advances
-// the entity revision without moving the actual-state timestamp or switch.
-func (target Target) ChangePeriod(period time.Duration, at time.Time) (Target, error) {
-	if err := target.validateChangeTime(at); err != nil {
-		return Target{}, err
-	}
-	if target.taskType != TaskTypeCatalog {
-		return Target{}, fmt.Errorf("only catalog targets have a period")
-	}
-	if period <= 0 {
-		return Target{}, fmt.Errorf("catalog target period must be positive")
-	}
-	if period%time.Microsecond != 0 {
-		return Target{}, fmt.Errorf("catalog target period must use microsecond precision")
-	}
-	if target.period == period {
-		return target, nil
-	}
-	next, err := nextRevision(target.revision)
-	if err != nil {
-		return Target{}, err
-	}
-	target.period = period
-	target.revision = next
-	if err := target.Validate(); err != nil {
-		return Target{}, err
-	}
-	return target, nil
 }
 
 // MarkWaiting records a scheduled automatic recheck.
@@ -496,23 +408,18 @@ func (target Target) ID() TargetID { return target.id }
 // Revision returns the target state revision.
 func (target Target) Revision() Revision { return target.revision }
 
-// TaskType returns catalog or summary.
+// TaskType returns summary.
 func (target Target) TaskType() TaskType { return target.taskType }
 
 // Platform returns the target platform.
 func (target Target) Platform() Platform { return target.platform }
 
-// AppID returns the catalog appid when present.
-func (target Target) AppID() (int64, bool) { return target.appID, target.taskType == TaskTypeCatalog }
+// AppID returns the summary game identity.
+func (target Target) AppID() (int64, bool) { return target.appID, target.taskType == TaskTypeSummary }
 
 // Side returns the summary side when present.
 func (target Target) Side() (market.Side, bool) {
 	return target.side, target.taskType == TaskTypeSummary
-}
-
-// Period returns the catalog period when present.
-func (target Target) Period() (time.Duration, bool) {
-	return target.period, target.taskType == TaskTypeCatalog
 }
 
 // Desired returns the accepted desired state.

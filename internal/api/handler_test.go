@@ -139,6 +139,33 @@ func TestAccountRoutesMapProtectedErrors(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesDetailUnavailable(t *testing.T) {
+	handler := NewHandler(nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/capabilities", nil)
+	request.Host = "localhost"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "detail_unavailable") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCapabilitiesRejectsPOST(t *testing.T) {
+	handler := NewHandler(nil)
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/capabilities", strings.NewReader(`{}`))
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestSecurityContextIssuesBoundStrictSession(t *testing.T) {
 	handler := NewHandler(nil)
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/security/context", nil)
@@ -335,7 +362,7 @@ func TestValidateListenAddress(t *testing.T) {
 func TestHandlerCanBindToExactAuthority(t *testing.T) {
 	handler := NewHandlerForAuthority(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
-	}), "127.0.0.1:8080")
+	}), "127.0.0.1:8080", ControlServices{})
 	for _, test := range []struct {
 		host   string
 		status int

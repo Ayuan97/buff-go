@@ -169,7 +169,7 @@ func TestSummaryPageDigestCanonicalizesAttemptOrder(t *testing.T) {
 func TestSummaryPageDigestIncludesEverySemanticField(t *testing.T) {
 	base := newSummaryDigestFixture(t)
 	baseDigest := summaryPageDigest(base.input, base.batch, base.snapshots)
-	const wantBaseDigest = "82f7d6f65b91ddfd959a0235cd7ecd603f5300231ceda3f3a0fc7ce52c74ceb1"
+	const wantBaseDigest = "1ff0b7272329df69fc4853bf2f69d3a4017d24c6e35935ebc7a475ec7b84143b"
 	if got := fmt.Sprintf("%x", baseDigest); got != wantBaseDigest {
 		t.Fatalf("summary digest = %s, want canonical v1 digest %s", got, wantBaseDigest)
 	}
@@ -206,6 +206,12 @@ func TestSummaryPageDigestIncludesEverySemanticField(t *testing.T) {
 			})
 		}},
 		{name: "product id", mutate: func(fixture *summaryDigestFixture) { fixture.snapshots[1].productID++ }},
+		{name: "platform item id", mutate: func(fixture *summaryDigestFixture) {
+			fixture.snapshots[0].platformItemID = "gid://steam/item/1"
+		}},
+		{name: "exact name", mutate: func(fixture *summaryDigestFixture) {
+			fixture.snapshots[0].exactName = "AK-47 | Redline"
+		}},
 		{name: "status", mutate: func(fixture *summaryDigestFixture) {
 			fixture.snapshots[1].status = market.StatusUnavailable
 		}},
@@ -358,6 +364,8 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 		typeOf reflect.Type
 	}{
 		{name: "ProductID", typeOf: reflect.TypeOf(catalog.ProductID(0))},
+		{name: "PlatformItemID", typeOf: reflect.TypeOf("")},
+		{name: "ExactName", typeOf: reflect.TypeOf("")},
 		{name: "Observation", typeOf: reflect.TypeOf(market.Observation{})},
 		{name: "ReasonCode", typeOf: reflect.TypeOf("")},
 	}
