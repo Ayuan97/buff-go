@@ -132,9 +132,7 @@ func TestExecuteArgumentExitCodes(t *testing.T) {
 		want int
 	}{
 		{name: "help", args: []string{"-h"}, want: 0},
-		{name: "missing api listen", want: 2},
 		{name: "empty api listen equals", args: []string{"-api-listen="}, want: 2},
-		{name: "missing pg dsn", args: []string{"-api-listen", "127.0.0.1:18080"}, want: 2},
 		{name: "unknown legacy config flag", args: []string{"-config", "runtime.toml"}, want: 2},
 		{name: "positional argument", args: []string{"-api-listen", "127.0.0.1:18080", "-pg-dsn", "postgres://local/buffgo", "extra"}, want: 2},
 	}
@@ -157,6 +155,23 @@ func TestExecuteArgumentExitCodes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExecuteUsesLocalDefaults(t *testing.T) {
+	t.Setenv("BUFFGO_DSN", "")
+	var got app.Options
+	code := execute(nil, &bytes.Buffer{}, func(parent context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}, func(_ context.Context, opt app.Options) error {
+		got = opt
+		return nil
+	})
+	if code != 0 {
+		t.Fatalf("exit code=%d", code)
+	}
+	if got.APIListen != defaultAPIListen || got.PostgresDSN != defaultPostgresDSN {
+		t.Fatalf("options=%+v", got)
 	}
 }
 

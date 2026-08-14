@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"errors"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -258,6 +259,131 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		})
 		if err != nil || retryApplied || retry.PayloadDigest() != page.PayloadDigest() {
 			t.Fatalf("exact name retry = %+v applied=%v err=%v", retry, retryApplied, err)
+		}
+	})
+
+	// 展示元数据必须能补到早先建好的商品上，否则老商品永远没有图标。
+	t.Run("product media backfill and attribution", func(t *testing.T) {
+		store, _ := migratedStore(t, dsn)
+		ctx := t.Context()
+		run, _, _ := summaryPageFixture(t, store, 730, "page-media", 0)
+		startedAt, _ := run.StartedAt()
+		collectedAt := startedAt.Add(time.Second)
+		observation := market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt}
+
+		// 第一页不带元数据，模拟本次迁移之前建立的商品
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			RunID: run.ID(), PageSequence: 1, CollectedAt: collectedAt,
+			Attempts: []AttemptWrite{{ExactName: "AK-47 | Redline", Observation: observation}},
+		}); err != nil || !applied {
+			t.Fatalf("commit without media applied=%v err=%v", applied, err)
+		}
+		bare, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{AppID: 730, Platform: "page-media", Limit: 10})
+		if err != nil || len(bare.Quotes) != 1 || !bare.Quotes[0].Media.Empty() {
+			t.Fatalf("quotes before backfill = %+v err=%v", bare.Quotes, err)
+		}
+
+		// 第二页带上元数据，同一个商品应被补齐而不是新建
+		next := mustCollectionCursor(t, []byte("2"))
+		media := catalog.ProductMedia{IconPath: "iconAK47", ItemType: "Rifle", NameColor: "d2d2d2"}
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			RunID: run.ID(), PageSequence: 2, CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
+			CollectedAt: collectedAt.Add(time.Second),
+			Attempts: []AttemptWrite{{
+				ExactName:   "AK-47 | Redline",
+				Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt.Add(time.Second)},
+				Media:       media,
+			}},
+			AccountID:   77,
+			ExitAddress: netip.MustParseAddr("38.175.103.188"),
+		}); err != nil || !applied {
+			t.Fatalf("commit with media applied=%v err=%v", applied, err)
+		}
+		filled, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{AppID: 730, Platform: "page-media", Limit: 10})
+		if err != nil || len(filled.Quotes) != 1 || filled.Quotes[0].Media != media {
+			t.Fatalf("quotes after backfill = %+v err=%v", filled.Quotes, err)
+		}
+
+		// 归属只记在写它的那一页上，未记录的页保持为空
+		summaries, err := store.PageSummaries(ctx, run.ID())
+		if err != nil || len(summaries) != 2 {
+			t.Fatalf("summaries = %+v err=%v", summaries, err)
+		}
+		if summaries[0].AccountID != 0 || summaries[0].ExitAddress != "" {
+			t.Fatalf("first page attribution = %+v", summaries[0])
+		}
+		if summaries[1].AccountID != 77 || summaries[1].ExitAddress != "38.175.103.188" {
+			t.Fatalf("second page attribution = %+v", summaries[1])
+		}
+
+		// 非法元数据必须降级为空，不能让整页提交失败
+		third := mustCollectionCursor(t, []byte("3"))
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			RunID: run.ID(), PageSequence: 3, CursorBefore: next, CursorAfter: third,
+			CollectedAt: collectedAt.Add(2 * time.Second),
+			Attempts: []AttemptWrite{{
+				ExactName:   "AWP | Asiimov",
+				Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt.Add(2 * time.Second)},
+				Media:       catalog.ProductMedia{IconPath: "../../etc/passwd", NameColor: "not-hex"},
+			}},
+		}); err != nil || !applied {
+			t.Fatalf("commit with invalid media applied=%v err=%v", applied, err)
+		}
+		unsafe, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{
+			AppID: 730, Platform: "page-media", Keyword: "Asiimov", Limit: 10,
+		})
+		if err != nil || len(unsafe.Quotes) != 1 || !unsafe.Quotes[0].Media.Empty() {
+			t.Fatalf("invalid media was stored: %+v err=%v", unsafe.Quotes, err)
+		}
+	})
+
+	t.Run("page payload round trip", func(t *testing.T) {
+		store, _ := migratedStore(t, dsn)
+		ctx := t.Context()
+		run, target, products := summaryPageFixture(t, store, 730, "page-payload", 1)
+		startedAt, _ := run.StartedAt()
+		collectedAt := startedAt.Add(time.Second)
+		observation := market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt}
+		raw := []byte(`{"success":true,"total_count":35252,"results":[]}`)
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			RunID: run.ID(), PageSequence: 1, CollectedAt: collectedAt,
+			Attempts: []AttemptWrite{{ProductID: products[0].ProductID, Observation: observation}},
+			Payload:  raw,
+		}); err != nil || !applied {
+			t.Fatalf("commit with payload applied=%v err=%v", applied, err)
+		}
+		stored, err := store.PagePayload(ctx, run.ID(), 1)
+		if err != nil || string(stored) != string(raw) {
+			t.Fatalf("payload = %q err=%v", stored, err)
+		}
+		summaries, err := store.PageSummaries(ctx, run.ID())
+		if err != nil || len(summaries) != 1 || summaries[0].PayloadBytes != int64(len(raw)) {
+			t.Fatalf("summaries = %+v err=%v", summaries, err)
+		}
+		attempts, err := store.PageAttempts(ctx, run.ID(), 1)
+		if err != nil || len(attempts) != 1 || attempts[0].ProductID != int64(products[0].ProductID) {
+			t.Fatalf("attempts = %+v err=%v", attempts, err)
+		}
+		// 目标的开关版本参与定位，换版本重采后旧页就不再拥有这条事实
+		if int64(target.SwitchVersion()) < 1 {
+			t.Fatalf("switch version = %d", target.SwitchVersion())
+		}
+
+		// 没有 payload 的方向提交后，页在但副本不在
+		next := mustCollectionCursor(t, []byte("2"))
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			RunID: run.ID(), PageSequence: 2, CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
+			CollectedAt: collectedAt.Add(time.Second),
+			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt.Add(time.Second)}}},
+		}); err != nil || !applied {
+			t.Fatalf("commit without payload applied=%v err=%v", applied, err)
+		}
+		if _, err := store.PagePayload(ctx, run.ID(), 2); !errors.Is(err, ErrPagePayloadNotFound) {
+			t.Fatalf("missing payload error = %v", err)
+		}
+		summaries, err = store.PageSummaries(ctx, run.ID())
+		if err != nil || len(summaries) != 2 || summaries[1].PayloadBytes != 0 {
+			t.Fatalf("summaries after second page = %+v err=%v", summaries, err)
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -51,6 +52,8 @@ type AttemptWrite struct {
 	ExactName      string            // Steam/平台展示名，逐字节
 	Observation    market.Observation
 	ReasonCode     string
+	// Media 是商品的展示元数据，只用于控制台呈现，不参与行情判定。
+	Media catalog.ProductMedia
 }
 
 // SummaryPageCommit 是一个显式摘要页面。作用域与因果顺序由持久运行派生，
@@ -62,6 +65,12 @@ type SummaryPageCommit struct {
 	CursorAfter  Cursor
 	CollectedAt  time.Time
 	Attempts     []AttemptWrite
+	// Payload 为空表示这一页没有可展示的原始响应，不影响页面本身的提交。
+	Payload []byte
+	// AccountID 与 ExitAddress 是执行这一页的租约身份。存储层无法从运行派生，
+	// 只有持有租约的调度器知道。零值表示未记录。
+	AccountID   int64
+	ExitAddress netip.Addr
 }
 
 // ScheduleStore 是调度器需要的持久化端口，由 storage/postgres 的 Store 满足。
@@ -90,6 +99,8 @@ type PageFetch struct {
 	PageSequence Sequence
 	Cursor       Cursor
 	Lease        resource.Lease
+	// Sort 决定平台返回商品的顺序，游标只在同一个顺序下有意义。
+	Sort SortOrder
 }
 
 // FetchedPage 是一次成功页面响应的规整结果。页面采集时间由调度器在响应
@@ -98,6 +109,9 @@ type FetchedPage struct {
 	CursorAfter Cursor
 	Attempts    []AttemptWrite
 	Final       bool
+	// Payload 是本页的平台原始响应，仅供控制台下钻查看。一页对应多个请求的
+	// 方向留空，采集判定不读它。
+	Payload []byte
 }
 
 // PageFetcher 由平台适配器实现，必须遵守请求 context 的取消与超时。
@@ -617,6 +631,7 @@ func (s *Scheduler) executePage(
 		PageSequence: pageSequence,
 		Cursor:       run.CurrentCursor(),
 		Lease:        lease,
+		Sort:         target.Sort(),
 	})
 	deadlineHit := errors.Is(fetchCtx.Err(), context.DeadlineExceeded)
 	cancel()
@@ -641,6 +656,9 @@ func (s *Scheduler) executePage(
 		CursorAfter:  fetched.CursorAfter,
 		CollectedAt:  collectedAt,
 		Attempts:     attempts,
+		Payload:      fetched.Payload,
+		AccountID:    int64(lease.Snapshot.AccountID),
+		ExitAddress:  lease.Snapshot.ExitAddress,
 	})
 	if err != nil {
 		return s.mapCommitError(ctx, run, err, outcome)
@@ -811,6 +829,8 @@ func (s *Scheduler) acquireLease(
 		}
 		occupied := false
 		infrastructure := false
+		sessionUnusable := false
+		nodeUnusable := false
 		for _, combination := range combinations {
 			lease, err := s.coordinator.AcquireCombination(ctx, component, combination.ID, region, s.now(), appID, side)
 			if err == nil {
@@ -821,8 +841,10 @@ func (s *Scheduler) acquireLease(
 				occupied = true
 			case errors.Is(err, resource.ErrComponentUnavailable), ctx.Err() != nil:
 				return resource.Lease{}, disposition{kind: dispositionDetached}, false
+			case errors.Is(err, resource.ErrAccountSessionUnusable):
+				sessionUnusable = true
 			case errors.Is(err, resource.ErrResourceUnusable), errors.Is(err, resource.ErrCombinationNotFound):
-				// 组合不可用：出口过期、正在重新验证或已被删除。
+				nodeUnusable = true
 			default:
 				infrastructure = true
 			}
@@ -830,6 +852,9 @@ func (s *Scheduler) acquireLease(
 		if !occupied {
 			if infrastructure {
 				return resource.Lease{}, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), false
+			}
+			if sessionUnusable && !nodeUnusable {
+				return resource.Lease{}, blockedDisposition(TargetReasonSessionInvalid, time.Time{}), false
 			}
 			return resource.Lease{}, blockedDisposition(TargetReasonEgressUnavailable, s.now().Add(s.config.TransientRetry)), false
 		}

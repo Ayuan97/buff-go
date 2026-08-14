@@ -43,6 +43,7 @@ type AccountService interface {
 	ListAccounts(context.Context) ([]resource.PlatformAccount, error)
 	Account(context.Context, resource.AccountID) (resource.PlatformAccount, bool, error)
 	CreateAccount(context.Context, resource.Platform, string, []byte) (resource.PlatformAccount, error)
+	RenameAccount(context.Context, resource.AccountID, string) (resource.PlatformAccount, error)
 	ReplaceAccountSession(context.Context, resource.AccountID, int64, []byte) (resource.PlatformAccount, error)
 	DeleteAccount(context.Context, resource.AccountID) error
 }
@@ -55,6 +56,8 @@ type Handler struct {
 	combinations     CombinationService
 	collection       CollectionService
 	market           MarketService
+	providers        ProviderService
+	platformRegions  map[resource.Platform]resource.TargetRegion
 	allowedAuthority string
 	now              func() time.Time
 	random           io.Reader
@@ -110,6 +113,8 @@ func NewHandlerForAuthority(next http.Handler, authority string, services Contro
 	h.combinations = services.Combinations
 	h.collection = services.Collection
 	h.market = services.Market
+	h.providers = services.Providers
+	h.platformRegions = services.PlatformRegions
 	return h
 }
 
@@ -165,12 +170,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCombinations(w, r)
 		return
 	}
-	if h.collection != nil && (r.URL.Path == "/api/targets" || strings.HasPrefix(r.URL.Path, "/api/targets/") || r.URL.Path == "/api/runs") {
+	if h.collection != nil && (r.URL.Path == "/api/targets" || strings.HasPrefix(r.URL.Path, "/api/targets/") ||
+		r.URL.Path == "/api/runs" || strings.HasPrefix(r.URL.Path, "/api/runs/")) {
 		h.serveCollection(w, r)
 		return
 	}
 	if h.market != nil && r.URL.Path == "/api/quotes" {
 		h.serveQuotes(w, r)
+		return
+	}
+	if h.market != nil && r.URL.Path == "/api/quote-facets" {
+		h.serveQuoteFacets(w, r)
+		return
+	}
+	if h.providers != nil && r.URL.Path == "/api/watermarks" {
+		h.serveWatermarks(w, r)
+		return
+	}
+	if h.providers != nil && (r.URL.Path == "/api/providers" || strings.HasPrefix(r.URL.Path, "/api/providers/")) {
+		h.serveProviders(w, r)
 		return
 	}
 	h.next.ServeHTTP(w, r)
@@ -189,6 +207,10 @@ type accountCreateRequest struct {
 	Platform resource.Platform `json:"platform"`
 	Alias    string            `json:"alias"`
 	Session  string            `json:"session"`
+}
+
+type accountRenameRequest struct {
+	Alias string `json:"alias"`
 }
 
 type accountReplaceRequest struct {
@@ -263,6 +285,17 @@ func (h *Handler) serveAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "alias":
+		var input accountRenameRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		account, err := h.accounts.RenameAccount(r.Context(), id, input.Alias)
+		if err != nil {
+			writeAccountError(w, err)
+			return
+		}
+		writeAccountJSON(w, http.StatusOK, toAccountResponse(account))
 	case "session":
 		var input accountReplaceRequest
 		if !decodeJSON(w, r, &input) {

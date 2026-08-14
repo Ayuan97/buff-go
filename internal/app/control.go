@@ -30,6 +30,10 @@ func (c accountControl) CreateAccount(ctx context.Context, platform resource.Pla
 	return c.store.CreateAccount(ctx, platform, alias, session)
 }
 
+func (c accountControl) RenameAccount(ctx context.Context, id resource.AccountID, alias string) (resource.PlatformAccount, error) {
+	return c.store.RenameAccount(ctx, id, alias)
+}
+
 func (c accountControl) ReplaceAccountSession(ctx context.Context, id resource.AccountID, expectedRevision int64, session []byte) (resource.PlatformAccount, error) {
 	return c.coordinator.ReplaceAccountSession(ctx, id, expectedRevision, session)
 }
@@ -54,6 +58,10 @@ func (c nodeControl) Node(ctx context.Context, id resource.NodeID) (resource.Acc
 
 func (c nodeControl) CreateNode(ctx context.Context, name string, input resource.NodeConnectionInput) (resource.AccessNode, error) {
 	return c.store.CreateNode(ctx, name, input)
+}
+
+func (c nodeControl) RenameNode(ctx context.Context, id resource.NodeID, name string) (resource.AccessNode, error) {
+	return c.store.RenameNode(ctx, id, name)
 }
 
 func (c nodeControl) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, expectedRevision int64, input resource.NodeConnectionInput) (resource.AccessNode, error) {
@@ -138,16 +146,72 @@ func (c collectionControl) SetTargetDesired(ctx context.Context, id collection.T
 	return c.store.SetTargetDesired(ctx, id, expected, desired)
 }
 
+func (c collectionControl) SetTargetSortOrder(ctx context.Context, id collection.TargetID, expected collection.Revision, order collection.SortOrder) (collection.Target, error) {
+	return c.store.SetTargetSortOrder(ctx, id, expected, order)
+}
+
+func (c collectionControl) DeleteTarget(ctx context.Context, id collection.TargetID) error {
+	return c.store.DeleteTarget(ctx, id)
+}
+
 func (c collectionControl) ListRecentRuns(ctx context.Context, limit int) ([]collection.Run, error) {
 	return c.store.ListRecentRuns(ctx, limit)
+}
+
+func (c collectionControl) PageSummaries(ctx context.Context, id collection.RunID) ([]postgres.PageSummary, error) {
+	return c.store.PageSummaries(ctx, id)
+}
+
+func (c collectionControl) PagePayload(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]byte, error) {
+	return c.store.PagePayload(ctx, id, sequence)
+}
+
+func (c collectionControl) PageAttempts(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]postgres.PageAttempt, error) {
+	return c.store.PageAttempts(ctx, id, sequence)
 }
 
 type marketControl struct {
 	store *postgres.Store
 }
 
-func (c marketControl) ListQuotes(ctx context.Context, appid int64, platform string, limit int) ([]postgres.MarketQuote, error) {
-	return c.store.ListMarketQuotes(ctx, appid, platform, limit)
+func (c marketControl) ListQuotes(ctx context.Context, filter postgres.MarketQuoteFilter) (postgres.MarketQuoteResult, error) {
+	return c.store.ListMarketQuotes(ctx, filter)
+}
+
+func (c marketControl) QuoteFacets(ctx context.Context, appid int64) (postgres.MarketFacets, error) {
+	return c.store.QuoteFacets(ctx, appid)
+}
+
+type providerControl struct {
+	store *postgres.Store
+}
+
+func (c providerControl) ListWatermarks(ctx context.Context) ([]resource.RegionWatermark, error) {
+	return c.store.ListWatermarks(ctx)
+}
+
+func (c providerControl) SetWatermark(ctx context.Context, region resource.NodeRegion, expectedRevision int64, minUsable int) (resource.RegionWatermark, error) {
+	return c.store.SetWatermark(ctx, region, expectedRevision, minUsable)
+}
+
+func (c providerControl) ListProviders(ctx context.Context) ([]resource.ProxyProvider, error) {
+	return c.store.ListProviders(ctx)
+}
+
+func (c providerControl) CreateProvider(ctx context.Context, name string, enabled bool, priority int, regions []resource.NodeRegion, credential []byte) (resource.ProxyProvider, error) {
+	return c.store.CreateProvider(ctx, name, enabled, priority, regions, credential)
+}
+
+func (c providerControl) UpdateProvider(ctx context.Context, id resource.ProviderID, expectedRevision int64, name string, enabled bool, priority int, regions []resource.NodeRegion) (resource.ProxyProvider, error) {
+	return c.store.UpdateProvider(ctx, id, expectedRevision, name, enabled, priority, regions)
+}
+
+func (c providerControl) ReplaceProviderCredential(ctx context.Context, id resource.ProviderID, expectedRevision int64, credential []byte) (resource.ProxyProvider, error) {
+	return c.store.ReplaceProviderCredential(ctx, id, expectedRevision, credential)
+}
+
+func (c providerControl) DeleteProvider(ctx context.Context, id resource.ProviderID) error {
+	return c.store.DeleteProvider(ctx, id)
 }
 
 func newControlServices(store *postgres.Store, coordinator *resource.Coordinator) (accountControl, nodeControl, combinationControl, collectionControl, marketControl, error) {

@@ -15,6 +15,11 @@ import (
 	"buff-go/internal/app"
 )
 
+const (
+	defaultAPIListen   = "127.0.0.1:8080"
+	defaultPostgresDSN = "postgres://administer@127.0.0.1:5432/buffgo?sslmode=disable"
+)
+
 type appRunFunc func(context.Context, app.Options) error
 type notifyContextFunc func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)
 
@@ -29,7 +34,7 @@ func execute(args []string, stderr io.Writer, notify notifyContextFunc, run appR
 	var flagOutput bytes.Buffer
 	flags := flag.NewFlagSet("buffgo", flag.ContinueOnError)
 	flags.SetOutput(&flagOutput)
-	apiListen := flags.String("api-listen", "", "loopback API listen address, for example 127.0.0.1:8080")
+	apiListen := flags.String("api-listen", defaultAPIListen, "loopback API listen address")
 	pgDSN := flags.String("pg-dsn", "", "PostgreSQL connection string")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -51,8 +56,7 @@ func execute(args []string, stderr io.Writer, notify notifyContextFunc, run appR
 		*pgDSN = strings.TrimSpace(os.Getenv("BUFFGO_DSN"))
 	}
 	if strings.TrimSpace(*pgDSN) == "" {
-		_, _ = fmt.Fprintln(stderr, "buffgo: -pg-dsn is required")
-		return 2
+		*pgDSN = defaultPostgresDSN
 	}
 
 	ctx, stop := notify(context.Background(), os.Interrupt, syscall.SIGTERM)

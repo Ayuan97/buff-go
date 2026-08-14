@@ -23,10 +23,133 @@ func TestCollectionStoreIntegration(t *testing.T) {
 		t.Skip("set BUFFGO_TEST_DSN to an isolated PostgreSQL database")
 	}
 	t.Run("target and run lifecycle", func(t *testing.T) { testCollectionLifecycle(t, dsn) })
+	t.Run("target deletion", func(t *testing.T) { testCollectionTargetDeletion(t, dsn) })
+	t.Run("sort order voids batch", func(t *testing.T) { testCollectionSortOrder(t, dsn) })
 	t.Run("active runs and restart recovery", func(t *testing.T) { testCollectionActiveRuns(t, dsn) })
 	t.Run("resident instance lock", func(t *testing.T) { testCollectionInstanceLock(t, dsn) })
 	t.Run("scope concurrency", func(t *testing.T) { testCollectionConcurrency(t, dsn) })
 	t.Run("integrity and errors", func(t *testing.T) { testCollectionIntegrityErrors(t, dsn) })
+}
+
+// 删除目标只是撤销手段：跑过的目标一律拒绝，采集历史不因为想让按钮可用而被删。
+func testCollectionTargetDeletion(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+
+	unused, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteTarget(ctx, unused.ID()); err != nil {
+		t.Fatalf("delete unused target: %v", err)
+	}
+	if _, found, err := store.Target(ctx, unused.ID()); err != nil || found {
+		t.Fatalf("deleted target found=%v err=%v", found, err)
+	}
+	if err := store.DeleteTarget(ctx, unused.ID()); !errors.Is(err, ErrCollectionNotFound) {
+		t.Fatalf("repeat delete = %v", err)
+	}
+
+	target, err := store.CreateSummaryTarget(ctx, "steam", 252490, market.SideAsk, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteTarget(ctx, target.ID()); !errors.Is(err, ErrTargetNotStopped) {
+		t.Fatalf("delete enabled target = %v", err)
+	}
+	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualRunning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil)); err != nil {
+		t.Fatal(err)
+	}
+	target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualStopped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteTarget(ctx, target.ID()); !errors.Is(err, ErrTargetInUse) {
+		t.Fatalf("delete target with history = %v", err)
+	}
+}
+
+// 游标是列表偏移量，换顺序必须推进 switch_version 作废当前批次，否则续点会
+// 落到完全不同的商品上。
+func testCollectionSortOrder(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+
+	target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Sort() != collection.DefaultSortOrder() {
+		t.Fatalf("default sort = %+v", target.Sort())
+	}
+	run, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
+	if err != nil || !created {
+		t.Fatalf("create run created=%v err=%v", created, err)
+	}
+
+	quantityDesc := collection.SortOrder{Column: collection.SortColumnQuantity, Direction: collection.SortDescending}
+	changed, err := store.SetTargetSortOrder(ctx, target.ID(), target.Revision(), quantityDesc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Sort() != quantityDesc {
+		t.Fatalf("sort after change = %+v", changed.Sort())
+	}
+	if changed.SwitchVersion() != target.SwitchVersion()+1 {
+		t.Fatalf("switch version = %d, want %d", changed.SwitchVersion(), target.SwitchVersion()+1)
+	}
+	if changed.Actual() != collection.ActualStarting {
+		t.Fatalf("actual after change = %q", changed.Actual())
+	}
+	// 被作废的批次必须在同一次改动里收尾。只推进开关版本不收尾会卡死：一个方向
+	// 同时只能有一条活动批次，旧的占着位置新的就建不出来。
+	stale, found, err := store.Run(ctx, run.ID())
+	if err != nil || !found {
+		t.Fatalf("read stale run found=%v err=%v", found, err)
+	}
+	if stale.State() != collection.RunStopped || stale.Reason() != collection.RunReasonSwitchDisabled {
+		t.Fatalf("stale run = %q reason=%q", stale.State(), stale.Reason())
+	}
+	// 收尾之后新一轮必须能建出来，这正是这个 bug 卡住的地方
+	fresh, created, err := store.CreateSummaryRun(ctx, changed.ID(), changed.SwitchVersion(), mustCollectionCursor(t, nil))
+	if err != nil || !created {
+		t.Fatalf("new run after sort change created=%v err=%v", created, err)
+	}
+	if fresh.ID() == run.ID() {
+		t.Fatal("new run must not reuse the voided batch")
+	}
+	// 旧 switch 的批次已被隔离：拿旧 switch 再建运行必须冲突
+	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil)); !errors.Is(err, ErrCollectionConflict) {
+		t.Fatalf("stale switch run = %v", err)
+	}
+	// 旧批次的页提交必须被栅栏拒绝
+	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		RunID: run.ID(), PageSequence: 1, CollectedAt: changed.ChangedAt().Add(time.Second),
+		Attempts: []AttemptWrite{{
+			ExactName:   "AK-47 | Redline",
+			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: changed.ChangedAt().Add(time.Second)},
+		}},
+	}); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("stale run page commit = %v", err)
+	}
+
+	// 相同顺序是幂等的，不该白白作废批次
+	same, err := store.SetTargetSortOrder(ctx, changed.ID(), changed.Revision(), quantityDesc)
+	if err != nil || same.Revision() != changed.Revision() || same.SwitchVersion() != changed.SwitchVersion() {
+		t.Fatalf("idempotent sort = %+v err=%v", same, err)
+	}
+	if _, err := store.SetTargetSortOrder(ctx, changed.ID(), changed.Revision(),
+		collection.SortOrder{Column: "cheapest", Direction: "asc"}); !errors.Is(err, ErrCollectionInvalidInput) {
+		t.Fatalf("invalid sort column = %v", err)
+	}
 }
 
 func testCollectionLifecycle(t *testing.T, dsn string) {

@@ -935,6 +935,49 @@ func TestScheduleRejectsValidatingNode(t *testing.T) {
 	}
 }
 
+func TestScheduleAllowsUnverifiedSession(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	resources, found, err := harness.repo.CombinationResources(context.Background(), 1)
+	if err != nil || !found {
+		t.Fatalf("combination resources found=%v err=%v", found, err)
+	}
+	resources.Account.SessionState = resource.AccountSessionStateUnverified
+	resources.Account.LastCheckedAt = nil
+	harness.repo.setResources(resources)
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.fetcher.recordedCalls()) == 0 {
+		t.Fatal("unverified session must still dispatch")
+	}
+}
+
+func TestScheduleRejectsInvalidSession(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", 730, market.SideAsk, netip.MustParseAddr("2.2.2.2"))
+	resources, found, err := harness.repo.CombinationResources(context.Background(), 1)
+	if err != nil || !found {
+		t.Fatalf("combination resources found=%v err=%v", found, err)
+	}
+	resources.Account.SessionState = resource.AccountSessionStateInvalid
+	harness.repo.setResources(resources)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonSessionInvalid)
+	if harness.store.target(target.ID()).Recovery() != RecoveryManual {
+		t.Fatal("session_invalid must recover manually")
+	}
+	if len(harness.fetcher.recordedCalls()) != 0 {
+		t.Fatal("invalid session must not send requests")
+	}
+}
+
 // 出口变化后只使用新 IP 限频键。
 func TestScheduleUsesNewExitAddressAfterChange(t *testing.T) {
 	harness := newScheduleHarness(t, nil)

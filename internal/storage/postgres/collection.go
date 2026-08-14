@@ -27,11 +27,17 @@ var (
 	ErrCollectionStorage        = collection.ErrStorage
 )
 
+// 删除目标只是控制面撤销手段，采集历史一律保留，所以下面两个条件是唯一的拒绝理由。
+var (
+	ErrTargetNotStopped = errors.New("collection target is not stopped")
+	ErrTargetInUse      = errors.New("collection target already has runs")
+)
+
 const (
 	collectionTargetColumns = `
 target_id, kind, platform, appid, side, desired_state, actual_state,
 reason_code, recovery_mode, next_check_at, period_microseconds, revision,
-switch_version, next_run_sequence, changed_at`
+switch_version, next_run_sequence, changed_at, sort_column, sort_dir`
 	collectionRunColumns = `
 run_id, target_id, kind, platform, appid, side, product_id, switch_version,
 run_sequence, status, completeness, reason_code, current_cursor,
@@ -183,6 +189,119 @@ func (s *Store) SetTargetDesired(ctx context.Context, id collection.TargetID, ex
 	})
 }
 
+// SetTargetSortOrder changes the platform ordering this target collects with.
+// The cursor is a list offset, so this advances switch_version and voids the
+// active batch; stored market facts are kept and the next cycle starts over.
+func (s *Store) SetTargetSortOrder(ctx context.Context, id collection.TargetID, expected collection.Revision, order collection.SortOrder) (collection.Target, error) {
+	if order.Validate() != nil {
+		return collection.Target{}, ErrCollectionInvalidInput
+	}
+	return s.mutateCollectionTargetThen(ctx, id, expected, nil,
+		func(current collection.Target, at time.Time) (collection.Target, error) {
+			return current.SetSortOrder(order, at)
+		},
+		retireVoidedActiveRun,
+	)
+}
+
+// retireVoidedActiveRun 收尾开关版本已经落后于目标的活动批次。推进版本只让
+// 页提交被栅栏拒绝，而提交页要先拿到批次；一个方向同时只能有一条活动批次，
+// 所以不收尾就会卡成「旧批次占位、新批次建不出来」。
+func retireVoidedActiveRun(ctx context.Context, tx *sql.Tx, target collection.Target) error {
+	active, found, err := activeCollectionRun(ctx, tx, target)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	switchVersion, present := active.SwitchVersion()
+	if present && switchVersion == target.SwitchVersion() {
+		return nil
+	}
+	at, err := collectionDatabaseTime(ctx, tx, runFinishFloor(ctx, tx, active))
+	if err != nil {
+		return err
+	}
+	stopped, err := active.Stop(collection.CompletenessPartial, collection.RunReasonSwitchDisabled, at)
+	if err != nil {
+		return ErrCollectionConflict
+	}
+	if _, err := updateCollectionRun(ctx, tx, active, stopped); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runFinishFloor 是批次结束时间的下界：不能早于开始时间，也不能早于最后一页
+// 的提交时间，否则会写出时间倒流的记录。
+func runFinishFloor(ctx context.Context, tx *sql.Tx, run collection.Run) time.Time {
+	floor := run.CreatedAt()
+	if started, ok := run.StartedAt(); ok {
+		floor = started
+	}
+	if run.LastPageSequence() > 0 {
+		if page, found, err := collectionPageForUpdate(ctx, tx, run.ID(), collection.Sequence(run.LastPageSequence())); err == nil && found {
+			if page.CommittedAt().After(floor) {
+				floor = page.CommittedAt()
+			}
+		}
+	}
+	return floor
+}
+
+// DeleteTarget removes a target that never produced collection history. Runs and
+// pages stay untouched, so a target that already ran can only be disabled.
+func (s *Store) DeleteTarget(ctx context.Context, id collection.TargetID) error {
+	if err := s.validateCollectionStore(); err != nil {
+		return err
+	}
+	if id.Validate() != nil {
+		return ErrCollectionInvalidInput
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return collectionStorageError(ctx)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	target, _, found, err := queryCollectionTarget(ctx, tx, `
+SELECT `+collectionTargetColumns+`
+FROM collection_targets
+WHERE target_id = $1
+FOR UPDATE`, int64(id))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrCollectionNotFound
+	}
+	if target.Desired() != collection.DesiredDisabled || target.Actual() != collection.ActualStopped {
+		return ErrTargetNotStopped
+	}
+
+	var hasRuns bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM collection_runs WHERE target_id = $1)`, int64(id)).Scan(&hasRuns); err != nil {
+		return collectionStorageError(ctx)
+	}
+	if hasRuns {
+		return ErrTargetInUse
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM collection_targets WHERE target_id = $1`, int64(id)); err != nil {
+		// 行锁之外唯一可能的外键违规就是有 run 引用这个目标，如实报成占用而不是存储故障。
+		if postgresErrorCode(err) == "23503" {
+			return ErrTargetInUse
+		}
+		return mapCollectionWriteError(ctx, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return collectionStorageError(ctx)
+	}
+	return nil
+}
+
 // TransitionTarget changes only scheduler-owned actual state. It checks both
 // entity revision and switch fence so a runtime from an earlier enable cycle
 // cannot publish target state after disable/re-enable.
@@ -229,6 +348,20 @@ func (s *Store) mutateCollectionTarget(
 	expected collection.Revision,
 	expectedSwitch *collection.Revision,
 	mutate func(collection.Target, time.Time) (collection.Target, error),
+) (collection.Target, error) {
+	return s.mutateCollectionTargetThen(ctx, id, expected, expectedSwitch, mutate, nil)
+}
+
+// mutateCollectionTargetThen 在同一个事务里做目标状态变更与随后的联动写入。
+// afterUpdate 用于那些必须与目标变更原子生效的收尾，比如推进开关版本之后
+// 收尾被作废的活动批次。
+func (s *Store) mutateCollectionTargetThen(
+	ctx context.Context,
+	id collection.TargetID,
+	expected collection.Revision,
+	expectedSwitch *collection.Revision,
+	mutate func(collection.Target, time.Time) (collection.Target, error),
+	afterUpdate func(context.Context, *sql.Tx, collection.Target) error,
 ) (collection.Target, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return collection.Target{}, err
@@ -281,12 +414,14 @@ FOR UPDATE`, int64(id))
 UPDATE collection_targets
 SET desired_state = $3, actual_state = $4, reason_code = $5,
     recovery_mode = $6, next_check_at = $7, period_microseconds = $8,
-    revision = $9, switch_version = $10, changed_at = $11
+    revision = $9, switch_version = $10, changed_at = $11,
+    sort_column = $12, sort_dir = $13
 WHERE target_id = $1 AND revision = $2
 RETURNING `+collectionTargetColumns,
 		int64(id), int64(expected), string(next.Desired()), string(next.Actual()), string(next.Reason()),
 		string(next.Recovery()), targetRecheckValue(next), targetPeriodValue(next),
 		int64(next.Revision()), int64(next.SwitchVersion()), next.ChangedAt(),
+		string(next.Sort().Column), string(next.Sort().Direction),
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return collection.Target{}, ErrCollectionConflict
@@ -296,6 +431,11 @@ RETURNING `+collectionTargetColumns,
 	}
 	if !sameTargetState(stored, next) {
 		return collection.Target{}, ErrCollectionIntegrity
+	}
+	if afterUpdate != nil {
+		if err := afterUpdate(ctx, tx, stored); err != nil {
+			return collection.Target{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return collection.Target{}, collectionStorageError(ctx)
@@ -1127,7 +1267,9 @@ func validTargetSuccessor(current, next collection.Target) bool {
 	if currentHasApp != nextHasApp || currentApp != nextApp || currentHasSide != nextHasSide || currentSide != nextSide {
 		return false
 	}
-	if current.Desired() != next.Desired() {
+	// switch_version 只允许伴随一个可解释的变化推进：开关切换，或者采集顺序变更
+	// （顺序一换游标就失去意义，必须作废当前批次重开一轮）。
+	if current.Desired() != next.Desired() || current.Sort() != next.Sort() {
 		return current.SwitchVersion() != collection.Revision(math.MaxInt64) && next.SwitchVersion() == current.SwitchVersion()+1
 	}
 	return next.SwitchVersion() == current.SwitchVersion()
@@ -1137,7 +1279,7 @@ func sameTargetState(left, right collection.Target) bool {
 	if left.ID() != right.ID() || left.Revision() != right.Revision() || left.TaskType() != right.TaskType() ||
 		left.Platform() != right.Platform() || left.Desired() != right.Desired() || left.Actual() != right.Actual() ||
 		left.SwitchVersion() != right.SwitchVersion() || left.Reason() != right.Reason() || left.Recovery() != right.Recovery() ||
-		!left.ChangedAt().Equal(right.ChangedAt()) {
+		left.Sort() != right.Sort() || !left.ChangedAt().Equal(right.ChangedAt()) {
 		return false
 	}
 	leftApp, leftHasApp := left.AppID()
@@ -1248,6 +1390,8 @@ type collectionTargetScan struct {
 	switchVersion   int64
 	nextRunSequence int64
 	changedAt       time.Time
+	sortColumn      string
+	sortDirection   string
 }
 
 func (data *collectionTargetScan) destinations() []any {
@@ -1255,6 +1399,7 @@ func (data *collectionTargetScan) destinations() []any {
 		&data.id, &data.kind, &data.platform, &data.appID, &data.side, &data.desired, &data.actual,
 		&data.reason, &data.recovery, &data.recheckAt, &data.periodMicros, &data.revision,
 		&data.switchVersion, &data.nextRunSequence, &data.changedAt,
+		&data.sortColumn, &data.sortDirection,
 	}
 }
 
@@ -1288,6 +1433,10 @@ func scanCollectionTarget(scanner rowScanner) (collection.Target, int64, error) 
 			Platform: collection.Platform(data.platform), AppID: data.appID.Int64, Side: market.Side(data.side.String),
 			Desired: commonDesired, Actual: commonActual, SwitchVersion: collection.Revision(data.switchVersion),
 			Reason: commonReason, Recovery: commonRecovery, RecheckAt: recheckAt, ChangedAt: changedAt,
+			Sort: collection.SortOrder{
+				Column:    collection.SortColumn(data.sortColumn),
+				Direction: collection.SortDirection(data.sortDirection),
+			},
 		})
 	default:
 		return collection.Target{}, 0, ErrCollectionIntegrity

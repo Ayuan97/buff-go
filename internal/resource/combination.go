@@ -102,14 +102,18 @@ func (resources CombinationResources) ValidateForUse(now time.Time, target Targe
 	if !resources.Node.AssignedTo(appID, resources.Combination.Platform, side) {
 		return fmt.Errorf("access node is not assigned to the requested game direction")
 	}
-	if resources.Account.SessionState != AccountSessionStateValid {
-		return fmt.Errorf("account session is not valid")
+	if resources.Account.SessionState == AccountSessionStateInvalid {
+		return ErrAccountSessionUnusable
+	}
+	// unverified 允许占租约，由首次成功的平台请求标 valid。
+	if resources.Account.SessionState != AccountSessionStateValid && resources.Account.SessionState != AccountSessionStateUnverified {
+		return ErrAccountSessionUnusable
 	}
 	if !resources.Node.UsableAt(now) {
-		return fmt.Errorf("access node is not usable")
+		return fmt.Errorf("%w: access node is not usable", ErrResourceUnusable)
 	}
 	if !resources.Node.Region.Allows(target) {
-		return fmt.Errorf("access node region does not allow target region")
+		return fmt.Errorf("%w: access node region does not allow target region", ErrResourceUnusable)
 	}
 	return nil
 }

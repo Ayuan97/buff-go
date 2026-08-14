@@ -143,8 +143,13 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	query.Set("start", strconv.Itoa(start))
 	query.Set("count", strconv.Itoa(f.pageSize))
 	query.Set("search_descriptions", "0")
-	query.Set("sort_column", "price")
-	query.Set("sort_dir", "asc")
+	// 顺序由采集目标决定：换了顺序游标就失效，所以目标改配置时会作废批次重开一轮
+	sort := request.Sort
+	if sort.Validate() != nil {
+		sort = collection.DefaultSortOrder()
+	}
+	query.Set("sort_column", string(sort.Column))
+	query.Set("sort_dir", string(sort.Direction))
 	query.Set("appid", strconv.FormatInt(request.AppID, 10))
 	query.Set("norender", "1")
 	body, err := f.get(ctx, client, cookie, request.Lease, searchPath+"?"+query.Encode(), true)
@@ -170,7 +175,8 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 		return collection.FetchedPage{}, err
 	}
 	final := parsed.TotalCount == 0 || next >= parsed.TotalCount || len(parsed.Results) == 0
-	return collection.FetchedPage{CursorAfter: after, Attempts: attempts, Final: final}, nil
+	// 出售摘要一页就是一个搜索响应，原样留给控制台下钻；求购按商品逐个请求，没有单一页面响应。
+	return collection.FetchedPage{CursorAfter: after, Attempts: attempts, Final: final, Payload: body}, nil
 }
 
 func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
@@ -218,10 +224,14 @@ func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (colle
 	if err != nil {
 		return collection.AttemptWrite{}, err
 	}
+	media := searchMedia(item)
 	price, err := parseYuanAsk(item)
 	if err != nil {
 		obs := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: collectedAt}
-		return collection.AttemptWrite{PlatformItemID: hash, ExactName: hash, Observation: obs, ReasonCode: "price_unverified"}, nil
+		return collection.AttemptWrite{
+			PlatformItemID: hash, ExactName: hash, Observation: obs,
+			ReasonCode: "price_unverified", Media: media,
+		}, nil
 	}
 	listings := item.SellListings
 	obs, err := market.NewPresentObservation(market.PresentInput{
@@ -234,7 +244,16 @@ func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (colle
 	if err != nil {
 		return collection.AttemptWrite{}, err
 	}
-	return collection.AttemptWrite{PlatformItemID: hash, ExactName: hash, Observation: obs}, nil
+	return collection.AttemptWrite{PlatformItemID: hash, ExactName: hash, Observation: obs, Media: media}, nil
+}
+
+// searchMedia 提取展示用元数据。这些字段不参与行情判定，取不到就留空。
+func searchMedia(item searchResult) catalog.ProductMedia {
+	return catalog.ProductMedia{
+		IconPath:  item.AssetDescription.IconURL,
+		ItemType:  item.AssetDescription.Type,
+		NameColor: item.AssetDescription.NameColor,
+	}.Normalized()
 }
 
 func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byte, collectedAt time.Time) (collection.AttemptWrite, error) {
@@ -288,13 +307,32 @@ func orderbookQuery(appID int64, name string) string {
 	return orderbookPath + "?" + query.Encode()
 }
 
+// browserUserAgent 需要跟着主流浏览器版本更新：停留在过旧的版本号本身就是一个
+// 可识别特征。这里不带任何自定义标识。
+const browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+
+// setBrowserHeaders 让请求头和浏览器里的同源 XHR 一致。
+// 不设 Accept-Encoding：Go 的 transport 会自己带 gzip 并透明解压，手动指定会拿到未解压的响应体。
+func setBrowserHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", browserUserAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Referer", "https://steamcommunity.com/market/")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="139", "Not(A:Brand";v="24", "Google Chrome";v="139"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+}
+
 func (f *Fetcher) get(ctx context.Context, client *http.Client, cookie string, lease resource.Lease, pathQuery string, recordValid bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+pathQuery, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; buffgo-steam/1.0)")
-	req.Header.Set("Accept", "application/json")
+	setBrowserHeaders(req)
 	req.Header.Set("Cookie", cookie)
 	resp, err := client.Do(req)
 	if err != nil {

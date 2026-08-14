@@ -32,6 +32,35 @@ func TestParseYuanCentsRejectsUSD(t *testing.T) {
 	}
 }
 
+// 上千的价格平台带千位分隔符。按价格降序采集时第一页就全是这种，
+// 解析不了会让整页商品变成 price_unverified。
+func TestParseYuanAskAcceptsThousandsSeparator(t *testing.T) {
+	for _, test := range []struct {
+		text  string
+		cents int64
+	}{
+		{text: "¥ 9,341.19", cents: 934119},
+		{text: "¥ 1,000.00", cents: 100000},
+		{text: "¥ 1,234,567.89", cents: 123456789},
+	} {
+		item := searchResult{SellPrice: test.cents, SellPriceText: test.text}
+		got, err := parseYuanAsk(item)
+		if err != nil || int64(got) != test.cents {
+			t.Fatalf("%q got=%d err=%v", test.text, got, err)
+		}
+	}
+}
+
+// 分隔符位置错乱时剥离后的数值会和平台给的整数分对不上，必须仍然被拒。
+func TestParseYuanAskRejectsMalformedSeparator(t *testing.T) {
+	for _, text := range []string{"¥ 9,34.19", "¥ 9,,341.19", "¥ ,341.19"} {
+		item := searchResult{SellPrice: 934119, SellPriceText: text}
+		if _, err := parseYuanAsk(item); err == nil {
+			t.Fatalf("%q must be rejected", text)
+		}
+	}
+}
+
 func TestHashNameMismatch(t *testing.T) {
 	item := searchResult{HashName: "A"}
 	item.AssetDescription.MarketHashName = "B"

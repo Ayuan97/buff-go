@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -335,6 +336,12 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 		{name: "CursorAfter", typeOf: reflect.TypeOf(collection.Cursor{})},
 		{name: "CollectedAt", typeOf: reflect.TypeOf(time.Time{})},
 		{name: "Attempts", typeOf: reflect.TypeOf([]AttemptWrite(nil))},
+		// Payload 是平台原始响应，只作展示副本。它既不是作用域也不是因果顺序，
+		// 更不是页面摘要（摘要仍由存储层从 attempts 派生，不接受调用方提交）。
+		{name: "Payload", typeOf: reflect.TypeOf([]byte(nil))},
+		// 执行身份只有持有租约的调度器知道，存储层无法从运行派生，因此必须由调用方提交。
+		{name: "AccountID", typeOf: reflect.TypeOf(int64(0))},
+		{name: "ExitAddress", typeOf: reflect.TypeOf(netip.Addr{})},
 	}
 	if typeOf.NumField() != len(want) {
 		t.Fatalf("SummaryPageCommit has %d fields, want exactly %d page facts", typeOf.NumField(), len(want))
@@ -368,6 +375,8 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 		{name: "ExactName", typeOf: reflect.TypeOf("")},
 		{name: "Observation", typeOf: reflect.TypeOf(market.Observation{})},
 		{name: "ReasonCode", typeOf: reflect.TypeOf("")},
+		// Media 只用于控制台呈现，不参与行情判定与页面摘要。
+		{name: "Media", typeOf: reflect.TypeOf(catalog.ProductMedia{})},
 	}
 	if attemptType.NumField() != len(wantAttempt) {
 		t.Fatalf("AttemptWrite has %d fields, want exactly %d attempt facts", attemptType.NumField(), len(wantAttempt))

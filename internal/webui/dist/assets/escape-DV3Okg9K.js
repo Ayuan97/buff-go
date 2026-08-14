@@ -1,0 +1,1 @@
+import{o as t,a as d}from"./index-DPaqf9AV.js";function r(n){t(()=>window.addEventListener("keydown",e)),d(()=>window.removeEventListener("keydown",e));function e(o){o.key==="Escape"&&n()}}export{r as u};

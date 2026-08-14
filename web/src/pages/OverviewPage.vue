@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   createTarget,
+  deleteTarget,
   getAccounts,
   getNodes,
   getTargets,
@@ -14,19 +15,23 @@ import {
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
-import { sideText } from '../utils/format'
-
-const GAME_NAMES: Record<number, { short: string; name: string }> = {
-  730: { short: 'CS2', name: 'Counter-Strike 2' },
-  570: { short: 'Dota2', name: 'Dota 2' },
-  440: { short: 'TF2', name: 'Team Fortress 2' },
-  252490: { short: 'Rust', name: 'Rust' },
-}
+import {
+  apiErrorText,
+  fmtTime,
+  fmtUntil,
+  gameFullName,
+  gameName,
+  isPacingBeat,
+  platformLabel,
+  sideText,
+  targetReasonText,
+} from '../utils/format'
 
 type SideDraft = {
   enabled: boolean
   actual: ActualState
   reason: string | null
+  recheckAt: string | null
   nodeIds: number[]
   usableNodeCount: number
   target: Target | null
@@ -41,7 +46,9 @@ type GameDraft = {
   platforms: PlatInGame[]
 }
 
-const error = ref<string | null>(null)
+// 加载失败和写操作失败分开存：轮询成功只清加载错误，操作失败的提示要一直留到用户看到
+const loadError = ref<string | null>(null)
+const actionError = ref<string | null>(null)
 const stale = ref(false)
 const loading = ref(true)
 const loaded = ref(false)
@@ -51,11 +58,13 @@ const nodeMap = ref<Map<number, AccessNode>>(new Map())
 const newAppid = ref('')
 const busy = ref(false)
 
-const confirmClose = ref<{
-  appid: number
-  platform: string
-  side: Side
-  label: string
+// 所有危险操作共用一个确认框，run 里放真正要执行的动作
+const confirm = ref<{
+  title: string
+  impact: string
+  consequence: string
+  confirmText: string
+  run: () => Promise<void>
 } | null>(null)
 
 let poll = 0
@@ -66,13 +75,12 @@ function buildGames(nodes: AccessNode[], targets: Target[]): GameDraft[] {
   for (const t of targets) appids.add(t.appid)
   const list = [...appids].sort((a, b) => a - b)
   return list.map((appid) => {
-    const meta = GAME_NAMES[appid] ?? { short: String(appid), name: `App ${appid}` }
     const gameNodes = nodes.filter((n) => n.appid === appid)
     const platforms = ['steam']
     return {
       appid,
-      shortName: meta.short,
-      name: meta.name,
+      shortName: gameName(appid),
+      name: gameFullName(appid),
       nodeIds: gameNodes.map((n) => n.id),
       platforms: platforms.map((platform) => ({
         platform,
@@ -90,6 +98,7 @@ function makeSide(appid: number, platform: string, side: Side, nodes: AccessNode
     enabled: target?.desired === 'enabled',
     actual: target?.actual ?? 'stopped',
     reason: target?.reason ?? null,
+    recheckAt: target?.recheck_at ?? null,
     nodeIds: assigned.map((n) => n.id),
     usableNodeCount: assigned.filter((n) => n.state === 'available').length,
     target,
@@ -102,7 +111,7 @@ async function reload() {
   accounts.value = a
   games.value = buildGames(n, t)
   loaded.value = true
-  error.value = null
+  loadError.value = null
   stale.value = false
 }
 
@@ -110,7 +119,7 @@ onMounted(async () => {
   try {
     await reload()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '加载失败'
+    loadError.value = e instanceof Error ? apiErrorText(e.message) : '加载失败'
   } finally {
     loading.value = false
   }
@@ -144,11 +153,14 @@ const openSides = computed(() => {
 const hasExpired = computed(() => accounts.value.some((a) => a.session_state === 'invalid'))
 const validAccounts = computed(() => accounts.value.filter((a) => a.session_state === 'valid').length)
 
+// 节流节拍在语义上就是正在采集，否则顶部指标和热度也会跟着每两秒闪一次
 function isLive(s: SideDraft) {
-  return s.enabled && (s.actual === 'running' || s.actual === 'starting')
+  if (!s.enabled) return false
+  return s.actual === 'running' || s.actual === 'starting' || isPacingBeat(s.reason, s.recheckAt)
 }
 function isBlocked(s: SideDraft) {
-  return s.enabled && (s.actual === 'blocked' || s.actual === 'error')
+  if (!s.enabled || isPacingBeat(s.reason, s.recheckAt)) return false
+  return s.actual === 'blocked' || s.actual === 'error'
 }
 
 function statusWord(s: SideDraft) {
@@ -156,6 +168,8 @@ function statusWord(s: SideDraft) {
   if (!s.enabled) return { t: '关', k: 'off' as const }
   if (s.actual === 'running') return { t: '采集中', k: 'live' as const }
   if (s.actual === 'starting') return { t: '启动中', k: 'live' as const }
+  // 本地节流每两秒就把目标短暂标成阻塞，那是正常节拍，不该让状态一直闪
+  if (isPacingBeat(s.reason, s.recheckAt)) return { t: '采集中', k: 'live' as const }
   if (s.actual === 'blocked') return { t: '阻塞', k: 'warn' as const }
   if (s.actual === 'error') return { t: '错误', k: 'bad' as const }
   if (s.actual === 'waiting') return { t: '等待', k: 'idle' as const }
@@ -182,25 +196,46 @@ function sideOf(p: PlatInGame, side: Side) {
   return side === 'bid' ? p.bid : p.ask
 }
 
+function sideLabel(g: GameDraft, p: PlatInGame, side: Side) {
+  return `${g.shortName} · ${platformLabel(p.platform)} ${sideText(side)}`
+}
+
+// 后端只允许移除已停用且已停止的目标。跑过没跑过前端看不出来，那种情况按后端返回的原因提示。
+function removeBlockReason(p: PlatInGame, side: Side): string {
+  const s = sideOf(p, side)
+  if (!s.target) return ''
+  if (s.target.desired !== 'disabled') return '先关掉这个方向才能移除'
+  if (s.actual !== 'stopped') return '还没完全停下来，等状态变成已停止再移除'
+  return ''
+}
+
 function requestToggle(g: GameDraft, p: PlatInGame, side: Side) {
   const s = sideOf(p, side)
   if (s.actual === 'stopping' || busy.value) return
   if (s.enabled && isLive(s)) {
-    confirmClose.value = {
-      appid: g.appid,
-      platform: p.platform,
-      side,
-      label: `${g.shortName} · ${p.platform.toUpperCase()} ${sideText(side)}`,
+    confirm.value = {
+      title: '关闭采集',
+      impact: sideLabel(g, p, side),
+      consequence: '先进入停止中：不再发新请求。在途结束后才是已停止。已保存数据保留。',
+      confirmText: '关闭',
+      run: () => toggleLatest(g.appid, p.platform, side),
     }
     return
   }
-  applyToggle(g, p, side)
+  void applyToggle(g, p, side)
+}
+
+// 轮询会重建 games，确认时重新取当前对象，避免用到过期的 revision
+async function toggleLatest(appid: number, platform: string, side: Side) {
+  const g = games.value.find((x) => x.appid === appid)
+  const p = g?.platforms.find((x) => x.platform === platform)
+  if (g && p) await applyToggle(g, p, side)
 }
 
 async function applyToggle(g: GameDraft, p: PlatInGame, side: Side) {
   const s = sideOf(p, side)
   busy.value = true
-  error.value = null
+  actionError.value = null
   try {
     if (s.target) {
       const next = s.target.desired === 'enabled' ? 'disabled' : 'enabled'
@@ -210,34 +245,64 @@ async function applyToggle(g: GameDraft, p: PlatInGame, side: Side) {
     }
     await reload()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '操作失败'
+    actionError.value = e instanceof Error ? apiErrorText(e.message) : '操作失败'
+  } finally {
+    busy.value = false
+  }
+}
+
+function requestRemove(g: GameDraft, p: PlatInGame, side: Side) {
+  const s = sideOf(p, side)
+  if (!s.target || busy.value || removeBlockReason(p, side)) return
+  const id = s.target.id
+  confirm.value = {
+    title: '移除采集目标',
+    impact: sideLabel(g, p, side),
+    consequence:
+      '移除的是这个采集目标本身，不是把开关关掉：这个方向会从概览消失，想再采只能重新加回来。' +
+      '跑过采集的目标不能移除，服务会拒绝，采集历史不会被删。',
+    confirmText: '移除',
+    run: () => removeTarget(id),
+  }
+}
+
+async function removeTarget(id: number) {
+  busy.value = true
+  actionError.value = null
+  try {
+    await deleteTarget(id)
+    await reload()
+  } catch (e) {
+    actionError.value = e instanceof Error ? apiErrorText(e.message) : '移除失败'
   } finally {
     busy.value = false
   }
 }
 
 async function addGame() {
-  const appid = Number(newAppid.value)
-  if (!Number.isInteger(appid) || appid < 1) return
+  const raw = newAppid.value.trim()
+  const appid = Number(raw)
+  if (!raw || !Number.isInteger(appid) || appid < 1) {
+    actionError.value = '游戏编号要填正整数的 Steam appid，例如 730'
+    return
+  }
   busy.value = true
-  error.value = null
+  actionError.value = null
   try {
     await createTarget('steam', appid, 'ask', 'disabled')
     newAppid.value = ''
     await reload()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '添加失败'
+    actionError.value = e instanceof Error ? apiErrorText(e.message) : '添加失败'
   } finally {
     busy.value = false
   }
 }
 
-function onConfirmClose() {
-  if (!confirmClose.value) return
-  const g = games.value.find((x) => x.appid === confirmClose.value!.appid)
-  const p = g?.platforms.find((x) => x.platform === confirmClose.value!.platform)
-  if (g && p) void applyToggle(g, p, confirmClose.value.side)
-  confirmClose.value = null
+function onConfirm() {
+  const action = confirm.value
+  confirm.value = null
+  if (action) void action.run()
 }
 </script>
 
@@ -252,10 +317,14 @@ function onConfirmClose() {
     </header>
 
     <div v-if="stale" class="stale-banner">数据可能过期，已保留上次成功结果</div>
-    <div v-if="error && !games.length" class="fail">{{ error }}</div>
-    <div v-else-if="loading" class="loading">加载中</div>
+    <div v-if="loadError" class="fail">{{ loadError }}</div>
+    <div v-if="actionError" class="fail act-err">
+      <span>{{ actionError }}</span>
+      <button class="btn sm" type="button" @click="actionError = null">知道了</button>
+    </div>
+    <div v-if="loading" class="loading">加载中</div>
 
-    <template v-else>
+    <template v-else-if="loaded">
       <section class="metrics">
         <div class="metric">
           <div class="m-label">在采游戏</div>
@@ -281,7 +350,7 @@ function onConfirmClose() {
       </section>
 
       <form class="add-game" @submit.prevent="addGame">
-        <input v-model="newAppid" class="inp" placeholder="appid" inputmode="numeric" />
+        <input v-model="newAppid" class="inp" placeholder="游戏编号，如 730" inputmode="numeric" />
         <button class="btn sm" type="submit" :disabled="busy">加入游戏</button>
       </form>
 
@@ -305,7 +374,7 @@ function onConfirmClose() {
 
           <div class="plat-rows">
             <div v-for="p in g.platforms" :key="p.platform" class="plat-row">
-              <div class="plat-tag">{{ p.platform }}</div>
+              <div class="plat-tag">{{ platformLabel(p.platform) }}</div>
               <div class="dir-grid">
                 <div
                   v-for="side in (['bid', 'ask'] as const)"
@@ -336,6 +405,14 @@ function onConfirmClose() {
                             : '关'
                       }}</span>
                     </button>
+                    <button
+                      v-if="sideOf(p, side).target"
+                      class="rm"
+                      type="button"
+                      :disabled="busy || !!removeBlockReason(p, side)"
+                      :title="removeBlockReason(p, side) || '移除这个采集目标'"
+                      @click="requestRemove(g, p, side)"
+                    >移除</button>
                   </div>
                   <div class="dir-body">
                     <div class="num cap">
@@ -347,7 +424,16 @@ function onConfirmClose() {
                       </span>
                     </div>
                     <div v-else class="muted sm">未分节点</div>
-                    <div v-if="sideOf(p, side).reason" class="reason">{{ sideOf(p, side).reason }}</div>
+                    <div
+                      v-if="sideOf(p, side).reason && !isPacingBeat(sideOf(p, side).reason, sideOf(p, side).recheckAt)"
+                      class="reason"
+                      :title="fmtTime(sideOf(p, side).recheckAt)"
+                    >
+                      {{ targetReasonText(sideOf(p, side).reason) }}
+                      <span v-if="fmtUntil(sideOf(p, side).recheckAt)" class="muted">
+                        · {{ fmtUntil(sideOf(p, side).recheckAt) }}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -362,13 +448,13 @@ function onConfirmClose() {
     </template>
 
     <ConfirmDialog
-      v-if="confirmClose"
-      title="关闭采集"
-      :impact="confirmClose.label"
-      consequence="先进入停止中：不再发新请求。在途结束后才是已停止。已保存数据保留。"
-      confirm-text="关闭"
-      @confirm="onConfirmClose"
-      @cancel="confirmClose = null"
+      v-if="confirm"
+      :title="confirm.title"
+      :impact="confirm.impact"
+      :consequence="confirm.consequence"
+      :confirm-text="confirm.confirmText"
+      @confirm="onConfirm"
+      @cancel="confirm = null"
     />
   </div>
 </template>
@@ -401,6 +487,7 @@ function onConfirmClose() {
   border: 1px solid var(--line-strong);
 }
 .fail { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+.act-err { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .loading { color: var(--text-3); }
 
 .metrics {
@@ -581,6 +668,19 @@ function onConfirmClose() {
 .sw.on .sw-knob { border-color: var(--ok); background: var(--ok-dim); }
 .sw.on .sw-knob::after { transform: translateX(12px); background: var(--ok); }
 .sw:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.rm {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  color: var(--text-3);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.rm:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: var(--danger-dim); }
+.rm:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .empty-cta { margin-top: 16px; border: 1px solid var(--line); }
 .add-game { display: flex; gap: 8px; margin-bottom: 14px; }

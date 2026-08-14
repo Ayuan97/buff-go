@@ -30,6 +30,10 @@ type searchResult struct {
 		AppID               int64  `json:"appid"`
 		MarketHashName      string `json:"market_hash_name"`
 		MarketBucketGroupID string `json:"market_bucket_group_id"`
+		// 展示用元数据。IconURL 是图片路径片段，Type 有些游戏返回空串。
+		IconURL   string `json:"icon_url"`
+		Type      string `json:"type"`
+		NameColor string `json:"name_color"`
 	} `json:"asset_description"`
 }
 
@@ -96,7 +100,42 @@ func parseYuanCents(text string) (market.CNYCents, error) {
 		return 0, fmt.Errorf("price text is not yuan")
 	}
 	numeric := strings.TrimSpace(strings.TrimPrefix(text, "¥"))
+	// 上千的价格平台会带千位分隔符（¥ 9,341.19）。分隔符是展示格式，在这里剥掉，
+	// 领域层的金额解析继续只接受纯数字。
+	numeric, err := stripThousandSeparators(numeric)
+	if err != nil {
+		return 0, err
+	}
 	return market.ParseCNYCents(numeric)
+}
+
+// stripThousandSeparators 去掉千位分隔符，并要求它们正好每三位一个。
+// 不能无脑替换：9,,341.19 之类剥完数值恰好正确，会让异常响应被当成正常价格。
+func stripThousandSeparators(numeric string) (string, error) {
+	if !strings.Contains(numeric, ",") {
+		return numeric, nil
+	}
+	whole, fraction, hasFraction := strings.Cut(numeric, ".")
+	if strings.Contains(fraction, ",") {
+		return "", fmt.Errorf("price fraction must not group digits")
+	}
+	groups := strings.Split(whole, ",")
+	for index, group := range groups {
+		if index == 0 {
+			if len(group) < 1 || len(group) > 3 {
+				return "", fmt.Errorf("price has a misplaced thousand separator")
+			}
+			continue
+		}
+		if len(group) != 3 {
+			return "", fmt.Errorf("price has a misplaced thousand separator")
+		}
+	}
+	joined := strings.Join(groups, "")
+	if !hasFraction {
+		return joined, nil
+	}
+	return joined + "." + fraction, nil
 }
 
 func parseOrderbook(body []byte) (orderbookResponse, error) {

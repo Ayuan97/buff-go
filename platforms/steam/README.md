@@ -8,7 +8,7 @@
 
 | 接口 | 登录态最紧观察 | 匿名 | 共享预算 |
 |---|---|---|---|
-| `market/search/render` | 08-12 **2×200** 后长 429；08-13 过夜 ≈19h 仍 429（2s/5min 均无效） | 持续 429 | 与 orderbook **不共享** |
+| `market/search/render` | 08-12 **2×200** 后长 429；长锁静默 45min 仍 429、**60m34s 后**恢复（2s 轮询与 5min 静默均无效）。过夜 19h 两端 429，中间无量测 | 持续 429 | 与 orderbook **不共享** |
 | `market/orderbook?q=Load` | 须 `qp`；08-13 背靠背 **200×200** 未 429 | 单次 200 | 与 search/render **不共享** |
 | `market/appfacets/{appid}` | 背靠背 30 **全 200** | 未对照 | 与 search/render 不同窗（search 429 时 facets 可 200） |
 | `market/priceoverview` 等 | 易 429 | 易 429 | 疑与部分只读 JSON 同属更紧桶（未确认精确键） |

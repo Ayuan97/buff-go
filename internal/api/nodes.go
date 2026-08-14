@@ -50,6 +50,10 @@ type nodeCreateRequest struct {
 	ProxyCredential         string              `json:"proxy_credential"`
 }
 
+type nodeRenameRequest struct {
+	Name string `json:"name"`
+}
+
 type nodeConnectionReplaceRequest struct {
 	ExpectedEgressRevision  int64               `json:"expected_egress_revision"`
 	Kind                    resource.NodeKind   `json:"kind"`
@@ -135,10 +139,37 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "name":
+		var input nodeRenameRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		node, err := h.nodes.RenameNode(r.Context(), id, input.Name)
+		if err != nil {
+			writeNodeError(w, err)
+			return
+		}
+		writeAccountJSON(w, http.StatusOK, toNodeResponse(node))
 	case "connection":
 		var input nodeConnectionReplaceRequest
 		if !decodeJSON(w, r, &input) {
 			return
+		}
+		// 换线路会改地域，已划出去的方向必须仍能用新地域，否则调度器只会静默跳过这个节点。
+		current, found, err := h.nodes.Node(r.Context(), id)
+		if err != nil {
+			writeNodeError(w, err)
+			return
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "node_not_found")
+			return
+		}
+		for _, assignment := range current.Sides {
+			if !h.platformAllowsRegion(assignment.Platform, input.Region) {
+				writeError(w, http.StatusConflict, "platform_region_mismatch")
+				return
+			}
 		}
 		node, err := h.nodes.ReplaceNodeConnection(r.Context(), id, input.ExpectedEgressRevision, nodeConnectionInput(input.Kind, input.Region, input.EgressMode, input.StickySessionValidUntil, input.ProxyCredential))
 		if err != nil {
@@ -186,6 +217,21 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 		if input.Side != nil {
 			side = *input.Side
 		}
+		if side != "" {
+			node, found, err := h.nodes.Node(r.Context(), id)
+			if err != nil {
+				writeNodeError(w, err)
+				return
+			}
+			if !found {
+				writeError(w, http.StatusNotFound, "node_not_found")
+				return
+			}
+			if !h.platformAllowsRegion(input.Platform, node.Region) {
+				writeError(w, http.StatusConflict, "platform_region_mismatch")
+				return
+			}
+		}
 		node, err := h.nodes.AssignNodeSide(r.Context(), id, input.ExpectedAssignmentRevision, input.Platform, side)
 		if err != nil {
 			writeNodeError(w, err)
@@ -208,6 +254,16 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// platformAllowsRegion 判断节点地域能否服务某个平台。规则来自采集侧的平台档案，
+// 与调度器挑组合时用的 NodeRegion.Allows 是同一条判断；没有档案的平台不做限制。
+func (h *Handler) platformAllowsRegion(platform resource.Platform, region resource.NodeRegion) bool {
+	target, ok := h.platformRegions[platform]
+	if !ok {
+		return true
+	}
+	return region.Allows(target)
 }
 
 func nodeConnectionInput(kind resource.NodeKind, region resource.NodeRegion, mode resource.EgressMode, sticky *time.Time, credential string) resource.NodeConnectionInput {

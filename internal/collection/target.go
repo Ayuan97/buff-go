@@ -24,6 +24,51 @@ type SummaryTargetInput struct {
 	Recovery      RecoveryMode
 	RecheckAt     *time.Time
 	ChangedAt     time.Time
+	Sort          SortOrder
+}
+
+// SortColumn 是平台列表的排序字段。
+type SortColumn string
+
+const (
+	SortColumnPrice    SortColumn = "price"
+	SortColumnQuantity SortColumn = "quantity"
+	SortColumnName     SortColumn = "name"
+)
+
+// SortDirection 是排序方向。
+type SortDirection string
+
+const (
+	SortAscending  SortDirection = "asc"
+	SortDescending SortDirection = "desc"
+)
+
+// SortOrder 决定平台按什么顺序返回商品，也就决定了这一轮先采到哪一头。
+// 游标是列表偏移量，所以换了顺序旧游标就失去意义，必须重开一轮。
+type SortOrder struct {
+	Column    SortColumn
+	Direction SortDirection
+}
+
+// DefaultSortOrder 是价格升序，与接入采集时的固定行为一致。
+func DefaultSortOrder() SortOrder {
+	return SortOrder{Column: SortColumnPrice, Direction: SortAscending}
+}
+
+// Validate checks that both parts name a supported platform ordering.
+func (order SortOrder) Validate() error {
+	switch order.Column {
+	case SortColumnPrice, SortColumnQuantity, SortColumnName:
+	default:
+		return fmt.Errorf("invalid sort column %q", order.Column)
+	}
+	switch order.Direction {
+	case SortAscending, SortDescending:
+		return nil
+	default:
+		return fmt.Errorf("invalid sort direction %q", order.Direction)
+	}
 }
 
 // Target is an immutable controllable summary target.
@@ -41,6 +86,7 @@ type Target struct {
 	recovery      RecoveryMode
 	recheckAt     time.Time
 	changedAt     time.Time
+	sort          SortOrder
 }
 
 // NewSummaryTarget validates a summary target restored from persistence.
@@ -59,6 +105,11 @@ func NewSummaryTarget(input SummaryTargetInput) (Target, error) {
 		recovery:      input.Recovery,
 		recheckAt:     timeValue(input.RecheckAt),
 		changedAt:     input.ChangedAt,
+		sort:          input.Sort,
+	}
+	// 零值来自本能力上线之前的行与未指定排序的调用方，按接入时的固定顺序补齐
+	if target.sort == (SortOrder{}) {
+		target.sort = DefaultSortOrder()
 	}
 	if err := target.Validate(); err != nil {
 		return Target{}, err
@@ -90,6 +141,9 @@ func (target Target) Validate() error {
 		return fmt.Errorf("summary target appid must be positive")
 	}
 	if err := validateSide(target.side); err != nil {
+		return err
+	}
+	if err := target.sort.Validate(); err != nil {
 		return err
 	}
 	if err := target.desired.Validate(); err != nil {
@@ -220,6 +274,45 @@ func (target Target) Enable(at time.Time) (Target, error) {
 	target.switchVersion = nextSwitch
 	target.desired = DesiredEnabled
 	return target.changeActual(ActualStarting, TargetReasonNone, RecoveryNone, time.Time{}, at)
+}
+
+// SetSortOrder changes what the platform returns first. The cursor is a list
+// offset, so the current batch is voided by advancing switch_version and the
+// next cycle restarts from the beginning; already stored market facts are kept.
+func (target Target) SetSortOrder(order SortOrder, at time.Time) (Target, error) {
+	if err := target.validateChangeTime(at); err != nil {
+		return Target{}, err
+	}
+	if err := order.Validate(); err != nil {
+		return Target{}, err
+	}
+	if target.sort == order {
+		return target, nil
+	}
+	nextSwitch, err := nextRevision(target.switchVersion)
+	if err != nil {
+		return Target{}, fmt.Errorf("switch_version cannot advance")
+	}
+	// 不走 changeActual：目标已经是 starting 时它会判定「无变化」而不推进 revision，
+	// 那样排序改动会被存储层当成空操作丢掉。
+	nextRev, err := nextRevision(target.revision)
+	if err != nil {
+		return Target{}, fmt.Errorf("revision cannot advance")
+	}
+	target.revision = nextRev
+	target.switchVersion = nextSwitch
+	target.sort = order
+	target.changedAt = at
+	if target.desired == DesiredEnabled {
+		target.actual = ActualStarting
+		target.reason = TargetReasonNone
+		target.recovery = RecoveryNone
+		target.recheckAt = time.Time{}
+	}
+	if err := target.Validate(); err != nil {
+		return Target{}, err
+	}
+	return target, nil
 }
 
 // Disable accepts a disable request and begins stopping the target.
@@ -430,6 +523,9 @@ func (target Target) Actual() ActualState { return target.actual }
 
 // SwitchVersion returns the enable or disable fence.
 func (target Target) SwitchVersion() Revision { return target.switchVersion }
+
+// Sort returns the platform ordering this target collects with.
+func (target Target) Sort() SortOrder { return target.sort }
 
 // Reason returns the controlled target reason.
 func (target Target) Reason() TargetReason { return target.reason }

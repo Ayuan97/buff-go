@@ -1,18 +1,90 @@
 package postgres
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"hash"
+	"io"
+	"net/netip"
 	"time"
 
 	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
 )
+
+// pagePayloadRetention 是原始响应的全局保留页数。这张表是可丢弃的诊断副本，
+// 写入时按写入时间倒序淘汰，体积因此恒定。
+const pagePayloadRetention = 2000
+
+// storePagePayload 保存一页的原始响应并淘汰超出保留窗口的旧副本。
+// payload 为空表示这个方向没有单一页面响应，直接跳过。
+func storePagePayload(ctx context.Context, tx *sql.Tx, page collection.Page, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	compressed, err := gzipPayload(payload)
+	if err != nil {
+		return ErrCollectionInvalidInput
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO collection_page_payloads (run_id, page_sequence, payload_gzip, byte_size, created_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (run_id, page_sequence) DO NOTHING`,
+		int64(page.RunID()), int64(page.PageSequence()), compressed, int64(len(payload)), page.CommittedAt(),
+	); err != nil {
+		return mapCollectionWriteError(ctx, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM collection_page_payloads
+WHERE (run_id, page_sequence) IN (
+    SELECT run_id, page_sequence
+    FROM collection_page_payloads
+    ORDER BY created_at DESC, run_id DESC, page_sequence DESC
+    OFFSET $1
+)`, pagePayloadRetention); err != nil {
+		return mapCollectionWriteError(ctx, err)
+	}
+	return nil
+}
+
+func gzipPayload(payload []byte) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buffer, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(payload); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func gunzipPayload(compressed []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+	// 单页原始响应实测约 10 KiB。限长是防止损坏或伪造的压缩数据把内存吃光。
+	const maxPayload = 16 << 20
+	payload, err := io.ReadAll(io.LimitReader(reader, maxPayload+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxPayload {
+		return nil, ErrCollectionIntegrity
+	}
+	return payload, nil
+}
 
 // Page fence errors are canonical in the collection domain package; the
 // storage names keep the same values for errors.Is compatibility.
@@ -150,12 +222,13 @@ func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) 
 	storedPage, err := scanCollectionPage(tx.QueryRowContext(ctx, `
 INSERT INTO collection_pages (
     run_id, page_sequence, cursor_before, cursor_after, payload_digest,
-    collected_at, committed_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    collected_at, committed_at, account_id, exit_address
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING run_id, page_sequence, cursor_before, cursor_after, payload_digest,
           collected_at, committed_at`,
 		int64(page.RunID()), int64(page.PageSequence()), collectionCursorBytes(page.CursorBefore()),
 		collectionCursorBytes(page.CursorAfter()), pageDigest[:], page.CollectedAt(), page.CommittedAt(),
+		nullableAccountID(input.AccountID), nullableAddr(input.ExitAddress),
 	))
 	if err != nil {
 		return collection.Page{}, false, mapCollectionWriteError(ctx, err)
@@ -165,6 +238,9 @@ RETURNING run_id, page_sequence, cursor_before, cursor_after, payload_digest,
 		!storedPage.CursorAfter().Equal(page.CursorAfter()) ||
 		!storedPage.CollectedAt().Equal(page.CollectedAt()) {
 		return collection.Page{}, false, ErrCollectionIntegrity
+	}
+	if err := storePagePayload(ctx, tx, page, input.Payload); err != nil {
+		return collection.Page{}, false, err
 	}
 	marketApplied, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
 	if err != nil {
@@ -281,6 +357,9 @@ func resolveAttemptProductID(ctx context.Context, tx *sql.Tx, platform string, a
 			return 0, err
 		}
 		if found {
+			if err := refreshProductMediaTx(ctx, tx, mapped, attempt.Media); err != nil {
+				return 0, err
+			}
 			return mapped, nil
 		}
 	}
@@ -293,9 +372,13 @@ func resolveAttemptProductID(ctx context.Context, tx *sql.Tx, platform string, a
 	}
 	switch len(ids) {
 	case 1:
+		// 商品已存在时也刷新展示元数据，否则本迁移之前建的商品永远没有图标
+		if err := refreshProductMediaTx(ctx, tx, ids[0], attempt.Media); err != nil {
+			return 0, err
+		}
 		return ids[0], nil
 	case 0:
-		created, err := insertSteamProductTx(ctx, tx, appID, attempt.ExactName)
+		created, err := insertSteamProductTx(ctx, tx, appID, attempt.ExactName, attempt.Media)
 		if err != nil {
 			return 0, err
 		}
@@ -346,12 +429,15 @@ SELECT product_id FROM steam_products WHERE appid = $1 AND name = $2`, appID, na
 	return ids, nil
 }
 
-func insertSteamProductTx(ctx context.Context, tx *sql.Tx, appID int64, name string) (catalog.ProductID, error) {
+func insertSteamProductTx(ctx context.Context, tx *sql.Tx, appID int64, name string, media catalog.ProductMedia) (catalog.ProductID, error) {
+	media = media.Normalized()
 	var id int64
 	err := tx.QueryRowContext(ctx, `
-INSERT INTO steam_products (appid, name) VALUES ($1, $2)
+INSERT INTO steam_products (appid, name, icon_path, item_type, name_color) VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (appid, name) DO UPDATE SET name = EXCLUDED.name
-RETURNING product_id`, appID, name).Scan(&id)
+RETURNING product_id`, appID, name,
+		nullableText(media.IconPath), nullableText(media.ItemType), nullableText(media.NameColor),
+	).Scan(&id)
 	if err != nil {
 		return 0, collectionStorageError(ctx)
 	}
@@ -359,6 +445,51 @@ RETURNING product_id`, appID, name).Scan(&id)
 		return 0, ErrCollectionIntegrity
 	}
 	return catalog.ProductID(id), nil
+}
+
+// refreshProductMediaTx 只在有新值时覆盖，空值不清掉已存的元数据：
+// 平台偶发少返回一个字段不该让商品的图标消失。
+func refreshProductMediaTx(ctx context.Context, tx *sql.Tx, id catalog.ProductID, media catalog.ProductMedia) error {
+	media = media.Normalized()
+	if media.Empty() {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE steam_products
+SET icon_path  = COALESCE($2, icon_path),
+    item_type  = COALESCE($3, item_type),
+    name_color = COALESCE($4, name_color)
+WHERE product_id = $1
+  AND (icon_path IS DISTINCT FROM COALESCE($2, icon_path)
+    OR item_type IS DISTINCT FROM COALESCE($3, item_type)
+    OR name_color IS DISTINCT FROM COALESCE($4, name_color))`,
+		int64(id), nullableText(media.IconPath), nullableText(media.ItemType), nullableText(media.NameColor),
+	); err != nil {
+		return mapCollectionWriteError(ctx, err)
+	}
+	return nil
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// 库约束要求 account_id > 0，非正值一律记为未知归属
+func nullableAccountID(value int64) any {
+	if value < 1 {
+		return nil
+	}
+	return value
+}
+
+func nullableAddr(value netip.Addr) any {
+	if !value.IsValid() {
+		return nil
+	}
+	return value.String()
 }
 
 func putPlatformMappingTx(ctx context.Context, tx *sql.Tx, platform string, appID int64, platformItemID string, productID catalog.ProductID) error {

@@ -18,6 +18,7 @@ var (
 	ErrNodeAssignmentConflict     = errors.New("node direction assignment conflicts")
 	ErrNodeNameConflict           = errors.New("access node name already exists")
 	ErrAccountConflict            = errors.New("account alias already exists")
+	ErrProviderConflict           = errors.New("provider name already exists")
 	ErrInvalidResource            = errors.New("invalid resource input")
 	ErrProxyCredentialUnavailable = errors.New("proxy credential is unavailable")
 	ErrResourceIntegrity          = errors.New("stored resource is inconsistent")
@@ -106,6 +107,39 @@ FROM platform_accounts ORDER BY account_id`)
 		return nil, ErrResourceStorage
 	}
 	return accounts, nil
+}
+
+// RenameAccount changes the display alias. The stored session is not returned.
+func (s *Store) RenameAccount(ctx context.Context, id resource.AccountID, alias string) (resource.PlatformAccount, error) {
+	if err := s.validate(); err != nil {
+		return resource.PlatformAccount{}, err
+	}
+	if err := id.Validate(); err != nil {
+		return resource.PlatformAccount{}, err
+	}
+	current, found, err := s.Account(ctx, id)
+	if err != nil {
+		return resource.PlatformAccount{}, err
+	}
+	if !found {
+		return resource.PlatformAccount{}, ErrResourceNotFound
+	}
+	if err := validateNewAccount(current.Platform, alias); err != nil {
+		return resource.PlatformAccount{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
+	}
+	if current.Alias == alias {
+		return current, nil
+	}
+	account, err := scanAccount(s.db.QueryRowContext(ctx, `
+UPDATE platform_accounts SET alias = $2 WHERE account_id = $1
+RETURNING `+accountReadColumns, int64(id), alias))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.PlatformAccount{}, ErrResourceNotFound
+	}
+	if err != nil {
+		return resource.PlatformAccount{}, mapAccountWriteError(err)
+	}
+	return account, nil
 }
 
 // ReplaceAccountSession atomically replaces a matching session revision.
@@ -280,6 +314,42 @@ FROM access_nodes ORDER BY node_id`)
 		return nil, err
 	}
 	return nodes, nil
+}
+
+// RenameNode changes the display name. Connection, assignment and exit evidence
+// are untouched, so no revision advances.
+func (s *Store) RenameNode(ctx context.Context, id resource.NodeID, name string) (resource.AccessNode, error) {
+	if err := s.validate(); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if err := id.Validate(); err != nil {
+		return resource.AccessNode{}, err
+	}
+	current, found, err := s.Node(ctx, id)
+	if err != nil {
+		return resource.AccessNode{}, err
+	}
+	if !found {
+		return resource.AccessNode{}, ErrResourceNotFound
+	}
+	if current.Name == name {
+		return current, nil
+	}
+	renamed := current
+	renamed.Name = name
+	if err := renamed.Validate(); err != nil {
+		return resource.AccessNode{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
+	}
+	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+UPDATE access_nodes SET name = $2 WHERE node_id = $1
+RETURNING `+nodeReadColumns, int64(id), name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.AccessNode{}, ErrResourceNotFound
+	}
+	if err != nil {
+		return resource.AccessNode{}, mapNodeWriteError(err)
+	}
+	return node, nil
 }
 
 // ReplaceNodeConnection atomically starts a new validating egress revision.

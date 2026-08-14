@@ -15,16 +15,17 @@ import (
 )
 
 var (
-	ErrComponentUnavailable = errors.New("resource component is unavailable")
-	ErrCombinationNotFound  = errors.New("account-node combination not found")
-	ErrNodeNotFound         = errors.New("access node not found")
-	ErrResourceOccupied     = errors.New("resource is occupied")
-	ErrResourceUnusable     = errors.New("resource is not usable")
-	ErrLeaseNotHeld         = errors.New("resource lease is not held")
-	ErrCoordinatorIntegrity = errors.New("resource coordinator state is inconsistent")
-	ErrSequenceExhausted    = errors.New("resource coordinator sequence is exhausted")
-	ErrComponentCanceled    = errors.New("resource component was canceled")
-	ErrLeaseReleased        = errors.New("resource lease was released")
+	ErrComponentUnavailable   = errors.New("resource component is unavailable")
+	ErrCombinationNotFound    = errors.New("account-node combination not found")
+	ErrNodeNotFound           = errors.New("access node not found")
+	ErrResourceOccupied       = errors.New("resource is occupied")
+	ErrResourceUnusable       = errors.New("resource is not usable")
+	ErrAccountSessionUnusable = errors.New("account session is unusable")
+	ErrLeaseNotHeld           = errors.New("resource lease is not held")
+	ErrCoordinatorIntegrity   = errors.New("resource coordinator state is inconsistent")
+	ErrSequenceExhausted      = errors.New("resource coordinator sequence is exhausted")
+	ErrComponentCanceled      = errors.New("resource component was canceled")
+	ErrLeaseReleased          = errors.New("resource lease was released")
 )
 
 // CoordinatorRepository provides authoritative resource reads and the guarded
@@ -321,6 +322,9 @@ func (coordinator *Coordinator) AcquireCombination(
 		return Lease{}, ErrCoordinatorIntegrity
 	}
 	if err := resources.ValidateForUse(now, target, appID, side); err != nil {
+		if errors.Is(err, ErrAccountSessionUnusable) || errors.Is(err, ErrResourceUnusable) {
+			return Lease{}, err
+		}
 		return Lease{}, fmt.Errorf("%w: %w", ErrResourceUnusable, err)
 	}
 	if err := ctx.Err(); err != nil {

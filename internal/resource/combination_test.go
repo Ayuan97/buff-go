@@ -1,6 +1,7 @@
 package resource
 
 import (
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -13,6 +14,19 @@ func TestCombinationResourcesValidateForUse(t *testing.T) {
 	resources := usableCombinationResources(now, 1, 11, 21)
 	if err := resources.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); err != nil {
 		t.Fatalf("ValidateForUse() error = %v", err)
+	}
+
+	unverified := cloneCombinationResources(resources)
+	unverified.Account.SessionState = AccountSessionStateUnverified
+	unverified.Account.LastCheckedAt = nil
+	if err := unverified.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); err != nil {
+		t.Fatalf("unverified ValidateForUse() error = %v", err)
+	}
+
+	invalid := cloneCombinationResources(resources)
+	invalid.Account.SessionState = AccountSessionStateInvalid
+	if err := invalid.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); !errors.Is(err, ErrAccountSessionUnusable) {
+		t.Fatalf("invalid session error = %v", err)
 	}
 
 	tests := []struct {

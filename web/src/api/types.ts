@@ -53,6 +53,23 @@ export interface AccessNode {
   exit?: NodeExit
 }
 
+export interface Watermark {
+  region: Region
+  min_usable: number
+  usable: number
+  revision: number
+}
+
+export interface Provider {
+  id: number
+  name: string
+  enabled: boolean
+  priority: number
+  regions: Region[]
+  has_credential: boolean
+  revision: number
+}
+
 export interface Combination {
   id: number
   platform: string
@@ -71,6 +88,8 @@ export interface Target {
   switch_version: number
   reason?: string
   recovery?: string
+  sort_column: SortColumn
+  sort_dir: SortDirection
   recheck_at?: string
   changed_at: string
 }
@@ -92,7 +111,21 @@ export interface Run {
   finished_at?: string
 }
 
-export interface Quote {
+export interface CollectionPage {
+  page_sequence: number
+  cursor_before?: string
+  cursor_after?: string
+  collected_at: string
+  committed_at: string
+  // 保留下来的原始响应字节数，0 表示副本已被淘汰或这个方向不产出单页响应
+  payload_bytes: number
+  // 归属能力上线之前提交的页没有这三项
+  account_id?: number
+  account_alias?: string
+  exit_address?: string
+}
+
+export interface PageAttempt {
   product_id: number
   appid: number
   name: string
@@ -104,7 +137,54 @@ export interface Quote {
   source_time?: string
   present_cents?: number
   present_order_count?: number
+}
+
+export interface Quote {
+  product_id: number
+  appid: number
+  name: string
+  // 平台图片路径片段，拼上 CDN 前缀才是图片地址；老商品在被重新采到之前没有
+  icon_path?: string
+  item_type?: string
+  name_color?: string
+  platform: string
+  side: Side
+  status: QuoteStatus
+  reason_code?: string
+  collected_at: string
+  source_time?: string
+  present_cents?: number
+  present_order_count?: number
   present_collected_at?: string
+}
+
+export type QuoteSort = 'price_desc' | 'price_asc' | 'listings_desc' | 'name'
+
+// 采集顺序决定平台先返回哪一头，改了会作废当前批次
+export type SortColumn = 'price' | 'quantity' | 'name'
+export type SortDirection = 'asc' | 'desc'
+
+export interface QuoteFilter {
+  appid?: number
+  platform?: string
+  side?: Side
+  keyword?: string
+  item_type?: string
+  min_cents?: number
+  max_cents?: number
+  sort?: QuoteSort
+  limit?: number
+  offset?: number
+}
+
+export interface QuotePage {
+  total: number
+  quotes: Quote[]
+}
+
+export interface QuoteFacets {
+  appids: number[]
+  item_types: string[]
 }
 
 export class APIError extends Error {

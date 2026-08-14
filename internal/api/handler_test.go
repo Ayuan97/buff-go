@@ -49,6 +49,13 @@ func (s *accountServiceStub) CreateAccount(_ context.Context, platform resource.
 	s.created = true
 	return resource.PlatformAccount{ID: 7, Platform: platform, Alias: alias, SessionState: resource.AccountSessionStateUnverified, SessionRevision: 1}, nil
 }
+func (s *accountServiceStub) RenameAccount(_ context.Context, id resource.AccountID, alias string) (resource.PlatformAccount, error) {
+	if s.err != nil {
+		return resource.PlatformAccount{}, s.err
+	}
+	s.updated = true
+	return resource.PlatformAccount{ID: id, Platform: "steam", Alias: alias, SessionState: resource.AccountSessionStateUnverified, SessionRevision: 1}, nil
+}
 func (s *accountServiceStub) ReplaceAccountSession(_ context.Context, id resource.AccountID, _ int64, _ []byte) (resource.PlatformAccount, error) {
 	if s.err != nil {
 		return resource.PlatformAccount{}, s.err
@@ -77,6 +84,7 @@ func TestAccountRoutesNeverEchoSession(t *testing.T) {
 		{name: "list", method: http.MethodGet, path: "/api/accounts", status: http.StatusOK},
 		{name: "get", method: http.MethodGet, path: "/api/accounts/3", status: http.StatusOK},
 		{name: "create", method: http.MethodPost, path: "/api/accounts", body: `{"platform":"steam","alias":"new","session":"secret-session"}`, status: http.StatusCreated},
+		{name: "rename", method: http.MethodPost, path: "/api/accounts/3/alias", body: `{"alias":"renamed"}`, status: http.StatusOK},
 		{name: "replace", method: http.MethodPost, path: "/api/accounts/3/session", body: `{"expected_revision":4,"session":"new-secret"}`, status: http.StatusOK},
 		{name: "delete", method: http.MethodPost, path: "/api/accounts/3/delete", status: http.StatusOK},
 	} {

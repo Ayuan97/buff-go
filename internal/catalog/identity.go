@@ -1,13 +1,91 @@
 package catalog
 
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
 // ProductID is the stable internal identity of a Steam catalog product.
 type ProductID int64
+
+// ProductMedia is display-only product metadata. It never participates in
+// identity matching or market judgement.
+type ProductMedia struct {
+	// IconPath is the platform image path fragment. The CDN prefix is added at
+	// render time, so a stored value must not contain slashes.
+	IconPath string
+	// ItemType is the platform category. Some games return it empty.
+	ItemType string
+	// NameColor is the six-digit hex quality color without a leading hash.
+	NameColor string
+}
+
+// Normalized drops every field that would violate storage constraints and
+// keeps the rest. Display metadata must never fail a page commit, so callers
+// store the result instead of rejecting the product.
+func (media ProductMedia) Normalized() ProductMedia {
+	return ProductMedia{
+		IconPath:  normalizedIconPath(media.IconPath),
+		ItemType:  normalizedItemType(media.ItemType),
+		NameColor: normalizedNameColor(media.NameColor),
+	}
+}
+
+// Empty reports whether there is nothing worth storing.
+func (media ProductMedia) Empty() bool {
+	return media.IconPath == "" && media.ItemType == "" && media.NameColor == ""
+}
+
+func normalizedIconPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 512 || !utf8.ValidString(value) {
+		return ""
+	}
+	// 拒绝斜杠让拼接 CDN 前缀时不可能出现路径穿越
+	if strings.ContainsAny(value, "/\\") {
+		return ""
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return ""
+		}
+	}
+	return value
+}
+
+func normalizedItemType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 || !utf8.ValidString(value) {
+		return ""
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return ""
+		}
+	}
+	return value
+}
+
+func normalizedNameColor(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) != 6 {
+		return ""
+	}
+	for _, character := range value {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", character) {
+			return ""
+		}
+	}
+	return value
+}
 
 // SteamProduct is the Steam-authoritative identity used for platform matching.
 type SteamProduct struct {
 	ProductID ProductID
 	AppID     int64
 	Name      string
+	Media     ProductMedia
 }
 
 // PlatformProduct is the identity evidence returned by a trading platform.

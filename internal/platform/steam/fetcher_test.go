@@ -79,6 +79,38 @@ func TestFetchAskPageAndEmpty(t *testing.T) {
 	}
 }
 
+// 请求头必须看起来和浏览器里的同源 XHR 一样：带自定义标识会被平台单独收紧。
+// 同时不能出现 Accept-Encoding，否则 Go 不再透明解压，响应体会变成压缩字节。
+func TestRequestLooksLikeBrowser(t *testing.T) {
+	var got http.Header
+	mux := http.NewServeMux()
+	mux.HandleFunc("/market/search/render/", func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_, _ = io.WriteString(w, `{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	fetcher := mustFetcher(t, server.URL, stubCatalog{})
+	if _, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent := got.Get("User-Agent")
+	if !strings.Contains(agent, "Chrome/") || strings.Contains(strings.ToLower(agent), "buffgo") {
+		t.Fatalf("User-Agent = %q", agent)
+	}
+	for _, name := range []string{"Accept-Language", "Referer", "Sec-Fetch-Mode", "Sec-Ch-Ua-Platform"} {
+		if got.Get(name) == "" {
+			t.Fatalf("%s header is missing", name)
+		}
+	}
+	if got.Get("Accept-Encoding") != "gzip" {
+		t.Fatalf("Accept-Encoding = %q, want the transport default", got.Get("Accept-Encoding"))
+	}
+}
+
 func TestFetchAskRateLimitAndLogin(t *testing.T) {
 	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

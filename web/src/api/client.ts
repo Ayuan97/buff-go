@@ -32,6 +32,13 @@ export async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T
 }
 
+// 平台原始响应按文本读：抓到 HTML 错误页时最需要看清内容，不能因为解析失败就丢掉
+export async function getText(path: string): Promise<string> {
+  const res = await fetch(path, { credentials: 'same-origin' })
+  if (!res.ok) throw await readError(res)
+  return await res.text()
+}
+
 export async function postJSON<T>(path: string, body: unknown = {}): Promise<T> {
   return sendPOST<T>(path, JSON.stringify(body))
 }

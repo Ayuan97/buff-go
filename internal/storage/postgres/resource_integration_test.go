@@ -247,6 +247,22 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatal("proxy without opaque connection material was accepted")
 	}
 
+	renamed, err := publicStore.RenameNode(ctx, direct.ID, "local-direct-renamed")
+	if err != nil || renamed.Name != "local-direct-renamed" ||
+		renamed.EgressRevision != direct.EgressRevision || renamed.AssignmentRevision != direct.AssignmentRevision {
+		t.Fatalf("rename node = %+v err=%v", renamed, err)
+	}
+	if same, err := publicStore.RenameNode(ctx, direct.ID, "local-direct-renamed"); err != nil || same.Name != renamed.Name {
+		t.Fatalf("idempotent rename = %+v err=%v", same, err)
+	}
+	if _, err := publicStore.RenameNode(ctx, direct.ID, ""); !errors.Is(err, ErrInvalidResource) {
+		t.Fatalf("empty rename = %v", err)
+	}
+	if _, err := publicStore.RenameNode(ctx, 9999, "missing"); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("rename missing node = %v", err)
+	}
+	direct = renamed
+
 	proxySecret := []byte("https://synthetic-user:synthetic-pass@proxy.invalid:8443?sticky=abc")
 	proxy, err := store.CreateNode(ctx, "foreign-proxy", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic, ProxyCredential: proxySecret,
@@ -268,6 +284,9 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatalf("open proxy credential = %q err=%v", opened, err)
 	}
 	assertMarkerPlaintext(t, db, "access_nodes", "proxy_plaintext", "node_id", int64(proxy.ID), proxySecret)
+	if _, err := publicStore.RenameNode(ctx, direct.ID, proxy.Name); !errors.Is(err, ErrNodeNameConflict) {
+		t.Fatalf("rename into existing name = %v", err)
+	}
 
 	restarted, err := New(store.db)
 	if err != nil {

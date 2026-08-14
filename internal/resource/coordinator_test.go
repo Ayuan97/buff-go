@@ -469,6 +469,36 @@ func TestCoordinatorCombinationExclusivityAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAcquireSessionStates(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+
+	unverified := usableCombinationResources(now, 1, 11, 21)
+	unverified.Account.SessionState = AccountSessionStateUnverified
+	unverified.Account.LastCheckedAt = nil
+	unverifiedCoord := newTestCoordinator(t, newCoordinatorRepositoryStub(unverified))
+	unverifiedLease, err := unverifiedCoord.AcquireCombination(
+		context.Background(), registerTestComponents(t, unverifiedCoord, 1)[0],
+		1, TargetRegionDomestic, now, 730, market.SideAsk,
+	)
+	if err != nil {
+		t.Fatalf("unverified AcquireCombination() error = %v", err)
+	}
+	if err := unverifiedCoord.Release(unverifiedLease.Token); err != nil {
+		t.Fatalf("Release(unverified) error = %v", err)
+	}
+
+	invalid := usableCombinationResources(now, 1, 11, 21)
+	invalid.Account.SessionState = AccountSessionStateInvalid
+	invalidCoord := newTestCoordinator(t, newCoordinatorRepositoryStub(invalid))
+	if _, err := invalidCoord.AcquireCombination(
+		context.Background(), registerTestComponents(t, invalidCoord, 1)[0],
+		1, TargetRegionDomestic, now, 730, market.SideAsk,
+	); !errors.Is(err, ErrAccountSessionUnusable) {
+		t.Fatalf("invalid session error = %v", err)
+	}
+}
+
 func TestLeaseAuthorityDeactivationRejectsBeforeContextCancellation(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)

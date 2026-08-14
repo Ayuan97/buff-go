@@ -10,6 +10,7 @@
 6. 平台适配器源码进入 `internal/platform/`；可执行入口进入 `cmd/buffgo/`。  
 7. Web 源码进入 `web/`；`internal/webui/` 只嵌入构建产物，不承载页面、数据库或采集逻辑。  
 8. 目录迁移按真实业务切片执行，不创建空目标包，不把移动与行为改写混入同一 Goal。  
+9. 当前只推进 Steam 摘要从网页跑通；BUFF/IGXE 等第三方平台证据门未开则停，不写半套适配器。  
 
 
 ## Goal 验收记录
@@ -429,6 +430,14 @@ Git 边界：当前是旧项目大量 tracked 删除、新项目整体未跟踪�
 - 产物位置：本记录。
 - 验收命令与结果：前端构建 + 相关 Go 测试。未做真实 Steam 网页启停、429、杀进程恢复的手工证据；BUFF/IGXE 无采集；详情按设计不可用。
 - 未确定事项：13A 完整勾选依赖真实平台手工验收。
+
+### 2026-08-13 Steam 首采闭环
+
+- 输入与前置条件：Steam Fetcher 与控制台已装配；新建账号 `unverified` 占不到租约，调度误报 `egress_unavailable`。BUFF/IGXE 暂停。
+- 变更边界：`ValidateForUse` 放行 unverified、拒绝 invalid；`acquireLease` 区分会话与出口；控制台会话中文与阻塞短句；API 拒绝国内节点划 Steam。不新增手工标 valid 接口。
+- 产物位置：`todo.md`、本节、`internal/resource/`、`internal/collection/schedule.go`、`internal/api/nodes.go`、`web/src/pages/`。
+- 验收命令与结果：`go test ./internal/resource ./internal/collection ./internal/api ./internal/platform/steam ./internal/app ./internal/webui` 通过；`cd web && npm run typecheck && npm run build` 通过。真机启停未跑。
+- 未确定事项：真机启停由使用者本机验收。
 
 ## 历史记录
 

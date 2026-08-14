@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -64,6 +65,7 @@ func Run(ctx context.Context, opt Options) error {
 	if err != nil {
 		return err
 	}
+	providers := providerControl{store: store}
 	daemon, err := newCollectionDaemon(store, coordinator)
 	if err != nil {
 		return telemetry.WrapError("collection daemon", err)
@@ -73,12 +75,16 @@ func Run(ctx context.Context, opt Options) error {
 	if err != nil {
 		return telemetry.WrapError("api listen", err)
 	}
+	// 成功后必须打一行，否则终端无输出会被当成没启动。
+	_, _ = fmt.Fprintf(os.Stderr, "buffgo: ready http://%s\n", listener.Addr().String())
 	handler := api.NewHandlerForAuthority(webui.Handler(), opt.APIListen, api.ControlServices{
-		Accounts:     accounts,
-		Nodes:        nodes,
-		Combinations: combinations,
-		Collection:   targets,
-		Market:       quotes,
+		Accounts:        accounts,
+		Nodes:           nodes,
+		Combinations:    combinations,
+		Collection:      targets,
+		Market:          quotes,
+		Providers:       providers,
+		PlatformRegions: platformTargetRegions(),
 	})
 	server := &http.Server{Handler: handler}
 	serverDone := make(chan error, 1)

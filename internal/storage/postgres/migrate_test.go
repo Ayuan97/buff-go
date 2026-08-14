@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 8 {
-		t.Fatalf("migration count = %d, want 8", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("migration count = %d, want 12", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -27,6 +27,10 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000006_plaintext_credentials",
 		"000007_game_direction_summary",
 		"000008_steam_product_identity",
+		"000009_proxy_providers",
+		"000010_page_payloads",
+		"000011_product_media_and_page_actor",
+		"000012_target_sort_order",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -594,6 +598,72 @@ func TestSteamProductIdentityMigration(t *testing.T) {
 	}
 	compact := compactSQL(migrations[7].SQL)
 	assertContains(t, compact, "create unique index steam_products_appid_name_key on steam_products (appid, name)")
+}
+
+func TestProxyProviderMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[8].Version != "000009_proxy_providers" {
+		t.Fatalf("version[8] = %q", migrations[8].Version)
+	}
+	compact := compactSQL(migrations[8].SQL)
+	assertContains(t, compact, "create table short_pool_watermarks")
+	assertContains(t, compact, "create table proxy_providers")
+	assertContains(t, compact, "create table proxy_provider_regions")
+	assertContains(t, compact, "credential_plaintext")
+}
+
+func TestPagePayloadMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[9].Version != "000010_page_payloads" {
+		t.Fatalf("version[9] = %q", migrations[9].Version)
+	}
+	compact := compactSQL(migrations[9].SQL)
+	assertContains(t, compact, "create table collection_page_payloads")
+	// 页被删时副本必须跟着走，否则会留下查不到归属的孤儿
+	assertContains(t, compact, "on delete cascade")
+	assertContains(t, compact, "collection_page_payloads_gzip_size")
+}
+
+func TestProductMediaAndPageActorMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[10].Version != "000011_product_media_and_page_actor" {
+		t.Fatalf("version[10] = %q", migrations[10].Version)
+	}
+	compact := compactSQL(migrations[10].SQL)
+	assertContains(t, compact, "add column icon_path")
+	assertContains(t, compact, "add column item_type")
+	assertContains(t, compact, "add column name_color")
+	assertContains(t, compact, "add column account_id")
+	assertContains(t, compact, "add column exit_address")
+	// 归属是诊断信息，账号被删不该影响采集历史，所以这里不能出现外键
+	if strings.Contains(compact, "collection_pages") && strings.Contains(compact, "references platform_accounts") {
+		t.Fatal("page attribution must not reference accounts")
+	}
+}
+
+func TestTargetSortOrderMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[11].Version != "000012_target_sort_order" {
+		t.Fatalf("version[11] = %q", migrations[11].Version)
+	}
+	compact := compactSQL(migrations[11].SQL)
+	// 默认值必须是接入采集时的固定顺序，否则这次迁移会改变已有目标的采集结果
+	assertContains(t, compact, "add column sort_column text collate \"c\" not null default 'price'")
+	assertContains(t, compact, "add column sort_dir text collate \"c\" not null default 'asc'")
+	assertContains(t, compact, "sort_column in ('price', 'quantity', 'name')")
+	assertContains(t, compact, "sort_dir in ('asc', 'desc')")
 }
 
 func tableDefinition(t *testing.T, sqlText, table string) string {

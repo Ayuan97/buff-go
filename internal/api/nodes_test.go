@@ -18,12 +18,18 @@ import (
 type nodeServiceStub struct {
 	created bool
 	deleted bool
+	renamed string
 	err     error
+	region  resource.NodeRegion
 }
 
 func (s *nodeServiceStub) sample() resource.AccessNode {
+	region := s.region
+	if region == "" {
+		region = resource.NodeRegionForeign
+	}
 	return resource.AccessNode{
-		ID: 7, Name: "home", Kind: resource.NodeKindDirect, Region: resource.NodeRegionForeign,
+		ID: 7, Name: "home", Kind: resource.NodeKindDirect, Region: region,
 		EgressMode: resource.EgressModeStatic, State: resource.NodeStateAvailable,
 		EgressRevision: 2, AssignmentRevision: 3, AppID: 730,
 		Sides: []resource.NodeSideAssignment{{Platform: "steam", Side: market.SideAsk}},
@@ -63,12 +69,24 @@ func (s *nodeServiceStub) CreateNode(_ context.Context, name string, _ resource.
 	return node, nil
 }
 
-func (s *nodeServiceStub) ReplaceNodeConnection(_ context.Context, id resource.NodeID, _ int64, _ resource.NodeConnectionInput) (resource.AccessNode, error) {
+func (s *nodeServiceStub) RenameNode(_ context.Context, id resource.NodeID, name string) (resource.AccessNode, error) {
+	if s.err != nil {
+		return resource.AccessNode{}, s.err
+	}
+	s.renamed = name
+	node := s.sample()
+	node.ID = id
+	node.Name = name
+	return node, nil
+}
+
+func (s *nodeServiceStub) ReplaceNodeConnection(_ context.Context, id resource.NodeID, _ int64, input resource.NodeConnectionInput) (resource.AccessNode, error) {
 	if s.err != nil {
 		return resource.AccessNode{}, s.err
 	}
 	node := s.sample()
 	node.ID = id
+	node.Region = input.Region
 	node.State = resource.NodeStateValidating
 	return node, nil
 }
@@ -109,9 +127,17 @@ func (s *nodeServiceStub) DeleteNode(context.Context, resource.NodeID) error {
 	return nil
 }
 
+// steamRegions 复刻装配层的平台站点地域：Steam 在国外站，BUFF 在国内站。
+func steamRegions() map[resource.Platform]resource.TargetRegion {
+	return map[resource.Platform]resource.TargetRegion{
+		"steam": resource.TargetRegionForeign,
+		"buff":  resource.TargetRegionDomestic,
+	}
+}
+
 func TestNodeRoutes(t *testing.T) {
 	service := &nodeServiceStub{}
-	handler := NewHandlerForAuthority(nil, "", ControlServices{Nodes: service})
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Nodes: service, PlatformRegions: steamRegions()})
 	createBody := `{"name":"home","kind":"direct","region":"foreign","egress_mode":"static"}`
 	for _, test := range []struct {
 		name   string
@@ -123,6 +149,7 @@ func TestNodeRoutes(t *testing.T) {
 		{name: "list", method: http.MethodGet, path: "/api/nodes", status: http.StatusOK},
 		{name: "get", method: http.MethodGet, path: "/api/nodes/7", status: http.StatusOK},
 		{name: "create", method: http.MethodPost, path: "/api/nodes", body: createBody, status: http.StatusCreated},
+		{name: "name", method: http.MethodPost, path: "/api/nodes/7/name", body: `{"name":"office"}`, status: http.StatusOK},
 		{name: "connection", method: http.MethodPost, path: "/api/nodes/7/connection", body: `{"expected_egress_revision":2,"kind":"direct","region":"foreign","egress_mode":"static"}`, status: http.StatusOK},
 		{name: "exit", method: http.MethodPost, path: "/api/nodes/7/exit", body: `{"expected_egress_revision":2,"address":"203.0.113.8","valid_until":"2030-01-01T00:00:00Z"}`, status: http.StatusOK},
 		{name: "assign-game", method: http.MethodPost, path: "/api/nodes/7/assign-game", body: `{"expected_assignment_revision":3,"appid":730}`, status: http.StatusOK},
@@ -149,8 +176,8 @@ func TestNodeRoutes(t *testing.T) {
 			}
 		})
 	}
-	if !service.created || !service.deleted {
-		t.Fatalf("service calls create=%v delete=%v", service.created, service.deleted)
+	if !service.created || !service.deleted || service.renamed != "office" {
+		t.Fatalf("service calls create=%v delete=%v renamed=%q", service.created, service.deleted, service.renamed)
 	}
 }
 
@@ -171,6 +198,63 @@ func TestNodeNotFoundJSON(t *testing.T) {
 	}
 	if body.Code != "node_not_found" {
 		t.Fatalf("code=%q", body.Code)
+	}
+}
+
+func TestAssignSteamSideRejectsDomestic(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{
+		Nodes:           &nodeServiceStub{region: resource.NodeRegionDomestic},
+		PlatformRegions: steamRegions(),
+	})
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/assign-side", strings.NewReader(`{"expected_assignment_revision":3,"platform":"steam","side":"ask"}`))
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// 国内站平台同样受约束：国外节点划给 BUFF 也必须拒绝，不能因为 BUFF 还没接采集就放行。
+func TestAssignDomesticPlatformRejectsForeignNode(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{
+		Nodes:           &nodeServiceStub{region: resource.NodeRegionForeign},
+		PlatformRegions: steamRegions(),
+	})
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/assign-side", strings.NewReader(`{"expected_assignment_revision":3,"platform":"buff","side":"ask"}`))
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// 节点已划给 Steam 时把线路改成国内，必须在写入前拒绝，否则会留下调度器只会跳过的配置。
+func TestReplaceConnectionRejectsRegionConflict(t *testing.T) {
+	service := &nodeServiceStub{}
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Nodes: service, PlatformRegions: steamRegions()})
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/connection", strings.NewReader(`{"expected_egress_revision":2,"kind":"proxy","region":"domestic","egress_mode":"static","proxy_credential":"http://user:pass@host:8080"}`))
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
