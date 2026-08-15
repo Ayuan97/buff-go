@@ -23,6 +23,7 @@ import { apiErrorText, dropPctText, dropWindowLabel, fenToYuan, fmtAgo, fmtTime,
 
 const router = useRouter()
 const CHUNK = 24
+const REFRESH_LIMIT = 200
 const PEEK_TICKS = 12
 const PEEK_WIDTH = 520
 const PEEK_MAX_HEIGHT = 640
@@ -31,9 +32,12 @@ const quotes = ref<Quote[]>([])
 const total = ref(0)
 const loaded = ref(false)
 const loadingMore = ref(false)
+const refreshing = ref(false)
+const serverOffset = ref(0)
 const facets = ref<{ appids: number[]; item_types: string[] }>({ appids: [], item_types: [] })
 const steamVocab = ref<SteamFacetsVocab>({ categories: [], item_classes: [] })
 const error = ref<string | null>(null)
+const loadMoreError = ref<string | null>(null)
 const stale = ref(false)
 const sentinel = ref<HTMLElement | null>(null)
 const board = ref<HTMLElement | null>(null)
@@ -53,7 +57,10 @@ type SavedFilters = {
   dropWindow: DropWindow
   minDropYuan: string
   sort: QuoteSort
+  refreshSec: number
 }
+
+type AppliedFilters = Omit<SavedFilters, 'refreshSec'>
 
 function readStringList(value: unknown, legacy: string): string[] {
   const out: string[] = []
@@ -79,6 +86,7 @@ function readSavedFilters(): SavedFilters {
     dropWindow: '24h',
     minDropYuan: '',
     sort: 'price_desc',
+    refreshSec: 10,
   }
   try {
     const raw = localStorage.getItem(FILTER_KEY)
@@ -87,6 +95,7 @@ function readSavedFilters(): SavedFilters {
     const app = Number(parsed.appid)
     const sorts: QuoteSort[] = ['price_desc', 'price_asc', 'listings_desc', 'name', 'drop_desc', 'drop_pct_desc']
     const windows: DropWindow[] = ['24h', '7d', '30d']
+    const refreshSecs = [0, 10, 30, 60]
     return {
       appid: Number.isInteger(app) && app > 0 ? app : '',
       side: parsed.side === 'ask' || parsed.side === 'bid' || parsed.side === '' ? parsed.side : 'ask',
@@ -99,6 +108,7 @@ function readSavedFilters(): SavedFilters {
       dropWindow: parsed.dropWindow && windows.includes(parsed.dropWindow) ? parsed.dropWindow : '24h',
       minDropYuan: typeof parsed.minDropYuan === 'string' ? parsed.minDropYuan : '',
       sort: parsed.sort && sorts.includes(parsed.sort) ? parsed.sort : 'price_desc',
+      refreshSec: refreshSecs.includes(Number(parsed.refreshSec)) ? Number(parsed.refreshSec) : 10,
     }
   } catch {
     return fallback
@@ -119,6 +129,20 @@ const dropped = ref(saved.dropped)
 const dropWindow = ref<DropWindow>(saved.dropWindow)
 const minDropYuan = ref(saved.minDropYuan)
 const sort = ref<QuoteSort>(saved.sort)
+const refreshSec = ref(saved.refreshSec)
+const appliedFilters = ref<AppliedFilters>({
+  appid: saved.appid,
+  side: saved.side,
+  keyword: saved.keyword,
+  itemTypes: [...saved.itemTypes],
+  steamCats: [...saved.steamCats],
+  minYuan: saved.minYuan,
+  maxYuan: saved.maxYuan,
+  dropped: saved.dropped,
+  dropWindow: saved.dropWindow,
+  minDropYuan: saved.minDropYuan,
+  sort: saved.sort,
+})
 const peek = ref<{ quote: Quote; related: Quote[] | null; ticks: PriceTick[] | null; x: number; y: number } | null>(null)
 const peekCache = new Map<number, { related: Quote[]; ticks: PriceTick[] }>()
 const targets = ref<Target[]>([])
@@ -129,17 +153,17 @@ let peekSeq = 0
 let hidePeekTimer = 0
 let moreObs: IntersectionObserver | null = null
 
-const hasMore = computed(() => loaded.value && quotes.value.length < total.value)
+const hasMore = computed(() => loaded.value && serverOffset.value < total.value)
 const rustSelected = computed(() => appid.value === RUST_APPID)
 const filtering = computed(
   () =>
-    !!keyword.value.trim() ||
-    itemTypes.value.length > 0 ||
-    steamCats.value.length > 0 ||
-    !!minYuan.value.trim() ||
-    !!maxYuan.value.trim() ||
-    dropped.value ||
-    !!minDropYuan.value.trim(),
+    !!appliedFilters.value.keyword.trim() ||
+    appliedFilters.value.itemTypes.length > 0 ||
+    appliedFilters.value.steamCats.length > 0 ||
+    !!appliedFilters.value.minYuan.trim() ||
+    !!appliedFilters.value.maxYuan.trim() ||
+    appliedFilters.value.dropped ||
+    !!appliedFilters.value.minDropYuan.trim(),
 )
 
 function quoteKey(quote: Quote): string {
@@ -155,20 +179,21 @@ function yuanToCents(raw: string): number | undefined {
   return Math.round(value * 100)
 }
 
-function currentFilter(offset: number): QuoteFilter {
+function currentFilter(offset: number, limit = CHUNK): QuoteFilter {
+  const applied = appliedFilters.value
   return {
-    appid: appid.value === '' ? undefined : appid.value,
-    side: side.value || undefined,
-    keyword: keyword.value.trim() || undefined,
-    item_types: itemTypes.value.length ? itemTypes.value : undefined,
-    steam_cats: steamCats.value.length ? steamCats.value : undefined,
-    min_cents: yuanToCents(minYuan.value),
-    max_cents: yuanToCents(maxYuan.value),
-    dropped: dropped.value || undefined,
-    drop_window: dropWindow.value,
-    min_drop_cents: yuanToCents(minDropYuan.value),
-    sort: sort.value,
-    limit: CHUNK,
+    appid: applied.appid === '' ? undefined : applied.appid,
+    side: applied.side || undefined,
+    keyword: applied.keyword.trim() || undefined,
+    item_types: applied.itemTypes.length ? applied.itemTypes : undefined,
+    steam_cats: applied.steamCats.length ? applied.steamCats : undefined,
+    min_cents: yuanToCents(applied.minYuan),
+    max_cents: yuanToCents(applied.maxYuan),
+    dropped: applied.dropped || undefined,
+    drop_window: applied.dropWindow,
+    min_drop_cents: yuanToCents(applied.minDropYuan),
+    sort: applied.sort,
+    limit,
     offset,
   }
 }
@@ -176,56 +201,145 @@ function currentFilter(offset: number): QuoteFilter {
 async function load(reset: boolean) {
   if (reset) {
     loaded.value = false
+    loadingMore.value = false
+    refreshing.value = false
     quotes.value = []
     total.value = 0
-  } else if (!loaded.value || loadingMore.value || !hasMore.value) {
+    serverOffset.value = 0
+    loadMoreError.value = null
+  } else if (!loaded.value || loadingMore.value || refreshing.value || !hasMore.value || loadMoreError.value) {
     return
   } else {
     loadingMore.value = true
   }
   const token = ++seq
-  const offset = reset ? 0 : quotes.value.length
+  const offset = reset ? 0 : serverOffset.value
   try {
     const result = await getQuotes(currentFilter(offset))
     if (token !== seq) return
     total.value = result.total
+    serverOffset.value = result.quotes.length ? offset + result.quotes.length : result.total
     if (reset) {
       quotes.value = result.quotes
     } else if (!result.quotes.length) {
-      total.value = quotes.value.length
+      serverOffset.value = result.total
     } else {
       const seen = new Set(quotes.value.map(quoteKey))
       quotes.value = [...quotes.value, ...result.quotes.filter((row) => !seen.has(quoteKey(row)))]
     }
     loaded.value = true
     error.value = null
+    loadMoreError.value = null
     stale.value = false
   } catch (e) {
     if (token !== seq) return
-    if (quotes.value.length) stale.value = true
-    else error.value = e instanceof Error ? apiErrorText(e.message) : '加载失败'
+    const message = e instanceof Error ? apiErrorText(e.message) : '加载失败'
+    if (!reset) {
+      loadMoreError.value = message
+    } else if (quotes.value.length) {
+      stale.value = true
+    } else {
+      error.value = message
+    }
   } finally {
     if (token === seq) loadingMore.value = false
   }
 }
 
 async function refreshSilent() {
+  if (!loaded.value || loadingMore.value || refreshing.value) return
+  if (serverOffset.value > REFRESH_LIMIT) return
   const token = ++seq
+  const keep = Math.max(serverOffset.value, CHUNK)
+  refreshing.value = true
   try {
-    const result = await getQuotes(currentFilter(0))
-    if (token !== seq) return
-    total.value = result.total
-    quotes.value = result.quotes
+    const refreshed: Quote[] = []
+    const seen = new Set<string>()
+    let offset = 0
+    let refreshedTotal = total.value
+    while (offset < keep) {
+      const limit = Math.min(REFRESH_LIMIT, keep - offset)
+      const result = await getQuotes(currentFilter(offset, limit))
+      if (token !== seq || !loaded.value) return
+      refreshedTotal = result.total
+      for (const quote of result.quotes) {
+        const key = quoteKey(quote)
+        if (!seen.has(key)) {
+          seen.add(key)
+          refreshed.push(quote)
+        }
+      }
+      if (!result.quotes.length) {
+        offset = result.total
+        break
+      }
+      offset += result.quotes.length
+      if (offset >= result.total) break
+    }
+    if (token !== seq || !loaded.value) return
+    total.value = refreshedTotal
+    serverOffset.value = Math.min(offset, refreshedTotal)
+    quotes.value = refreshed
     stale.value = false
     error.value = null
+    peekCache.clear()
   } catch {
-    if (quotes.value.length) stale.value = true
+    if (token === seq && quotes.value.length) stale.value = true
+  } finally {
+    if (token === seq) refreshing.value = false
   }
+}
+
+function refreshNow() {
+  if (serverOffset.value > REFRESH_LIMIT) {
+    resetAndLoad()
+    return
+  }
+  void refreshSilent()
+}
+
+function startPoll() {
+  if (poll) window.clearInterval(poll)
+  poll = 0
+  if (refreshSec.value <= 0) return
+  poll = window.setInterval(() => {
+    void loadTargets()
+    if (document.hidden) return
+    void refreshSilent()
+  }, refreshSec.value * 1000)
 }
 
 function resetAndLoad() {
   if (board.value) board.value.scrollTop = 0
   void load(true)
+}
+
+function draftFilters(): AppliedFilters {
+  return {
+    appid: appid.value,
+    side: side.value,
+    keyword: keyword.value,
+    itemTypes: [...itemTypes.value],
+    steamCats: [...steamCats.value],
+    minYuan: minYuan.value,
+    maxYuan: maxYuan.value,
+    dropped: dropped.value,
+    dropWindow: dropWindow.value,
+    minDropYuan: minDropYuan.value,
+    sort: sort.value,
+  }
+}
+
+function applyDraftFilters(force: boolean) {
+  const next = draftFilters()
+  if (!force && JSON.stringify(next) === JSON.stringify(appliedFilters.value)) return
+  appliedFilters.value = next
+  resetAndLoad()
+}
+
+function retryLoadMore() {
+  loadMoreError.value = null
+  void load(false)
 }
 
 async function loadFacets() {
@@ -275,17 +389,17 @@ watch(appid, () => {
   steamCats.value = []
   void loadFacets()
   void loadSteamVocab()
-  resetAndLoad()
 })
 watch(dropWindow, () => peekCache.clear())
-watch([side, itemTypes, steamCats, dropped, dropWindow, sort], () => resetAndLoad())
-watch([loaded, hasMore, loadingMore], () => {
-  if (!loaded.value || !hasMore.value || loadingMore.value || !sentinel.value || !board.value) return
+watch([appid, side, itemTypes, steamCats, dropped, dropWindow, sort], () => applyDraftFilters(false))
+watch([loaded, hasMore, loadingMore, refreshing], () => {
+  if (!loaded.value || !hasMore.value || loadingMore.value || refreshing.value || loadMoreError.value || !sentinel.value || !board.value) return
   if (sentinel.value.getBoundingClientRect().top < board.value.getBoundingClientRect().bottom + 600) {
     void load(false)
   }
 })
-watch([appid, side, keyword, itemTypes, steamCats, minYuan, maxYuan, dropped, dropWindow, minDropYuan, sort], () => {
+watch(refreshSec, () => startPoll())
+watch([appid, side, keyword, itemTypes, steamCats, minYuan, maxYuan, dropped, dropWindow, minDropYuan, sort, refreshSec], () => {
   try {
     localStorage.setItem(
       FILTER_KEY,
@@ -301,6 +415,7 @@ watch([appid, side, keyword, itemTypes, steamCats, minYuan, maxYuan, dropped, dr
         dropWindow: dropWindow.value,
         minDropYuan: minDropYuan.value,
         sort: sort.value,
+        refreshSec: refreshSec.value,
       } satisfies SavedFilters),
     )
   } catch {
@@ -309,7 +424,7 @@ watch([appid, side, keyword, itemTypes, steamCats, minYuan, maxYuan, dropped, dr
 })
 
 function applyFilters() {
-  resetAndLoad()
+  applyDraftFilters(true)
 }
 
 function resetFilters() {
@@ -321,11 +436,11 @@ function resetFilters() {
   dropped.value = false
   dropWindow.value = '24h'
   minDropYuan.value = ''
-  resetAndLoad()
+  applyDraftFilters(true)
 }
 
 function dropTitle(quote: Quote): string {
-  const bits = [`相对${dropWindowLabel(dropWindow.value)}最高价`]
+  const bits = [`相对${dropWindowLabel(appliedFilters.value.dropWindow)}最高价`]
   if (quote.high_cents != null) bits.push(`高 ${fenToYuan(quote.high_cents)}`)
   if (quote.drop_count) bits.push(`降了 ${quote.drop_count} 次`)
   if (quote.last_drop_at) bits.push(`最近 ${fmtAgo(quote.last_drop_at)}`)
@@ -355,7 +470,7 @@ async function showPeek(quote: Quote, event: MouseEvent) {
   const token = ++peekSeq
   try {
     const [result, tickPage] = await Promise.all([
-      getQuotes({ product_id: quote.product_id, drop_window: dropWindow.value, limit: 12 }),
+      getQuotes({ product_id: quote.product_id, drop_window: appliedFilters.value.dropWindow, limit: 12 }),
       getPriceTicks({ product_id: quote.product_id, limit: PEEK_TICKS }),
     ])
     peekCache.set(quote.product_id, { related: result.quotes, ticks: tickPage.ticks })
@@ -395,13 +510,12 @@ onMounted(() => {
   void loadSteamVocab()
   void loadTargets()
   void load(true)
-  poll = window.setInterval(() => {
-    void loadTargets()
-    // 只在还没往下追加时静默刷新，避免清空列表或把滚动打回去
-    if (loaded.value && quotes.value.length <= CHUNK) void refreshSilent()
-  }, 10_000)
+  startPoll()
 })
 onUnmounted(() => {
+  seq += 1
+  loaded.value = false
+  refreshing.value = false
   if (poll) window.clearInterval(poll)
   moreObs?.disconnect()
   hidePeek()
@@ -416,10 +530,25 @@ onUnmounted(() => {
         已显示 <b>{{ quotes.length }}</b> / {{ total }} 个商品
       </span>
       <span class="spacer" />
+      <select v-model.number="refreshSec" class="inp" title="按当前筛选刷新，不重置条件">
+        <option :value="0">关闭自动刷新</option>
+        <option :value="10">每 10 秒刷新</option>
+        <option :value="30">每 30 秒刷新</option>
+        <option :value="60">每 60 秒刷新</option>
+      </select>
+      <button
+        class="btn sm"
+        type="button"
+        :disabled="!loaded || loadingMore || refreshing"
+        :title="serverOffset > REFRESH_LIMIT ? '已加载超过 200 条，刷新会回到首屏' : '刷新已加载范围'"
+        @click="refreshNow"
+      >
+        {{ refreshing ? '刷新中' : '刷新' }}
+      </button>
       <select v-model="sort" class="inp">
         <option value="price_desc">价格从高到低</option>
         <option value="price_asc">价格从低到高</option>
-        <option value="listings_desc">待售数量最多</option>
+        <option value="listings_desc">{{ side === 'bid' ? '求购数量最多' : side === 'ask' ? '待售数量最多' : '挂单数量最多' }}</option>
         <option value="drop_desc">降价最多</option>
         <option value="drop_pct_desc">降幅最大</option>
         <option value="name">按名字</option>
@@ -566,7 +695,7 @@ onUnmounted(() => {
             </div>
             <div class="card-foot">
               <div class="listings">
-                待售数量：{{ q.present_order_count ?? '—' }}
+                {{ q.side === 'bid' ? '求购数量' : '待售数量' }}：{{ q.present_order_count ?? '—' }}
               </div>
               <div v-if="q.present_cents != null" class="price" :title="fmtTime(q.present_collected_at ?? null)">
                 {{ fenToYuan(q.present_cents) }}
@@ -584,6 +713,10 @@ onUnmounted(() => {
         </div>
         <div ref="sentinel" class="more">
           <span v-if="loadingMore">加载中</span>
+          <span v-else-if="loadMoreError" class="fail">
+            {{ loadMoreError }}
+            <button class="btn sm" type="button" @click="retryLoadMore">重试</button>
+          </span>
           <span v-else-if="hasMore">继续下滚加载</span>
           <span v-else-if="loaded && quotes.length">已显示全部</span>
         </div>
@@ -594,7 +727,7 @@ onUnmounted(() => {
           :related="peek.related"
           :ticks="peek.ticks"
           :targets="targets"
-          :drop-window="dropWindow"
+          :drop-window="appliedFilters.dropWindow"
           :x="peek.x"
           :y="peek.y"
           @enter="cancelHidePeek"
