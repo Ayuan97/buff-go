@@ -11,7 +11,7 @@ import (
 )
 
 // platformSiteRegions 是平台站点地域的唯一来源。这是平台事实，与是否已接入采集无关：
-// BUFF/IGXE 还没有调度档案，控制面仍要拦住把国外节点划给它们这类必然采不动的配置。
+// BUFF/IGXE 还没有调度档案，控制面仍要拦住国外节点绑国内站账号。
 var platformSiteRegions = map[resource.Platform]resource.TargetRegion{
 	"steam": resource.TargetRegionForeign,
 	"buff":  resource.TargetRegionDomestic,
@@ -45,14 +45,11 @@ func newCollectionDaemon(store *postgres.Store, coordinator *resource.Coordinato
 	if err != nil {
 		return nil, fmt.Errorf("steam fetcher: %w", err)
 	}
-	scheduler, err := collection.NewScheduler(store, coordinator, store, fetcher, collection.SchedulerConfig{
-		Profiles:        collectionProfiles,
-		PageTimeout:     30 * time.Second,
-		ResourceWait:    15 * time.Second,
-		PollInterval:    500 * time.Millisecond,
-		TransientRetry:  30 * time.Second,
-		SummaryPeriod:   time.Hour,
-		MaxParallelRuns: 1,
+	scheduler, err := collection.NewScheduler(store, store, coordinator, store, fetcher, collection.SchedulerConfig{
+		Profiles:       collectionProfiles,
+		PageTimeout:    30 * time.Second,
+		TransientRetry: 30 * time.Second,
+		ClaimTimeout:   45 * time.Second,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("collection scheduler: %w", err)
@@ -61,7 +58,6 @@ func newCollectionDaemon(store *postgres.Store, coordinator *resource.Coordinato
 		Interval:          2 * time.Second,
 		ShutdownTimeout:   30 * time.Second,
 		LockVerifyTimeout: 3 * time.Second,
-		MaxResumeAge:      24 * time.Hour,
 		Guard:             store,
 	})
 	if err != nil {

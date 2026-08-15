@@ -2,6 +2,7 @@ package steam
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -139,11 +140,32 @@ func stripThousandSeparators(numeric string) (string, error) {
 }
 
 func parseOrderbook(body []byte) (orderbookResponse, error) {
+	payload, err := unwrapOrderbookEnvelope(body)
+	if err != nil {
+		return orderbookResponse{}, err
+	}
 	var parsed orderbookResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return orderbookResponse{}, fmt.Errorf("orderbook json: %w", err)
 	}
 	return parsed, nil
+}
+
+// Steam Query Action 现在把正文包成 {"data":{success,data}}。
+// 08-13 验收时是扁平 {"success":true,"data":{...}}。两种都认。
+func unwrapOrderbookEnvelope(body []byte) ([]byte, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, fmt.Errorf("orderbook json: %w", err)
+	}
+	if _, hasSuccess := top["success"]; hasSuccess {
+		return body, nil
+	}
+	inner, ok := top["data"]
+	if !ok || len(inner) == 0 || string(inner) == "null" {
+		return body, nil
+	}
+	return inner, nil
 }
 
 func compactFirstPrice(levels []int64) (int64, bool) {
@@ -153,9 +175,15 @@ func compactFirstPrice(levels []int64) (int64, bool) {
 	return levels[0], true
 }
 
+var errForeignCurrency = errors.New("steam wallet is not CNY")
+
+func isDollarPrice(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "$")
+}
+
 func orderbookBest(side market.Side, data orderbookData) (cents market.CNYCents, empty bool, err error) {
 	if data.ECurrency != evidencedCNYCurrency {
-		return 0, false, fmt.Errorf("orderbook eCurrency %d is not evidenced CNY", data.ECurrency)
+		return 0, false, errForeignCurrency
 	}
 	switch side {
 	case market.SideBid:

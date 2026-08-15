@@ -21,7 +21,7 @@ export function regionAllowsTarget(region: Region, target: PlatformTargetRegion)
   return region === target
 }
 
-/** 节点能否划给该平台（采集调度） */
+/** 节点能否服务该平台 */
 export function nodeAllowsPlatform(region: Region, platform: string): boolean {
   return regionAllowsTarget(region, platformTargetRegion(platform))
 }

@@ -62,7 +62,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.pg { max-width: 1100px; margin: 0 auto; padding: 20px 24px 48px; }
+.pg { width: 100%; max-width: none; margin: 0; padding: 20px 28px 40px; box-sizing: border-box; }
 .hero { margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line-strong); }
 .hero h1 { margin: 0; }
 .hero-sub { margin: 6px 0 0; color: var(--text-3); font-size: 12px; }

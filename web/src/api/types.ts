@@ -8,8 +8,6 @@ export type ActualState =
   | 'stopping'
   | 'stopped'
   | 'error'
-export type RunState = 'pending' | 'running' | 'succeeded' | 'failed' | 'stopped'
-export type Completeness = '' | 'complete' | 'partial'
 export type QuoteStatus = 'present' | 'empty' | 'unavailable' | 'failed'
 export type Region = 'domestic' | 'foreign' | 'hongkong'
 export type NodeKind = 'direct' | 'proxy'
@@ -26,11 +24,6 @@ export interface Account {
   last_checked_at?: string
 }
 
-export interface NodeSide {
-  platform: string
-  side: Side
-}
-
 export interface NodeExit {
   address: string
   verified_at: string
@@ -45,9 +38,6 @@ export interface AccessNode {
   egress_mode: EgressMode
   state: NodeState
   egress_revision: number
-  assignment_revision: number
-  appid?: number
-  sides: NodeSide[]
   has_proxy_credential: boolean
   sticky_session_valid_until?: string
   exit?: NodeExit
@@ -90,53 +80,51 @@ export interface Target {
   recovery?: string
   sort_column: SortColumn
   sort_dir: SortDirection
+  price_min_cents?: number
+  price_max_cents?: number
+  steam_cats: string[]
+  item_classes: string[]
   recheck_at?: string
   changed_at: string
 }
 
-export interface Run {
-  id: number
-  target_id?: number
-  task_type: 'summary' | 'detail'
-  platform: string
-  appid: number
-  side?: Side
-  state: RunState
-  completeness?: Completeness
-  reason?: string
-  cursor?: string
-  last_page_sequence: number
-  created_at: string
-  started_at?: string
-  finished_at?: string
-}
-
-export interface CollectionPage {
-  page_sequence: number
-  cursor_before?: string
-  cursor_after?: string
-  collected_at: string
-  committed_at: string
-  // 保留下来的原始响应字节数，0 表示副本已被淘汰或这个方向不产出单页响应
-  payload_bytes: number
-  // 归属能力上线之前提交的页没有这三项
-  account_id?: number
-  account_alias?: string
-  exit_address?: string
-}
-
-export interface PageAttempt {
+export interface WorkerItem {
   product_id: number
-  appid: number
   name: string
-  platform: string
-  side: Side
-  status: QuoteStatus
-  reason_code?: string
-  collected_at: string
-  source_time?: string
+  status: string
   present_cents?: number
-  present_order_count?: number
+}
+
+export interface WorkerClaim {
+  target_id: number
+  appid: number
+  side: Side
+  platform: string
+  items: WorkerItem[]
+}
+
+export interface WorkerPage {
+  target_id: number
+  appid: number
+  side: Side
+  platform: string
+  committed_at: string
+  items: WorkerItem[]
+}
+
+export interface Worker {
+  combination_id: number
+  account_id: number
+  account_alias: string
+  platform: string
+  node_id: number
+  node_name: string
+  exit_address?: string
+  region: string
+  session_state: string
+  idle: boolean
+  claim?: WorkerClaim
+  last_page?: WorkerPage
 }
 
 export interface Quote {
@@ -156,22 +144,34 @@ export interface Quote {
   present_cents?: number
   present_order_count?: number
   present_collected_at?: string
+  drop_cents?: number
+  high_cents?: number
+  drop_pct_bp?: number
+  drop_count?: number
+  last_drop_at?: string
 }
 
-export type QuoteSort = 'price_desc' | 'price_asc' | 'listings_desc' | 'name'
+export type DropWindow = '24h' | '7d' | '30d'
+export type QuoteSort = 'price_desc' | 'price_asc' | 'listings_desc' | 'name' | 'drop_desc' | 'drop_pct_desc'
 
-// 采集顺序决定平台先返回哪一头，改了会作废当前批次
+// 采集顺序决定平台先返回哪一头；改了会推进开关版本、清空该方向队列并重置补货游标
 export type SortColumn = 'price' | 'quantity' | 'name'
 export type SortDirection = 'asc' | 'desc'
 
 export interface QuoteFilter {
   appid?: number
+  product_id?: number
   platform?: string
   side?: Side
   keyword?: string
   item_type?: string
+  item_types?: string[]
+  steam_cats?: string[]
   min_cents?: number
   max_cents?: number
+  dropped?: boolean
+  drop_window?: DropWindow
+  min_drop_cents?: number
   sort?: QuoteSort
   limit?: number
   offset?: number
@@ -185,6 +185,47 @@ export interface QuotePage {
 export interface QuoteFacets {
   appids: number[]
   item_types: string[]
+}
+
+export interface PriceTick {
+  tick_id: number
+  product_id: number
+  appid: number
+  name: string
+  platform: string
+  side: Side
+  prev_cents?: number
+  price_cents: number
+  collected_at: string
+}
+
+export interface PriceTickFilter {
+  product_id?: number
+  platform?: string
+  side?: Side
+  limit?: number
+}
+
+export interface PriceTickPage {
+  ticks: PriceTick[]
+}
+
+export interface SteamCategory {
+  slug: string
+  label: string
+  name: string
+}
+
+export interface SteamItemClass {
+  slug: string
+  label: string
+  name: string
+  category: string
+}
+
+export interface SteamFacetsVocab {
+  categories: SteamCategory[]
+  item_classes: SteamItemClass[]
 }
 
 export class APIError extends Error {

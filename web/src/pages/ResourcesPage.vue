@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
-  assignNodeGame,
-  assignNodeSide,
   createAccount,
   createCombination,
   createNode,
@@ -21,7 +19,6 @@ import {
   type Account,
   type Combination,
   type Region,
-  type Side,
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -32,20 +29,13 @@ import {
   egressModeText,
   fmtAgo,
   fmtTime,
-  gameName,
   nodeKindText,
   nodeStateText,
   platformLabel,
   regionText,
   sessionStateText,
-  sideText,
 } from '../utils/format'
 import { nodeAllowsPlatform } from '../utils/platformRegion'
-
-// 只有 Steam 接入了采集，所以只为 Steam 主动展示两个方向的配置槽位；
-// 库里已存在的其它平台归属仍会显示出来。
-const LIVE_PLATFORMS = ['steam']
-const SIDES: Side[] = ['ask', 'bid']
 
 const accounts = ref<Account[] | null>(null)
 const nodes = ref<AccessNode[] | null>(null)
@@ -148,61 +138,6 @@ const exitPeers = computed(() => {
   return peers
 })
 
-interface SideGroup {
-  key: string
-  platform: string
-  side: Side
-  nodes: AccessNode[]
-}
-
-interface GameBlock {
-  appid: number
-  nodes: AccessNode[]
-  groups: SideGroup[]
-  undirected: AccessNode[]
-}
-
-const gameBlocks = computed<GameBlock[]>(() => {
-  const byGame = new Map<number, AccessNode[]>()
-  for (const node of nodes.value ?? []) {
-    if (!node.appid) continue
-    const list = byGame.get(node.appid) ?? []
-    list.push(node)
-    byGame.set(node.appid, list)
-  }
-  return [...byGame.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([appid, list]) => {
-      const slots = new Map<string, SideGroup>()
-      for (const platform of LIVE_PLATFORMS) {
-        for (const side of SIDES) {
-          slots.set(`${platform}/${side}`, { key: `${platform}/${side}`, platform, side, nodes: [] })
-        }
-      }
-      for (const node of list) {
-        for (const assignment of node.sides) {
-          const key = `${assignment.platform}/${assignment.side}`
-          const group = slots.get(key) ?? {
-            key,
-            platform: assignment.platform,
-            side: assignment.side,
-            nodes: [],
-          }
-          group.nodes.push(node)
-          slots.set(key, group)
-        }
-      }
-      return {
-        appid,
-        nodes: list,
-        groups: [...slots.values()],
-        undirected: list.filter((node) => node.sides.length === 0),
-      }
-    })
-})
-
-const unassignedNodes = computed(() => (nodes.value ?? []).filter((node) => !node.appid))
-
 function accountsOfNode(node: AccessNode): Account[] {
   return (combosByNode.value.get(node.id) ?? [])
     .map((combo) => accountById.value.get(combo.account_id))
@@ -213,11 +148,9 @@ function comboOf(node: AccessNode, accountId: number): Combination | undefined {
   return (combosByNode.value.get(node.id) ?? []).find((combo) => combo.account_id === accountId)
 }
 
-// 组合要求账号平台与节点已划方向的平台一致，所以候选只列这些平台的未绑账号。
 function bindCandidates(node: AccessNode): Account[] {
-  const platforms = new Set(node.sides.map((s) => s.platform))
   const bound = new Set((combosByNode.value.get(node.id) ?? []).map((c) => c.account_id))
-  return (accounts.value ?? []).filter((a) => platforms.has(a.platform) && !bound.has(a.id))
+  return (accounts.value ?? []).filter((a) => nodeAllowsPlatform(node.region, a.platform) && !bound.has(a.id))
 }
 
 function lineOf(node: AccessNode): string {
@@ -234,13 +167,6 @@ function stateClass(node: AccessNode): string {
 function sessionClass(account: Account): string {
   if (account.session_state === 'valid') return 'ok'
   return account.session_state === 'invalid' ? 'danger' : 'info'
-}
-
-function groupSummary(group: SideGroup): string {
-  if (!group.nodes.length) return '还没有节点'
-  const withAccount = group.nodes.filter((node) => accountsOfNode(node).length > 0).length
-  const usable = group.nodes.filter((node) => node.state === 'available').length
-  return `${group.nodes.length} 个节点 · ${usable} 个出口已填 · ${withAccount} 个已绑账号`
 }
 
 interface Gap {
@@ -266,29 +192,11 @@ const gaps = computed<Gap[]>(() => {
     }
   }
   for (const node of nodeList) {
-    if (!node.appid) list.push({ text: `节点 ${node.name} 还没划给游戏`, nodeId: node.id })
-  }
-  for (const node of nodeList) {
-    if (node.appid && !node.sides.length) {
-      list.push({ text: `节点 ${node.name} 在 ${gameName(node.appid)} 下还没指定采出售还是求购`, nodeId: node.id })
-    }
-  }
-  for (const node of nodeList) {
-    if (!node.appid || !node.sides.length || accountsOfNode(node).length) continue
-    const first = node.sides[0]
+    if (accountsOfNode(node).length) continue
     list.push({
-      text: `${gameName(node.appid)} · ${platformLabel(first.platform)} ${sideText(first.side)} 的节点 ${node.name} 还没绑账号`,
+      text: `节点 ${node.name} 还没绑账号`,
       nodeId: node.id,
     })
-  }
-  for (const block of gameBlocks.value) {
-    for (const group of block.groups) {
-      if (group.nodes.length || !LIVE_PLATFORMS.includes(group.platform)) continue
-      list.push({
-        text: `${gameName(block.appid)} · ${platformLabel(group.platform)} ${sideText(group.side)} 还没有节点，出售和求购必须用两个不同节点`,
-        optional: true,
-      })
-    }
   }
   return list
 })
@@ -396,7 +304,7 @@ async function submitBind() {
   <div class="pg">
     <header class="hero">
       <h1>资源</h1>
-      <p class="hero-sub">采集要跑起来，需要一个账号、一个填了出口 IP 的节点、把节点划给游戏和方向、再把账号绑到节点上。</p>
+      <p class="hero-sub">采集要跑起来，需要一个账号、一个填了出口 IP 的节点，再把账号绑到节点上。工人路由只看平台和地域。</p>
     </header>
 
     <div v-if="stale" class="stale-banner">数据可能过期，页面保留的是上次成功读到的结果</div>
@@ -457,124 +365,51 @@ async function submitBind() {
       </div>
     </section>
 
-    <section v-for="block in gameBlocks" :key="block.appid" class="panel">
-      <div class="panel-head">
-        {{ gameName(block.appid) }} · {{ block.appid }}
-        <span class="spacer" />
-        <span class="muted">{{ block.nodes.length }} 个节点</span>
-      </div>
-      <div class="panel-body">
-        <div v-for="group in block.groups" :key="group.key" class="group">
-          <div class="group-head">
-            <span class="strong">{{ platformLabel(group.platform) }} · {{ sideText(group.side) }}</span>
-            <span class="muted">{{ groupSummary(group) }}</span>
-          </div>
-          <table v-if="group.nodes.length" class="data">
-            <thead>
-              <tr><th>节点</th><th>线路</th><th>状态</th><th>出口 IP</th><th>账号</th><th>操作</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="node in group.nodes" :key="node.id">
-                <td>{{ node.name }}</td>
-                <td>{{ lineOf(node) }}</td>
-                <td><span class="badge" :class="stateClass(node)">{{ nodeStateText(node.state) }}</span></td>
-                <td>
-                  <span class="num">{{ node.exit?.address ?? '未填' }}</span>
-                  <div v-if="node.exit" class="muted">有效期至 {{ fmtTime(node.exit.valid_until) }}</div>
-                  <div v-if="exitPeers.get(node.id)" class="muted">
-                    与 {{ exitPeers.get(node.id)!.join('、') }} 同出口，共用该平台 IP 预算
-                  </div>
-                </td>
-                <td>
-                  <span v-for="account in accountsOfNode(node)" :key="account.id" class="bound">
-                    {{ account.alias }}
-                    <button
-                      class="link-x"
-                      title="解绑"
-                      @click="ask('解绑账号', `${account.alias} × ${node.name}`, '采集中会解绑失败。解绑后这个方向就没有可用组合。', () => deleteCombination(comboOf(node, account.id)!.id))"
-                    >
-                      ×
-                    </button>
-                  </span>
-                  <button
-                    v-if="bindCandidates(node).length"
-                    class="btn sm"
-                    @click="bindDraft = { node, accountId: 0 }"
-                  >
-                    绑账号
-                  </button>
-                  <span v-else-if="!accountsOfNode(node).length" class="muted">没有同平台账号</span>
-                </td>
-                <td class="ops">
-                  <button class="btn sm" @click="settingsNodeId = node.id">设置</button>
-                  <button
-                    class="btn sm danger"
-                    @click="ask('删除节点', node.name, '节点正在采集或还绑着账号时会删除失败。', () => deleteNode(node.id))"
-                  >
-                    删除
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="note">
-            这个方向还没有节点。
-            <template v-if="LIVE_PLATFORMS.includes(group.platform)">
-              同一个节点在同一平台只能采一个方向，所以出售和求购要各配一个节点。
-            </template>
-          </p>
-        </div>
-
-        <div v-if="block.undirected.length" class="group">
-          <div class="group-head">
-            <span class="strong">还没指定方向</span>
-            <span class="muted">{{ block.undirected.length }} 个节点划进了这个游戏但没说采什么</span>
-          </div>
-          <table class="data">
-            <thead>
-              <tr><th>节点</th><th>线路</th><th>状态</th><th>出口 IP</th><th>操作</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="node in block.undirected" :key="node.id">
-                <td>{{ node.name }}</td>
-                <td>{{ lineOf(node) }}</td>
-                <td><span class="badge" :class="stateClass(node)">{{ nodeStateText(node.state) }}</span></td>
-                <td class="num">{{ node.exit?.address ?? '未填' }}</td>
-                <td class="ops">
-                  <button class="btn sm" @click="settingsNodeId = node.id">设置</button>
-                  <button
-                    class="btn sm danger"
-                    @click="ask('删除节点', node.name, '节点正在采集或还绑着账号时会删除失败。', () => deleteNode(node.id))"
-                  >
-                    删除
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
     <section class="panel">
       <div class="panel-head">
-        未划游戏的节点
+        节点
         <span class="spacer" />
         <button class="btn sm" @click="showAddNode = true">新增节点</button>
       </div>
       <div class="panel-body">
         <EmptyState v-if="!nodes" kind="empty" text="读取中" />
-        <p v-else-if="!unassignedNodes.length" class="note">所有节点都划了游戏。新加的节点会先落在这里。</p>
+        <p v-else-if="!nodes.length" class="note">还没有节点。组合就是账号绑到节点。</p>
         <table v-else class="data">
           <thead>
-            <tr><th>节点</th><th>线路</th><th>状态</th><th>出口 IP</th><th>操作</th></tr>
+            <tr><th>节点</th><th>线路</th><th>状态</th><th>出口 IP</th><th>账号</th><th>操作</th></tr>
           </thead>
           <tbody>
-            <tr v-for="node in unassignedNodes" :key="node.id">
+            <tr v-for="node in nodes" :key="node.id">
               <td>{{ node.name }}</td>
               <td>{{ lineOf(node) }}</td>
               <td><span class="badge" :class="stateClass(node)">{{ nodeStateText(node.state) }}</span></td>
-              <td class="num">{{ node.exit?.address ?? '未填' }}</td>
+              <td>
+                <span class="num">{{ node.exit?.address ?? '未填' }}</span>
+                <div v-if="node.exit" class="muted">有效期至 {{ fmtTime(node.exit.valid_until) }}</div>
+                <div v-if="exitPeers.get(node.id)" class="muted">
+                  与 {{ exitPeers.get(node.id)!.join('、') }} 同出口，共用该平台 IP 预算
+                </div>
+              </td>
+              <td>
+                <span v-for="account in accountsOfNode(node)" :key="account.id" class="bound">
+                  {{ account.alias }}
+                  <button
+                    class="link-x"
+                    title="解绑"
+                    @click="ask('解绑账号', `${account.alias} × ${node.name}`, '采集中会解绑失败。', () => deleteCombination(comboOf(node, account.id)!.id))"
+                  >
+                    ×
+                  </button>
+                </span>
+                <button
+                  v-if="bindCandidates(node).length"
+                  class="btn sm"
+                  @click="bindDraft = { node, accountId: 0 }"
+                >
+                  绑账号
+                </button>
+                <span v-else-if="!accountsOfNode(node).length" class="muted">没有可用账号</span>
+              </td>
               <td class="ops">
                 <button class="btn sm" @click="settingsNodeId = node.id">设置</button>
                 <button
@@ -718,13 +553,9 @@ async function submitBind() {
     <NodeSettingsDialog
       v-if="settingsNode"
       :node="settingsNode"
-      :platforms="[...new Set([...LIVE_PLATFORMS, ...settingsNode.sides.map((s) => s.platform)])]"
-      :has-bound-accounts="accountsOfNode(settingsNode).length > 0"
       :busy="busy"
       @close="settingsNodeId = null"
       @exit="(address, validUntil) => runAction(() => recordNodeExit(settingsNode!.id, settingsNode!.egress_revision, address, validUntil))"
-      @game="(appid) => runAction(() => assignNodeGame(settingsNode!.id, settingsNode!.assignment_revision, appid || null))"
-      @side="(platform, side) => runAction(() => assignNodeSide(settingsNode!.id, settingsNode!.assignment_revision, platform, side))"
       @rename="(name) => runAction(() => renameNode(settingsNode!.id, name))"
       @connection="(payload) => runAction(() => replaceNodeConnection(settingsNode!.id, {
         expected_egress_revision: settingsNode!.egress_revision,
@@ -745,7 +576,7 @@ async function submitBind() {
 </template>
 
 <style scoped>
-.pg { max-width: 1100px; margin: 0 auto; padding: 20px 24px 48px; }
+.pg { width: 100%; max-width: none; margin: 0; padding: 20px 28px 40px; box-sizing: border-box; }
 .hero { margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line-strong); }
 .hero h1 { margin: 0; }
 .hero-sub { margin: 6px 0 0; color: var(--text-3); font-size: 12px; }

@@ -8,14 +8,12 @@ func TestWriteOrderValidateRequiresOneBasedComponents(t *testing.T) {
 		order   WriteOrder
 		wantErr bool
 	}{
-		{name: "first valid order", order: WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1}},
-		{name: "later valid order", order: WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 4}},
-		{name: "zero switch version", order: WriteOrder{RunSequence: 1, PageSequence: 1}, wantErr: true},
-		{name: "negative switch version", order: WriteOrder{SwitchVersion: -1, RunSequence: 1, PageSequence: 1}, wantErr: true},
-		{name: "zero run sequence", order: WriteOrder{SwitchVersion: 1, PageSequence: 1}, wantErr: true},
-		{name: "negative run sequence", order: WriteOrder{SwitchVersion: 1, RunSequence: -1, PageSequence: 1}, wantErr: true},
-		{name: "zero page sequence", order: WriteOrder{SwitchVersion: 1, RunSequence: 1}, wantErr: true},
-		{name: "negative page sequence", order: WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: -1}, wantErr: true},
+		{name: "first valid order", order: WriteOrder{SwitchVersion: 1, WriteSequence: 1}},
+		{name: "later valid order", order: WriteOrder{SwitchVersion: 2, WriteSequence: 4}},
+		{name: "zero switch version", order: WriteOrder{WriteSequence: 1}, wantErr: true},
+		{name: "negative switch version", order: WriteOrder{SwitchVersion: -1, WriteSequence: 1}, wantErr: true},
+		{name: "zero write sequence", order: WriteOrder{SwitchVersion: 1}, wantErr: true},
+		{name: "negative write sequence", order: WriteOrder{SwitchVersion: 1, WriteSequence: -1}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -36,43 +34,31 @@ func TestWriteOrderCompareUsesLexicographicOrder(t *testing.T) {
 	}{
 		{
 			name:  "equal",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 4},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 4},
+			left:  WriteOrder{SwitchVersion: 2, WriteSequence: 4},
+			right: WriteOrder{SwitchVersion: 2, WriteSequence: 4},
 		},
 		{
-			name:  "lower switch wins over later run and page",
-			left:  WriteOrder{SwitchVersion: 1, RunSequence: 99, PageSequence: 99},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 1, PageSequence: 1},
+			name:  "lower switch wins over later write",
+			left:  WriteOrder{SwitchVersion: 1, WriteSequence: 99},
+			right: WriteOrder{SwitchVersion: 2, WriteSequence: 1},
 			want:  -1,
 		},
 		{
-			name:  "higher switch wins over earlier run and page",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 1, PageSequence: 1},
-			right: WriteOrder{SwitchVersion: 1, RunSequence: 99, PageSequence: 99},
+			name:  "higher switch wins over earlier write",
+			left:  WriteOrder{SwitchVersion: 2, WriteSequence: 1},
+			right: WriteOrder{SwitchVersion: 1, WriteSequence: 99},
 			want:  1,
 		},
 		{
-			name:  "lower run wins over later page",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 99},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 4, PageSequence: 1},
+			name:  "lower write",
+			left:  WriteOrder{SwitchVersion: 2, WriteSequence: 3},
+			right: WriteOrder{SwitchVersion: 2, WriteSequence: 4},
 			want:  -1,
 		},
 		{
-			name:  "higher run wins over earlier page",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 4, PageSequence: 1},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 99},
-			want:  1,
-		},
-		{
-			name:  "lower page",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 4},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 5},
-			want:  -1,
-		},
-		{
-			name:  "higher page",
-			left:  WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 5},
-			right: WriteOrder{SwitchVersion: 2, RunSequence: 3, PageSequence: 4},
+			name:  "higher write",
+			left:  WriteOrder{SwitchVersion: 2, WriteSequence: 4},
+			right: WriteOrder{SwitchVersion: 2, WriteSequence: 3},
 			want:  1,
 		},
 	}

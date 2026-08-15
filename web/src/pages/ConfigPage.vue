@@ -4,23 +4,28 @@ import {
   createProvider,
   deleteProvider,
   getProviders,
+  getSteamFacets,
   getTargets,
   getWatermarks,
   replaceProviderCredential,
+  setTargetPriceRange,
   setTargetSort,
+  setTargetSteamFacets,
   setWatermark,
   updateProvider,
   type Provider,
   type Region,
   type SortColumn,
   type SortDirection,
+  type SteamFacetsVocab,
   type Target,
   type Watermark,
 } from '../api'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
+import SteamFacetDialog from '../components/SteamFacetDialog.vue'
 import { useEscape } from '../utils/escape'
-import { apiErrorText, gameName, platformLabel, regionText, sideText } from '../utils/format'
+import { apiErrorText, gameName, platformLabel, regionText, RUST_APPID, sideText } from '../utils/format'
 
 const REGIONS: Region[] = ['domestic', 'foreign', 'hongkong']
 
@@ -37,6 +42,9 @@ const watermarks = ref<Watermark[] | null>(null)
 const providers = ref<Provider[] | null>(null)
 const targets = ref<Target[] | null>(null)
 const sortDraft = ref<Record<number, string>>({})
+const rangeDraft = ref<Record<number, { min: string; max: string }>>({})
+const steamVocab = ref<SteamFacetsVocab>({ categories: [], item_classes: [] })
+const facetEdit = ref<Target | null>(null)
 const loadError = ref<string | null>(null)
 const actionError = ref<string | null>(null)
 const busy = ref(false)
@@ -64,6 +72,7 @@ onMounted(() => { void reload() })
 
 useEscape(() => {
   if (confirm.value) return
+  if (facetEdit.value) { facetEdit.value = null; return }
   if (credEdit.value) { credEdit.value = null; return }
   if (providerEdit.value) { providerEdit.value = null; return }
   if (showAdd.value) showAdd.value = false
@@ -77,7 +86,61 @@ function sortLabel(key: string): string {
   return SORT_OPTIONS.find((option) => option.value === key)?.label ?? key
 }
 
-// 保存顺序会作废正在跑的批次，所以走确认框
+function centsToYuan(cents: number | undefined): string {
+  if (cents == null) return ''
+  return (cents / 100).toFixed(2)
+}
+
+function yuanToCents(raw: string): number | null | undefined {
+  const text = raw.trim()
+  if (!text) return null
+  const value = Number(text)
+  if (!Number.isFinite(value) || value < 0) return undefined
+  return Math.round(value * 100)
+}
+
+function rangeKey(target: Target): string {
+  return `${target.price_min_cents ?? ''}:${target.price_max_cents ?? ''}`
+}
+
+function draftRangeKey(target: Target): string {
+  const draft = rangeDraft.value[target.id]
+  if (!draft) return rangeKey(target)
+  const min = yuanToCents(draft.min)
+  const max = yuanToCents(draft.max)
+  if (min === undefined || max === undefined) return 'invalid'
+  return `${min ?? ''}:${max ?? ''}`
+}
+
+function rangeDirty(target: Target): boolean {
+  return draftRangeKey(target) !== rangeKey(target)
+}
+
+function rangeOf(id: number): { min: string; max: string } {
+  if (!rangeDraft.value[id]) rangeDraft.value[id] = { min: '', max: '' }
+  return rangeDraft.value[id]
+}
+
+function isRust(target: Target): boolean {
+  return target.appid === RUST_APPID
+}
+
+function facetName(slug: string, kind: 'cat' | 'class'): string {
+  if (kind === 'cat') return steamVocab.value.categories.find((item) => item.slug === slug)?.name ?? slug
+  return steamVocab.value.item_classes.find((item) => item.slug === slug)?.name ?? slug
+}
+
+function facetSummary(target: Target): string {
+  const cats = target.steam_cats ?? []
+  const classes = target.item_classes ?? []
+  if (!cats.length && !classes.length) return '不限'
+  const catText = cats.length ? cats.map((slug) => facetName(slug, 'cat')).join('、') : '分类不限'
+  if (!classes.length) return catText
+  if (classes.length <= 2) return `${catText} · ${classes.map((slug) => facetName(slug, 'class')).join('、')}`
+  return `${catText} · ${classes.length} 个类型`
+}
+
+// 保存顺序会推进开关版本并清空该方向队列，所以走确认框
 function requestSortChange(target: Target) {
   const key = sortDraft.value[target.id]
   if (!key || key === sortKey(target) || busy.value) return
@@ -85,8 +148,8 @@ function requestSortChange(target: Target) {
     title: '改采集顺序',
     impact: `${gameName(target.appid)} · ${sideText(target.side)} → ${sortLabel(key)}`,
     consequence:
-      '顺序一换，记录的翻页位置就没有意义了：当前批次会被作废，下一轮从第一页重新采。' +
-      '已经存下来的行情不会丢，但这一轮已翻过的进度会丢。',
+      '顺序一换，补货游标没有意义了：该方向未完成任务会丢掉，补货从第一页重新开始。' +
+      '已经存下来的行情不会丢。',
     run: async () => {
       const [column, direction] = key.split(':')
       await setTargetSort(target.id, target.revision, column as SortColumn, direction as SortDirection)
@@ -94,21 +157,74 @@ function requestSortChange(target: Target) {
   }
 }
 
+function requestRangeChange(target: Target) {
+  const draft = rangeDraft.value[target.id]
+  if (!draft || !rangeDirty(target) || busy.value) return
+  const min = yuanToCents(draft.min)
+  const max = yuanToCents(draft.max)
+  if (min === undefined || max === undefined) {
+    actionError.value = '价格区间必须是不小于 0 的数字'
+    return
+  }
+  if (min != null && max != null && min > max) {
+    actionError.value = '最低价不能高于最高价'
+    return
+  }
+  const label = `${min == null ? '不限' : `¥${(min / 100).toFixed(2)}`} ~ ${max == null ? '不限' : `¥${(max / 100).toFixed(2)}`}`
+  confirm.value = {
+    title: '改采集价格区间',
+    impact: `${gameName(target.appid)} · ${sideText(target.side)} → ${label}`,
+    consequence:
+      target.side === 'ask'
+        ? '区间会直接传给 Steam 搜索。该方向未完成任务会丢掉，补货从第一页重新开始。已经存下来的行情不会丢。'
+        : '求购没有 Steam 搜索区间，这项存了也不会打出去。该方向未完成任务仍会丢掉。',
+    run: async () => {
+      await setTargetPriceRange(target.id, target.revision, min, max)
+    },
+  }
+}
+
+function saveFacets(cats: string[], classes: string[]) {
+  const target = facetEdit.value
+  if (!target || busy.value) return
+  void runAction(async () => {
+    await setTargetSteamFacets(target.id, target.revision, cats, classes)
+    facetEdit.value = null
+  })
+}
+
 async function reload() {
   try {
-    const [marks, list, targetList] = await Promise.all([getWatermarks(), getProviders(), getTargets()])
+    const [marks, list, targetList, vocab] = await Promise.all([
+      getWatermarks(),
+      getProviders(),
+      getTargets(),
+      getSteamFacets(RUST_APPID).catch(() => steamVocab.value),
+    ])
     watermarks.value = marks
     providers.value = list
     targets.value = targetList
+    steamVocab.value = vocab
     const next: Record<string, string> = {}
     for (const mark of marks) next[mark.region] = String(mark.min_usable)
     draftMin.value = next
     const sorts: Record<number, string> = {}
-    for (const target of targetList) sorts[target.id] = sortKey(target)
+    const ranges: Record<number, { min: string; max: string }> = {}
+    for (const target of targetList) {
+      sorts[target.id] = sortKey(target)
+      ranges[target.id] = {
+        min: centsToYuan(target.price_min_cents),
+        max: centsToYuan(target.price_max_cents),
+      }
+    }
     sortDraft.value = sorts
+    rangeDraft.value = ranges
     loadError.value = null
   } catch (e) {
     loadError.value = e instanceof Error ? apiErrorText(e.message) : '加载失败'
+    if (watermarks.value == null) watermarks.value = []
+    if (providers.value == null) providers.value = []
+    if (targets.value == null) targets.value = []
   }
 }
 
@@ -256,23 +372,26 @@ async function saveCredential() {
       <div class="panel-head">采集配置</div>
       <div class="panel-body">
         <p class="note">
-          顺序决定平台先返回哪一头，也就决定这一轮先采到什么。一轮要走完全部商品要十几个小时，
-          所以想先拿到贵的就选价格从高到低。
+          顺序决定平台先返回哪一头。出售价格区间会原样传给 Steam 搜索
+          （price_min / price_max / price_currency=23），区间外的商品 Steam 根本不返回。
+          Rust 的分类和物品类型在页面上是中文，交给 Steam 的仍是原来的英文参数。
+          求购没有这些参数，填了也不会少打。
         </p>
         <p class="note warn">
-          改顺序会作废当前正在跑的批次，下一轮从头开始采。已经存下来的行情不会丢。
+          改顺序、价格区间或分类会丢掉该方向未完成任务，补货从头开始。已经存下来的行情不会丢。
         </p>
         <EmptyState v-if="!targets" kind="empty" text="读取中" />
         <EmptyState v-else-if="!targets.length" kind="unconfigured" text="还没有采集目标，先去概览页加游戏" />
         <table v-else class="data">
           <thead>
-            <tr><th>方向</th><th>顺序</th><th>状态</th><th>操作</th></tr>
+            <tr><th>方向</th><th>顺序</th><th>价格区间（元）</th><th>状态</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="target in targets" :key="target.id">
               <td>
                 <div class="strong">{{ gameName(target.appid) }} · {{ sideText(target.side) }}</div>
                 <div class="muted">{{ platformLabel(target.platform) }}</div>
+                <div v-if="isRust(target)" class="muted">筛选：{{ facetSummary(target) }}</div>
               </td>
               <td>
                 <select v-model="sortDraft[target.id]" class="mini wide">
@@ -282,15 +401,46 @@ async function saveCredential() {
                 </select>
               </td>
               <td>
+                <div class="range">
+                  <input
+                    v-model="rangeOf(target.id).min"
+                    class="mini"
+                    inputmode="decimal"
+                    placeholder="最低"
+                  />
+                  <span class="muted">~</span>
+                  <input
+                    v-model="rangeOf(target.id).max"
+                    class="mini"
+                    inputmode="decimal"
+                    placeholder="最高"
+                  />
+                </div>
+                <div v-if="target.side === 'bid'" class="muted">求购打不出去</div>
+              </td>
+              <td>
                 <span v-if="target.desired === 'enabled'">已开</span>
                 <span v-else class="muted">已关</span>
               </td>
               <td>
-                <button
-                  class="btn sm"
-                  :disabled="busy || sortDraft[target.id] === sortKey(target)"
-                  @click="requestSortChange(target)"
-                >保存顺序</button>
+                <div class="ops">
+                  <button
+                    class="btn sm"
+                    :disabled="busy || sortDraft[target.id] === sortKey(target)"
+                    @click="requestSortChange(target)"
+                  >保存顺序</button>
+                  <button
+                    class="btn sm"
+                    :disabled="busy || !rangeDirty(target)"
+                    @click="requestRangeChange(target)"
+                  >保存区间</button>
+                  <button
+                    v-if="isRust(target)"
+                    class="btn sm"
+                    :disabled="busy || !steamVocab.categories.length"
+                    @click="facetEdit = target"
+                  >编辑筛选</button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -455,6 +605,15 @@ async function saveCredential() {
       </form>
     </div>
 
+    <SteamFacetDialog
+      v-if="facetEdit"
+      :target="facetEdit"
+      :vocab="steamVocab"
+      :busy="busy"
+      @save="saveFacets"
+      @cancel="facetEdit = null"
+    />
+
     <ConfirmDialog
       v-if="confirm"
       :title="confirm.title"
@@ -468,7 +627,7 @@ async function saveCredential() {
 </template>
 
 <style scoped>
-.pg { max-width: 1100px; margin: 0 auto; padding: 20px 24px 48px; }
+.pg { width: 100%; max-width: none; margin: 0; padding: 20px 28px 40px; box-sizing: border-box; }
 .hero { margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line-strong); }
 .hero h1 { margin: 0; }
 .hero-sub { margin: 6px 0 0; color: var(--text-3); font-size: 12px; }
@@ -488,5 +647,6 @@ input.mini, select.mini {
   border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 12px;
 }
 select.mini.wide { width: 180px; }
+.range { display: flex; gap: 6px; align-items: center; }
 .note.warn { color: var(--warn); }
 </style>

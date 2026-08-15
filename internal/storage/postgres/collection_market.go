@@ -18,39 +18,15 @@ import (
 	"buff-go/internal/market"
 )
 
-// pagePayloadRetention 是原始响应的全局保留页数。这张表是可丢弃的诊断副本，
-// 写入时按写入时间倒序淘汰，体积因此恒定。
-const pagePayloadRetention = 2000
-
-// storePagePayload 保存一页的原始响应并淘汰超出保留窗口的旧副本。
-// payload 为空表示这个方向没有单一页面响应，直接跳过。
-func storePagePayload(ctx context.Context, tx *sql.Tx, page collection.Page, payload []byte) error {
+func compressPagePayload(payload []byte) ([]byte, int64, error) {
 	if len(payload) == 0 {
-		return nil
+		return nil, 0, nil
 	}
 	compressed, err := gzipPayload(payload)
 	if err != nil {
-		return ErrCollectionInvalidInput
+		return nil, 0, ErrCollectionInvalidInput
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO collection_page_payloads (run_id, page_sequence, payload_gzip, byte_size, created_at)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (run_id, page_sequence) DO NOTHING`,
-		int64(page.RunID()), int64(page.PageSequence()), compressed, int64(len(payload)), page.CommittedAt(),
-	); err != nil {
-		return mapCollectionWriteError(ctx, err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-DELETE FROM collection_page_payloads
-WHERE (run_id, page_sequence) IN (
-    SELECT run_id, page_sequence
-    FROM collection_page_payloads
-    ORDER BY created_at DESC, run_id DESC, page_sequence DESC
-    OFFSET $1
-)`, pagePayloadRetention); err != nil {
-		return mapCollectionWriteError(ctx, err)
-	}
-	return nil
+	return compressed, int64(len(payload)), nil
 }
 
 func gzipPayload(payload []byte) ([]byte, error) {
@@ -89,8 +65,7 @@ func gunzipPayload(compressed []byte) ([]byte, error) {
 // Page fence errors are canonical in the collection domain package; the
 // storage names keep the same values for errors.Is compatibility.
 var (
-	// ErrCollectionFence reports a page from a disabled target, an old switch,
-	// or a run which is no longer running.
+	// ErrCollectionFence reports a page from a disabled target or an old switch.
 	ErrCollectionFence = collection.ErrFence
 	// ErrCollectionPageOrder reports a skipped page or mismatched cursor.
 	ErrCollectionPageOrder = collection.ErrPageOrder
@@ -98,9 +73,8 @@ var (
 	ErrCollectionPageConflict = collection.ErrPageConflict
 )
 
-// SummaryPageCommit is one explicit summary page. Scope and causal order are
-// derived from the persisted run rather than accepted from the caller. The
-// canonical shape lives in the collection domain next to its scheduler.
+// SummaryPageCommit is one explicit summary page. The claimed task and target
+// switch fence are checked in storage; write_seq is assigned here.
 type SummaryPageCommit = collection.SummaryPageCommit
 
 // Compile-time proof that the store satisfies the scheduler ports.
@@ -109,15 +83,16 @@ var (
 	_ collection.RateLimitAdmitter = (*Store)(nil)
 )
 
-// CommitSummaryPage atomically fences the target and run, records the page,
-// publishes its explicit market attempts, and advances the run cursor.
+// CommitSummaryPage fences the target, writes the latest page and market facts,
+// and advances write_seq.
 func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) (collection.Page, bool, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return collection.Page{}, false, err
 	}
-	if input.RunID.Validate() != nil || input.PageSequence.Validate() != nil ||
-		input.CursorBefore.Validate() != nil || input.CursorAfter.Validate() != nil ||
-		!validCollectionTime(input.CollectedAt) {
+	if input.TargetID.Validate() != nil || input.TaskID.Validate() != nil ||
+		input.ExpectedSwitch.Validate() != nil || input.CursorBefore.Validate() != nil ||
+		input.CursorAfter.Validate() != nil || !validCollectionTime(input.CollectedAt) ||
+		input.AskTotal < 0 {
 		return collection.Page{}, false, ErrCollectionInvalidInput
 	}
 
@@ -127,33 +102,56 @@ func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	run, target, err := lockRunTargetForPage(ctx, tx, input.RunID)
+	target, found, err := queryCollectionTarget(ctx, tx, `
+SELECT `+collectionTargetColumns+`
+FROM collection_targets
+WHERE target_id = $1
+FOR UPDATE`, int64(input.TargetID))
 	if err != nil {
 		return collection.Page{}, false, err
 	}
-	switchVersion, hasSwitch := run.SwitchVersion()
-	side, hasSide := run.Side()
-	if run.TaskType() != collection.TaskTypeSummary || !hasSwitch || !hasSide ||
-		target.TaskType() != collection.TaskTypeSummary || !runMatchesTarget(run, target) {
+	if !found {
+		return collection.Page{}, false, ErrCollectionNotFound
+	}
+	side, hasSide := target.Side()
+	appID, hasApp := target.AppID()
+	if target.TaskType() != collection.TaskTypeSummary || !hasSide || !hasApp {
 		return collection.Page{}, false, ErrCollectionIntegrity
 	}
-	if target.Desired() != collection.DesiredEnabled || target.SwitchVersion() != switchVersion ||
-		run.State() != collection.RunRunning {
+	if target.Desired() != collection.DesiredEnabled || target.SwitchVersion() != input.ExpectedSwitch {
 		return collection.Page{}, false, ErrCollectionFence
 	}
 
-	order := market.WriteOrder{
-		SwitchVersion: int64(switchVersion),
-		RunSequence:   int64(run.RunSequence()),
-		PageSequence:  int64(input.PageSequence),
+	var claimedBy sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+SELECT claimed_by FROM collection_tasks
+WHERE task_id = $1 AND target_id = $2 AND state = 'claimed'
+FOR UPDATE`, int64(input.TaskID), int64(input.TargetID)).Scan(&claimedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return collection.Page{}, false, ErrCollectionFence
 	}
-	resolved, err := resolveAttemptWrites(ctx, tx, string(run.Platform()), run.AppID(), input.Attempts)
+	if err != nil {
+		return collection.Page{}, false, collectionStorageError(ctx)
+	}
+	if !claimedBy.Valid {
+		return collection.Page{}, false, ErrCollectionIntegrity
+	}
+
+	if target.WriteSeq() == int64(^uint64(0)>>1) {
+		return collection.Page{}, false, ErrCollectionIntegrity
+	}
+	writeSeq := target.WriteSeq() + 1
+	order := market.WriteOrder{
+		SwitchVersion: int64(target.SwitchVersion()),
+		WriteSequence: writeSeq,
+	}
+	resolved, err := resolveAttemptWrites(ctx, tx, string(target.Platform()), appID, input.Attempts)
 	if err != nil {
 		return collection.Page{}, false, err
 	}
 	batch := observationBatch{
-		AppID:    run.AppID(),
-		Platform: string(run.Platform()),
+		AppID:    appID,
+		Platform: string(target.Platform()),
 		Side:     side,
 		Order:    order,
 		Attempts: resolved,
@@ -162,85 +160,60 @@ func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) 
 	if err != nil {
 		return collection.Page{}, false, ErrCollectionInvalidInput
 	}
-	startedAt, started := run.StartedAt()
-	if !started || input.CollectedAt.Before(startedAt) {
-		return collection.Page{}, false, ErrCollectionInvalidInput
-	}
 	for _, snapshot := range snapshots {
-		if snapshot.collectedAt.Before(startedAt) || snapshot.collectedAt.After(input.CollectedAt) {
+		if snapshot.collectedAt.After(input.CollectedAt) {
 			return collection.Page{}, false, ErrCollectionInvalidInput
 		}
 	}
-	digest := summaryPageDigest(input, batch, snapshots)
+	digest := summaryPageDigest(input, writeSeq, batch, snapshots)
 	if digest == ([32]byte{}) {
 		return collection.Page{}, false, ErrCollectionIntegrity
-	}
-
-	existing, found, err := collectionPageForUpdate(ctx, tx, input.RunID, input.PageSequence)
-	if err != nil {
-		return collection.Page{}, false, err
-	}
-	if found {
-		if existing.PayloadDigest() != digest ||
-			!existing.CursorBefore().Equal(input.CursorBefore) ||
-			!existing.CursorAfter().Equal(input.CursorAfter) ||
-			!existing.CollectedAt().Equal(input.CollectedAt) {
-			return collection.Page{}, false, ErrCollectionPageConflict
-		}
-		if err := tx.Commit(); err != nil {
-			return collection.Page{}, false, collectionStorageError(ctx)
-		}
-		return existing, false, nil
-	}
-	if run.LastPageSequence() == int64(^uint64(0)>>1) ||
-		int64(input.PageSequence) != run.LastPageSequence()+1 ||
-		!run.CurrentCursor().Equal(input.CursorBefore) {
-		return collection.Page{}, false, ErrCollectionPageOrder
 	}
 	committedAt, err := collectionDatabaseTime(ctx, tx, input.CollectedAt)
 	if err != nil {
 		return collection.Page{}, false, err
 	}
 	page, err := collection.NewPage(collection.PageInput{
-		RunID:         input.RunID,
-		PageSequence:  input.PageSequence,
+		TargetID:      input.TargetID,
+		WriteSeq:      writeSeq,
 		CursorBefore:  input.CursorBefore,
 		CursorAfter:   input.CursorAfter,
 		PayloadDigest: digest,
 		CollectedAt:   input.CollectedAt,
 		CommittedAt:   committedAt,
+		AccountID:     input.AccountID,
+		ExitAddress:   input.ExitAddress,
 	})
 	if err != nil {
 		return collection.Page{}, false, ErrCollectionInvalidInput
 	}
-	nextRun, err := run.CommitPage(page)
+	compressed, payloadBytes, err := compressPagePayload(input.Payload)
 	if err != nil {
-		return collection.Page{}, false, ErrCollectionPageOrder
+		return collection.Page{}, false, err
 	}
-
 	pageDigest := page.PayloadDigest()
-	storedPage, err := scanCollectionPage(tx.QueryRowContext(ctx, `
-INSERT INTO collection_pages (
-    run_id, page_sequence, cursor_before, cursor_after, payload_digest,
-    collected_at, committed_at, account_id, exit_address
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING run_id, page_sequence, cursor_before, cursor_after, payload_digest,
-          collected_at, committed_at`,
-		int64(page.RunID()), int64(page.PageSequence()), collectionCursorBytes(page.CursorBefore()),
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO collection_latest_pages (
+    target_id, write_seq, cursor_before, cursor_after, payload_digest,
+    collected_at, committed_at, account_id, exit_address, payload_gzip, payload_bytes
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (target_id) DO UPDATE SET
+    write_seq = EXCLUDED.write_seq,
+    cursor_before = EXCLUDED.cursor_before,
+    cursor_after = EXCLUDED.cursor_after,
+    payload_digest = EXCLUDED.payload_digest,
+    collected_at = EXCLUDED.collected_at,
+    committed_at = EXCLUDED.committed_at,
+    account_id = EXCLUDED.account_id,
+    exit_address = EXCLUDED.exit_address,
+    payload_gzip = EXCLUDED.payload_gzip,
+    payload_bytes = EXCLUDED.payload_bytes`,
+		int64(page.TargetID()), page.WriteSeq(), collectionCursorBytes(page.CursorBefore()),
 		collectionCursorBytes(page.CursorAfter()), pageDigest[:], page.CollectedAt(), page.CommittedAt(),
 		nullableAccountID(input.AccountID), nullableAddr(input.ExitAddress),
-	))
-	if err != nil {
+		nullableBytes(compressed), nullablePositiveInt64(payloadBytes),
+	); err != nil {
 		return collection.Page{}, false, mapCollectionWriteError(ctx, err)
-	}
-	if storedPage.PayloadDigest() != page.PayloadDigest() ||
-		!storedPage.CursorBefore().Equal(page.CursorBefore()) ||
-		!storedPage.CursorAfter().Equal(page.CursorAfter()) ||
-		!storedPage.CollectedAt().Equal(page.CollectedAt()) {
-		return collection.Page{}, false, ErrCollectionIntegrity
-	}
-	if err := storePagePayload(ctx, tx, page, input.Payload); err != nil {
-		return collection.Page{}, false, err
 	}
 	marketApplied, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
 	if err != nil {
@@ -249,80 +222,34 @@ RETURNING run_id, page_sequence, cursor_before, cursor_after, payload_digest,
 	if len(snapshots) > 0 && !marketApplied {
 		return collection.Page{}, false, ErrCollectionIntegrity
 	}
-
-	storedRun, err := scanCollectionRun(tx.QueryRowContext(ctx, `
-UPDATE collection_runs
-SET current_cursor = $4, last_page_sequence = $5
-WHERE run_id = $1 AND status = 'running'
-  AND current_cursor = $2 AND last_page_sequence = $3
-RETURNING `+collectionRunColumns,
-		int64(run.ID()), collectionCursorBytes(run.CurrentCursor()), run.LastPageSequence(),
-		collectionCursorBytes(nextRun.CurrentCursor()), nextRun.LastPageSequence(),
-	))
-	if errors.Is(err, sql.ErrNoRows) {
-		return collection.Page{}, false, ErrCollectionConflict
+	refillTotal := target.RefillTotal()
+	if input.AskTotal > 0 {
+		refillTotal = input.AskTotal
 	}
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+UPDATE collection_targets
+SET write_seq = $2, refill_total = $3
+WHERE target_id = $1`, int64(input.TargetID), writeSeq, refillTotal); err != nil {
 		return collection.Page{}, false, mapCollectionWriteError(ctx, err)
-	}
-	if !sameRun(storedRun, nextRun) {
-		return collection.Page{}, false, ErrCollectionIntegrity
 	}
 	if err := tx.Commit(); err != nil {
 		return collection.Page{}, false, collectionStorageError(ctx)
 	}
-	return storedPage, true, nil
-}
-
-func lockRunTargetForPage(ctx context.Context, tx *sql.Tx, id collection.RunID) (collection.Run, collection.Target, error) {
-	var targetID sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT target_id FROM collection_runs WHERE run_id = $1`, int64(id)).Scan(&targetID); errors.Is(err, sql.ErrNoRows) {
-		return collection.Run{}, collection.Target{}, ErrCollectionNotFound
-	} else if err != nil {
-		return collection.Run{}, collection.Target{}, collectionStorageError(ctx)
-	}
-	if !targetID.Valid {
-		return collection.Run{}, collection.Target{}, ErrCollectionInvalidInput
-	}
-	target, _, found, err := queryCollectionTarget(ctx, tx, `
-SELECT `+collectionTargetColumns+`
-FROM collection_targets
-WHERE target_id = $1
-FOR SHARE`, targetID.Int64)
-	if err != nil {
-		return collection.Run{}, collection.Target{}, err
-	}
-	if !found {
-		return collection.Run{}, collection.Target{}, ErrCollectionIntegrity
-	}
-	run, err := scanCollectionRun(tx.QueryRowContext(ctx, `
-SELECT `+collectionRunColumns+`
-FROM collection_runs
-WHERE run_id = $1
-FOR UPDATE`, int64(id)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return collection.Run{}, collection.Target{}, ErrCollectionNotFound
-	}
-	if err != nil {
-		return collection.Run{}, collection.Target{}, mapCollectionReadError(ctx, err)
-	}
-	return run, target, nil
-}
-
-func collectionPageForUpdate(ctx context.Context, tx *sql.Tx, runID collection.RunID, sequence collection.Sequence) (collection.Page, bool, error) {
-	page, err := scanCollectionPage(tx.QueryRowContext(ctx, `
-SELECT run_id, page_sequence, cursor_before, cursor_after, payload_digest,
-       collected_at, committed_at
-FROM collection_pages
-WHERE run_id = $1 AND page_sequence = $2
-FOR UPDATE`, int64(runID), int64(sequence)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return collection.Page{}, false, nil
-	}
-	if err != nil {
-		return collection.Page{}, false, mapCollectionReadError(ctx, err)
-	}
 	return page, true, nil
+}
+
+func nullableBytes(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullablePositiveInt64(value int64) any {
+	if value < 1 {
+		return nil
+	}
+	return value
 }
 
 // resolveAttemptWrites 在同一事务内把 attempt 解析到 ProductID。
@@ -520,11 +447,12 @@ RETURNING product_id`,
 	return nil
 }
 
-func summaryPageDigest(input SummaryPageCommit, batch observationBatch, snapshots []attemptSnapshot) [32]byte {
+func summaryPageDigest(input SummaryPageCommit, writeSeq int64, batch observationBatch, snapshots []attemptSnapshot) [32]byte {
 	digest := sha256.New()
-	digestBytes(digest, []byte("buff-go.summary-page.v1"))
-	digestInt64(digest, int64(input.RunID))
-	digestInt64(digest, int64(input.PageSequence))
+	digestBytes(digest, []byte("buff-go.summary-page.v2"))
+	digestInt64(digest, int64(input.TargetID))
+	digestInt64(digest, int64(input.TaskID))
+	digestInt64(digest, writeSeq)
 	digestBytes(digest, input.CursorBefore.Bytes())
 	digestBytes(digest, input.CursorAfter.Bytes())
 	digestTime(digest, input.CollectedAt)
@@ -532,8 +460,7 @@ func summaryPageDigest(input SummaryPageCommit, batch observationBatch, snapshot
 	digestBytes(digest, []byte(batch.Platform))
 	digestBytes(digest, []byte(batch.Side))
 	digestInt64(digest, batch.Order.SwitchVersion)
-	digestInt64(digest, batch.Order.RunSequence)
-	digestInt64(digest, batch.Order.PageSequence)
+	digestInt64(digest, batch.Order.WriteSequence)
 	digestInt64(digest, int64(len(snapshots)))
 	for _, snapshot := range snapshots {
 		digestInt64(digest, int64(snapshot.productID))

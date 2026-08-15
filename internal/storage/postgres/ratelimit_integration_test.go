@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"buff-go/internal/market"
 	"buff-go/internal/ratelimit"
 	"buff-go/internal/resource"
 )
@@ -1139,7 +1138,7 @@ func testRateLimitSameCombinationExitChange(t *testing.T, dsn string) {
 	}
 
 	lease, err := fixture.coordinator.AcquireCombination(
-		t.Context(), fixture.component, fixture.combinationID, resource.TargetRegionDomestic, verifiedAt, 730, market.SideAsk,
+		t.Context(), fixture.component, fixture.combinationID, resource.TargetRegionDomestic, verifiedAt,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1451,14 +1450,6 @@ func newRateLimitRequestFixtureWithValidity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	node, err = store.AssignNodeGame(ctx, node.ID, node.AssignmentRevision, 730)
-	if err != nil {
-		t.Fatal(err)
-	}
-	node, err = store.AssignNodeSide(ctx, node.ID, node.AssignmentRevision, platform, market.SideAsk)
-	if err != nil {
-		t.Fatal(err)
-	}
 	combination, err := store.CreateCombination(ctx, account.ID, node.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1471,7 +1462,7 @@ func newRateLimitRequestFixtureWithValidity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, resource.TargetRegionDomestic, now, 730, market.SideAsk)
+	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, resource.TargetRegionDomestic, now)
 	if err != nil {
 		t.Fatal(err)
 	}

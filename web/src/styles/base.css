@@ -188,10 +188,11 @@ button.btn.sm { height: 24px; padding: 0 8px; font-size: 10px; }
 }
 
 .page {
-  padding: 20px 24px 40px;
-  max-width: 1400px;
+  padding: 20px 28px 40px;
+  max-width: none;
   width: 100%;
-  margin: 0 auto;
+  margin: 0;
+  box-sizing: border-box;
 }
 .page-title {
   display: flex;

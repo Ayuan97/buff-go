@@ -1,4 +1,4 @@
-// Package collection defines collection targets, runs, pages, and state transitions.
+// Package collection defines collection targets, task queues, and state transitions.
 package collection
 
 import (
@@ -6,6 +6,15 @@ import (
 
 	"buff-go/internal/market"
 )
+
+// QueueWatermark is the per-direction backlog. It is inventory, not concurrency.
+const QueueWatermark = 100
+
+// AskPageSize is one Steam search page.
+const AskPageSize = 10
+
+// BidBatchSize is one Steam orderbook batch.
+const BidBatchSize = 10
 
 // TargetID identifies one controllable summary target.
 type TargetID int64
@@ -18,13 +27,13 @@ func (id TargetID) Validate() error {
 	return nil
 }
 
-// RunID identifies one collection run.
-type RunID int64
+// TaskID identifies one queued collection task.
+type TaskID int64
 
-// Validate rejects a missing run identity.
-func (id RunID) Validate() error {
+// Validate rejects a missing task identity.
+func (id TaskID) Validate() error {
 	if id < 1 {
-		return fmt.Errorf("run_id must be at least 1")
+		return fmt.Errorf("task_id must be at least 1")
 	}
 	return nil
 }
@@ -40,7 +49,7 @@ func (revision Revision) Validate() error {
 	return nil
 }
 
-// Sequence is a positive run or page sequence.
+// Sequence is a positive enqueue or write sequence.
 type Sequence int64
 
 // Validate rejects a missing sequence.
@@ -134,51 +143,6 @@ func (state ActualState) Validate() error {
 	}
 }
 
-// RunState records the lifecycle of one collection run.
-type RunState string
-
-const (
-	RunPending   RunState = "pending"
-	RunRunning   RunState = "running"
-	RunSucceeded RunState = "succeeded"
-	RunFailed    RunState = "failed"
-	RunStopped   RunState = "stopped"
-)
-
-// Validate rejects an unknown run state.
-func (state RunState) Validate() error {
-	switch state {
-	case RunPending, RunRunning, RunSucceeded, RunFailed, RunStopped:
-		return nil
-	default:
-		return fmt.Errorf("invalid run state %q", state)
-	}
-}
-
-// Terminal reports whether no further run mutation is allowed.
-func (state RunState) Terminal() bool {
-	return state == RunSucceeded || state == RunFailed || state == RunStopped
-}
-
-// Completeness describes coverage independently from a terminal run state.
-type Completeness string
-
-const (
-	CompletenessNone     Completeness = ""
-	CompletenessComplete Completeness = "complete"
-	CompletenessPartial  Completeness = "partial"
-)
-
-// ValidateTerminal accepts only explicit terminal coverage.
-func (completeness Completeness) ValidateTerminal() error {
-	switch completeness {
-	case CompletenessComplete, CompletenessPartial:
-		return nil
-	default:
-		return fmt.Errorf("terminal run requires complete or partial completeness")
-	}
-}
-
 // RecoveryMode describes how a target may leave waiting, blocked, or error.
 type RecoveryMode string
 
@@ -236,45 +200,6 @@ func (reason TargetReason) Validate() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid target reason %q", reason)
-	}
-}
-
-// RunReason is a controlled terminal reason for failed or stopped runs.
-type RunReason string
-
-const (
-	RunReasonNone               RunReason = ""
-	RunReasonNetworkError       RunReason = "network_error"
-	RunReasonPlatformError      RunReason = "platform_error"
-	RunReasonTimeout            RunReason = "timeout"
-	RunReasonLoginInvalid       RunReason = "login_invalid"
-	RunReasonParseError         RunReason = "parse_error"
-	RunReasonSemanticError      RunReason = "semantic_error"
-	RunReasonConfigurationError RunReason = "configuration_error"
-	RunReasonInternalError      RunReason = "internal_error"
-	RunReasonProcessRestarted   RunReason = "process_restarted"
-	RunReasonSwitchDisabled     RunReason = "switch_disabled"
-	RunReasonCancelled          RunReason = "cancelled"
-)
-
-// Validate rejects free-form run reasons.
-func (reason RunReason) Validate() error {
-	switch reason {
-	case RunReasonNone,
-		RunReasonNetworkError,
-		RunReasonPlatformError,
-		RunReasonTimeout,
-		RunReasonLoginInvalid,
-		RunReasonParseError,
-		RunReasonSemanticError,
-		RunReasonConfigurationError,
-		RunReasonInternalError,
-		RunReasonProcessRestarted,
-		RunReasonSwitchDisabled,
-		RunReasonCancelled:
-		return nil
-	default:
-		return fmt.Errorf("invalid run reason %q", reason)
 	}
 }
 

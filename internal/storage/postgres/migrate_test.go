@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 12 {
-		t.Fatalf("migration count = %d, want 12", len(migrations))
+	if len(migrations) != 19 {
+		t.Fatalf("migration count = %d, want 19", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -31,6 +31,13 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000010_page_payloads",
 		"000011_product_media_and_page_actor",
 		"000012_target_sort_order",
+		"000013_queue_workers",
+		"000014_drop_node_assignment",
+		"000015_one_claim_per_combination",
+		"000016_target_price_range",
+		"000017_target_steam_facets",
+		"000018_price_ticks",
+		"000019_drop_price_watches",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -664,6 +671,106 @@ func TestTargetSortOrderMigration(t *testing.T) {
 	assertContains(t, compact, "add column sort_dir text collate \"c\" not null default 'asc'")
 	assertContains(t, compact, "sort_column in ('price', 'quantity', 'name')")
 	assertContains(t, compact, "sort_dir in ('asc', 'desc')")
+}
+
+func TestQueueWorkersMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[12].Version != "000013_queue_workers" {
+		t.Fatalf("version[12] = %q", migrations[12].Version)
+	}
+	compact := compactSQL(migrations[12].SQL)
+	assertContains(t, compact, "create table collection_tasks")
+	assertContains(t, compact, "create table collection_latest_pages")
+	assertContains(t, compact, "add column refill_cursor")
+	assertContains(t, compact, "add column write_seq")
+	assertContains(t, compact, "drop table collection_runs")
+	assertContains(t, compact, "drop column run_sequence")
+	assertContains(t, compact, "drop column page_sequence")
+	assertContains(t, compact, "drop column next_run_sequence")
+}
+
+func TestDropNodeAssignmentMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[13].Version != "000014_drop_node_assignment" {
+		t.Fatalf("version[13] = %q", migrations[13].Version)
+	}
+	compact := compactSQL(migrations[13].SQL)
+	assertContains(t, compact, "add constraint account_node_combinations_node_fkey")
+	assertContains(t, compact, "drop table node_direction_assignments")
+	assertContains(t, compact, "drop column appid")
+	assertContains(t, compact, "drop column assignment_revision")
+}
+
+func TestOneClaimPerCombinationMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[14].Version != "000015_one_claim_per_combination" {
+		t.Fatalf("version[14] = %q", migrations[14].Version)
+	}
+	compact := compactSQL(migrations[14].SQL)
+	assertContains(t, compact, "create unique index collection_tasks_claimed_by")
+	assertContains(t, compact, "drop index collection_tasks_claimed_by")
+}
+
+func TestTargetPriceRangeMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[15].Version != "000016_target_price_range" {
+		t.Fatalf("version[15] = %q", migrations[15].Version)
+	}
+	compact := compactSQL(migrations[15].SQL)
+	assertContains(t, compact, "add column price_min_cents bigint")
+	assertContains(t, compact, "add column price_max_cents bigint")
+	assertContains(t, compact, "price_min_cents <= price_max_cents")
+}
+
+func TestTargetSteamFacetsMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[16].Version != "000017_target_steam_facets" {
+		t.Fatalf("version[16] = %q", migrations[16].Version)
+	}
+	compact := compactSQL(migrations[16].SQL)
+	assertContains(t, compact, "add column steam_cats text[]")
+	assertContains(t, compact, "add column item_classes text[]")
+	assertContains(t, compact, "cardinality(steam_cats)")
+}
+
+func TestPriceTicksMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[17].Version != "000018_price_ticks" {
+		t.Fatalf("version[17] = %q", migrations[17].Version)
+	}
+	compact := compactSQL(migrations[17].SQL)
+	assertContains(t, compact, "create table market_price_ticks")
+	assertContains(t, compact, "create table market_price_watches")
+	assertContains(t, compact, "prev_cents is distinct from price_cny_cents")
+}
+
+func TestDropPriceWatchesMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrations[18].Version != "000019_drop_price_watches" {
+		t.Fatalf("version[18] = %q", migrations[18].Version)
+	}
+	assertContains(t, compactSQL(migrations[18].SQL), "drop table if exists market_price_watches")
 }
 
 func tableDefinition(t *testing.T, sqlText, table string) string {

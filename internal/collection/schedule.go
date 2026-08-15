@@ -30,7 +30,7 @@ var (
 	ErrIntegrity = errors.New("collection state is inconsistent")
 	// ErrStorage 表示数据库或基础设施失败。
 	ErrStorage = errors.New("collection storage operation failed")
-	// ErrFence 表示页面来自被禁用目标、旧开关版本或非 running 运行。
+	// ErrFence 表示页面来自被禁用目标或旧开关版本。
 	ErrFence = errors.New("collection page is fenced")
 	// ErrPageOrder 表示页面跳序或游标不衔接。
 	ErrPageOrder = errors.New("collection page is out of order")
@@ -56,32 +56,42 @@ type AttemptWrite struct {
 	Media catalog.ProductMedia
 }
 
-// SummaryPageCommit 是一个显式摘要页面。作用域与因果顺序由持久运行派生，
-// 不接受调用方提交。
+// SummaryPageCommit 是一次成功抓取后写入的当前页。
 type SummaryPageCommit struct {
-	RunID        RunID
-	PageSequence Sequence
-	CursorBefore Cursor
-	CursorAfter  Cursor
-	CollectedAt  time.Time
-	Attempts     []AttemptWrite
-	// Payload 为空表示这一页没有可展示的原始响应，不影响页面本身的提交。
-	Payload []byte
-	// AccountID 与 ExitAddress 是执行这一页的租约身份。存储层无法从运行派生，
-	// 只有持有租约的调度器知道。零值表示未记录。
-	AccountID   int64
-	ExitAddress netip.Addr
+	TargetID       TargetID
+	TaskID         TaskID
+	ExpectedSwitch Revision
+	CursorBefore   Cursor
+	CursorAfter    Cursor
+	CollectedAt    time.Time
+	Attempts       []AttemptWrite
+	Payload        []byte
+	AccountID      int64
+	ExitAddress    netip.Addr
+	AskTotal       int64
 }
 
-// ScheduleStore 是调度器需要的持久化端口，由 storage/postgres 的 Store 满足。
+// ProductCatalog 给求购补货提供目录窗口。
+type ProductCatalog interface {
+	ListSteamProductsAfter(ctx context.Context, appID int64, after catalog.ProductID, limit int) ([]catalog.SteamProduct, error)
+}
+
+// ScheduleStore 是调度器需要的持久化端口。
 type ScheduleStore interface {
 	Targets(ctx context.Context) ([]Target, error)
 	TransitionTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision, transition TargetTransition) (Target, error)
-	CreateSummaryRun(ctx context.Context, targetID TargetID, expectedSwitch Revision, initialCursor Cursor) (Run, bool, error)
-	BeginRun(ctx context.Context, id RunID) (Run, error)
-	FinishRun(ctx context.Context, id RunID, state RunState, completeness Completeness, reason RunReason) (Run, error)
+	QueueDepth(ctx context.Context, id TargetID) (int, error)
+	EnqueueTasks(ctx context.Context, id TargetID, expectedSwitch Revision, specs []EnqueueSpec, cursor Cursor, total int64) error
+	ClearTargetQueue(ctx context.Context, id TargetID) error
+	ClaimTask(ctx context.Context, combinationID resource.CombinationID, platform Platform) (Task, Target, bool, error)
+	ReleaseStaleClaims(ctx context.Context, olderThan time.Duration) (int, error)
+	ReleaseAllClaims(ctx context.Context) (int, error)
+	CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error
+	RequeueTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error
 	CommitSummaryPage(ctx context.Context, input SummaryPageCommit) (Page, bool, error)
-	ListCombinationsFor(ctx context.Context, platform Platform, appID int64, side market.Side) ([]resource.AccountNodeCombination, error)
+	ListCombinationsFor(ctx context.Context, platform Platform) ([]resource.AccountNodeCombination, error)
+	CombinationResources(ctx context.Context, id resource.CombinationID) (resource.CombinationResources, bool, error)
+	ListWorkers(ctx context.Context) ([]WorkerSnapshot, error)
 }
 
 // RateLimitAdmitter 是限频准入端口，由 storage/postgres 的 Store 满足。
@@ -90,28 +100,25 @@ type RateLimitAdmitter interface {
 	ApplyRateLimitFeedback(ctx context.Context, admission ratelimit.Admission, scopes []ratelimit.Scope, reason ratelimit.ReasonCode, cooldown time.Duration) error
 }
 
-// PageFetch 是一次页面请求。凭据由适配器通过租约按需打开，不进入该结构。
+// PageFetch 是一次页面请求。页参数来自队列 payload，凭据由租约打开。
 type PageFetch struct {
-	TaskType     TaskType
-	Platform     Platform
-	AppID        int64
-	Side         market.Side
-	PageSequence Sequence
-	Cursor       Cursor
-	Lease        resource.Lease
-	// Sort 决定平台返回商品的顺序，游标只在同一个顺序下有意义。
-	Sort SortOrder
+	TaskType   TaskType
+	Platform   Platform
+	AppID      int64
+	Side       market.Side
+	Kind       TaskKind
+	Payload    []byte
+	Lease      resource.Lease
+	Sort        SortOrder
+	PriceRange  PriceRange
+	SteamFacets SteamFacets
 }
 
-// FetchedPage 是一次成功页面响应的规整结果。页面采集时间由调度器在响应
-// 处理完成时记录。
+// FetchedPage 是一次成功页面响应的规整结果。
 type FetchedPage struct {
-	CursorAfter Cursor
-	Attempts    []AttemptWrite
-	Final       bool
-	// Payload 是本页的平台原始响应，仅供控制台下钻查看。一页对应多个请求的
-	// 方向留空，采集判定不读它。
-	Payload []byte
+	Attempts   []AttemptWrite
+	Payload    []byte
+	TotalCount int64
 }
 
 // PageFetcher 由平台适配器实现，必须遵守请求 context 的取消与超时。
@@ -126,8 +133,7 @@ var (
 	ErrFetchNetwork = errors.New("platform request failed on the network")
 )
 
-// RateLimitSignal 表示平台返回了限频信号。Scopes 只能选择本次准入实际
-// 应用且有证据支持的范围；Cooldown 为零时使用策略的 fallback 冷却。
+// RateLimitSignal 表示平台返回了限频信号。
 type RateLimitSignal struct {
 	Scopes   []ratelimit.Scope
 	Reason   ratelimit.ReasonCode
@@ -141,28 +147,18 @@ func (signal *RateLimitSignal) Error() string { return "platform signaled rate l
 type PlatformProfile struct {
 	TargetRegion    resource.TargetRegion
 	SummaryEndpoint ratelimit.EndpointClass
-	// BidEndpoint is the independently evidenced bid interface class. Empty
-	// keeps using SummaryEndpoint.
-	BidEndpoint ratelimit.EndpointClass
+	BidEndpoint     ratelimit.EndpointClass
 }
 
 // SchedulerConfig 是单周期调度参数。
 type SchedulerConfig struct {
-	// Profiles 按平台提供线路与接口类别；缺失的平台目标会被标记为
-	// invalid_config 并等待人工修复。
 	Profiles map[Platform]PlatformProfile
 	// PageTimeout 是单个页面请求的最长执行时间。
 	PageTimeout time.Duration
-	// ResourceWait 是单个页面等待可用组合的最长时间。
-	ResourceWait time.Duration
-	// PollInterval 是组合全部被占用时的重试间隔。
-	PollInterval time.Duration
 	// TransientRetry 是临时失败与资源阻塞后的自动复查间隔。
 	TransientRetry time.Duration
-	// SummaryPeriod 是摘要目标成功后的下一周期间隔。
-	SummaryPeriod time.Duration
-	// MaxParallelRuns 是一个周期内并行运行的上限。
-	MaxParallelRuns int
+	// ClaimTimeout 是认领后未完成则回队的时限。
+	ClaimTimeout time.Duration
 	// Clock 缺省为 time.Now，仅用于测试注入。
 	Clock func() time.Time
 }
@@ -186,20 +182,16 @@ func (config SchedulerConfig) validate() error {
 			}
 		}
 	}
-	if config.PageTimeout <= 0 || config.ResourceWait <= 0 || config.PollInterval <= 0 ||
-		config.TransientRetry <= 0 || config.SummaryPeriod <= 0 {
+	if config.PageTimeout <= 0 || config.TransientRetry <= 0 || config.ClaimTimeout <= 0 {
 		return fmt.Errorf("scheduler durations must be positive")
-	}
-	if config.MaxParallelRuns < 1 {
-		return fmt.Errorf("max parallel runs must be at least 1")
 	}
 	return nil
 }
 
-// Scheduler 执行一次调度周期：评估目标、派发运行、按页占用资源并逐页提交。
-// 它不实现常驻循环、停止流转或重启恢复。
+// Scheduler 执行一次调度周期：规划补货，再让空闲工人领任务。
 type Scheduler struct {
 	store       ScheduleStore
+	catalog     ProductCatalog
 	coordinator *resource.Coordinator
 	admitter    RateLimitAdmitter
 	fetcher     PageFetcher
@@ -209,6 +201,7 @@ type Scheduler struct {
 // NewScheduler 校验依赖并创建单周期调度器。
 func NewScheduler(
 	store ScheduleStore,
+	catalog ProductCatalog,
 	coordinator *resource.Coordinator,
 	admitter RateLimitAdmitter,
 	fetcher PageFetcher,
@@ -216,6 +209,9 @@ func NewScheduler(
 ) (*Scheduler, error) {
 	if store == nil {
 		return nil, fmt.Errorf("nil schedule store")
+	}
+	if catalog == nil {
+		return nil, fmt.Errorf("nil product catalog")
 	}
 	if coordinator == nil {
 		return nil, fmt.Errorf("nil resource coordinator")
@@ -234,6 +230,7 @@ func NewScheduler(
 	}
 	return &Scheduler{
 		store:       store,
+		catalog:     catalog,
 		coordinator: coordinator,
 		admitter:    admitter,
 		fetcher:     fetcher,
@@ -241,50 +238,46 @@ func NewScheduler(
 	}, nil
 }
 
-// RunOutcome 记录一个运行在本周期的结果。
-type RunOutcome struct {
-	RunID          RunID
-	AppID          int64
-	State          RunState
-	Completeness   Completeness
-	Reason         RunReason
-	PagesCommitted int
-	// LeftActive 表示运行被保留为续点，等待下一周期继续。
-	LeftActive bool
-	Err        error
-}
-
-// TargetOutcome 记录一个目标在本周期的结果。
+// TargetOutcome 记录一个目标在本周期的规划结果。
 type TargetOutcome struct {
 	TargetID   TargetID
 	TaskType   TaskType
 	Platform   Platform
-	Dispatched bool
-	// Superseded 表示目标状态在周期内被其他所有者（例如禁用请求）接管，
-	// 调度器放弃写回。
+	Enqueued   int
 	Superseded bool
-	// Target 是本周期结束时已知的最新目标状态。
-	Target Target
-	Runs   []RunOutcome
-	Err    error
+	Target     Target
+	Err        error
+}
+
+// WorkerOutcome 记录一个工人在本周期的领取结果。
+type WorkerOutcome struct {
+	CombinationID resource.CombinationID
+	TaskID        TaskID
+	TargetID      TargetID
+	Committed     bool
+	Err           error
 }
 
 // CycleReport 汇总一次调度周期。
 type CycleReport struct {
 	StartedAt time.Time
 	Targets   []TargetOutcome
+	Workers   []WorkerOutcome
 }
 
 func (s *Scheduler) now() time.Time {
 	return s.config.Clock().UTC().Truncate(time.Microsecond)
 }
 
-// RunCycle 执行一次完整调度周期并等待全部派发的运行退出。
+// RunCycle 先回队超时认领，再规划补货，最后让空闲健康工人各领一条。
 func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 	if ctx == nil {
 		return CycleReport{}, fmt.Errorf("nil cycle context")
 	}
 	startedAt := s.now()
+	if _, err := s.store.ReleaseStaleClaims(ctx, s.config.ClaimTimeout); err != nil {
+		return CycleReport{}, fmt.Errorf("release stale claims: %w", err)
+	}
 	targets, err := s.store.Targets(ctx)
 	if err != nil {
 		return CycleReport{}, fmt.Errorf("list collection targets: %w", err)
@@ -293,66 +286,411 @@ func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 	if err != nil {
 		return CycleReport{}, fmt.Errorf("register scheduler component: %w", err)
 	}
-	// 周期结束时所有页面租约都已释放，取消只回收组件登记。
 	defer func() { _ = s.coordinator.CancelComponent(context.Background(), component) }()
 
-	now := s.now()
-	due := make([]Target, 0, len(targets))
+	planned := make([]TargetOutcome, 0, len(targets))
 	for _, target := range targets {
-		if targetDue(target, now) {
-			due = append(due, target)
+		if target.Desired() != DesiredEnabled {
+			continue
 		}
+		planned = append(planned, s.planTarget(ctx, target))
 	}
-
-	semaphore := make(chan struct{}, s.config.MaxParallelRuns)
-	outcomes := make([]TargetOutcome, len(due))
-	var group sync.WaitGroup
-	for index, target := range due {
-		group.Add(1)
-		go func(slot int, target Target) {
-			defer group.Done()
-			outcomes[slot] = s.processTarget(ctx, component, target, semaphore)
-		}(index, target)
-	}
-	group.Wait()
-
-	sort.Slice(outcomes, func(left, right int) bool {
-		return outcomes[left].TargetID < outcomes[right].TargetID
+	sort.Slice(planned, func(left, right int) bool {
+		return planned[left].TargetID < planned[right].TargetID
 	})
-	return CycleReport{StartedAt: startedAt, Targets: outcomes}, nil
+
+	workers, err := s.dispatchWorkers(ctx, component, targets)
+	if err != nil {
+		return CycleReport{StartedAt: startedAt, Targets: planned}, err
+	}
+	return CycleReport{StartedAt: startedAt, Targets: planned, Workers: workers}, nil
 }
 
-// targetDue 判断目标是否应在本周期派发。actual 为 running 的目标同样派发：
-// 单进程串行周期下没有并发所有者；若运行仍活动则续点同一运行，若运行已
-// 终结、仅处置写回失败，则立即新建运行重跑（宁可提前重采也不把目标永久
-// 钉死在 running）。
-func targetDue(target Target, now time.Time) bool {
-	if target.Desired() != DesiredEnabled {
-		return false
+func (s *Scheduler) planTarget(ctx context.Context, target Target) TargetOutcome {
+	outcome := TargetOutcome{
+		TargetID: target.ID(),
+		TaskType: target.TaskType(),
+		Platform: target.Platform(),
+		Target:   target,
 	}
-	switch target.Actual() {
-	case ActualStarting, ActualRunning:
-		return true
-	case ActualWaiting, ActualBlocked:
-		if target.Recovery() != RecoveryAutomatic {
-			return false
+	profile, hasProfile := s.config.Profiles[target.Platform()]
+	if !hasProfile || profile.TargetRegion.Validate() != nil {
+		outcome.Target, outcome.Superseded, outcome.Err =
+			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonInvalidConfig, time.Time{}))
+		return outcome
+	}
+	healthy, err := s.healthyWorkerCount(ctx, target.Platform(), profile.TargetRegion)
+	if err != nil {
+		outcome.Err = err
+		return outcome
+	}
+	if healthy == 0 {
+		outcome.Target, outcome.Superseded, outcome.Err =
+			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonNoCombination, s.now().Add(s.config.TransientRetry)))
+		return outcome
+	}
+	depth, err := s.store.QueueDepth(ctx, target.ID())
+	if err != nil {
+		outcome.Err = err
+		return outcome
+	}
+	if depth >= QueueWatermark {
+		outcome.Target, outcome.Superseded, outcome.Err =
+			s.applyDisposition(ctx, target, runningDisposition())
+		return outcome
+	}
+	specs, cursor, total, err := s.buildRefill(ctx, target, QueueWatermark-depth)
+	if err != nil {
+		outcome.Err = err
+		return outcome
+	}
+	if len(specs) > 0 {
+		if err := s.store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), specs, cursor, total); err != nil {
+			if errors.Is(err, ErrFence) || errors.Is(err, ErrConflict) || errors.Is(err, ErrTargetDisabled) {
+				outcome.Superseded = true
+				return outcome
+			}
+			outcome.Err = err
+			return outcome
 		}
-		recheckAt, ok := target.RecheckAt()
-		return ok && !now.Before(recheckAt)
-	default:
-		return false
+		outcome.Enqueued = len(specs)
 	}
+	outcome.Target, outcome.Superseded, outcome.Err =
+		s.applyDisposition(ctx, target, runningDisposition())
+	return outcome
+}
+
+func (s *Scheduler) buildRefill(ctx context.Context, target Target, need int) ([]EnqueueSpec, Cursor, int64, error) {
+	side, ok := target.Side()
+	if !ok {
+		return nil, Cursor{}, 0, fmt.Errorf("target side is required")
+	}
+	appID, ok := target.AppID()
+	if !ok {
+		return nil, Cursor{}, 0, fmt.Errorf("target appid is required")
+	}
+	if side == market.SideAsk {
+		return s.buildAskRefill(target, need)
+	}
+	return s.buildBidRefill(ctx, target, appID, need)
+}
+
+func (s *Scheduler) buildAskRefill(target Target, need int) ([]EnqueueSpec, Cursor, int64, error) {
+	start, err := DecodeAskRefill(target.RefillCursor())
+	if err != nil {
+		return nil, Cursor{}, 0, err
+	}
+	total := target.RefillTotal()
+	specs := make([]EnqueueSpec, 0, need)
+	for i := 0; i < need; i++ {
+		payload, err := EncodeAskPage(start, AskPageSize)
+		if err != nil {
+			return nil, Cursor{}, 0, err
+		}
+		specs = append(specs, EnqueueSpec{Kind: TaskKindAskPage, Payload: payload})
+		start += AskPageSize
+		if total > 0 && int64(start) >= total {
+			start = 0
+		}
+	}
+	cursor, err := EncodeAskRefill(start)
+	if err != nil {
+		return nil, Cursor{}, 0, err
+	}
+	return specs, cursor, total, nil
+}
+
+func (s *Scheduler) buildBidRefill(ctx context.Context, target Target, appID int64, need int) ([]EnqueueSpec, Cursor, int64, error) {
+	after, err := DecodeBidRefill(target.RefillCursor())
+	if err != nil {
+		return nil, Cursor{}, 0, err
+	}
+	specs := make([]EnqueueSpec, 0, need)
+	wrapped := false
+	for i := 0; i < need; i++ {
+		products, err := s.catalog.ListSteamProductsAfter(ctx, appID, after, BidBatchSize)
+		if err != nil {
+			return nil, Cursor{}, 0, err
+		}
+		if len(products) == 0 {
+			if after == 0 || wrapped {
+				break
+			}
+			after = 0
+			wrapped = true
+			products, err = s.catalog.ListSteamProductsAfter(ctx, appID, 0, BidBatchSize)
+			if err != nil {
+				return nil, Cursor{}, 0, err
+			}
+			if len(products) == 0 {
+				break
+			}
+		}
+		payload, err := EncodeBidBatch(after, BidBatchSize)
+		if err != nil {
+			return nil, Cursor{}, 0, err
+		}
+		specs = append(specs, EnqueueSpec{Kind: TaskKindBidBatch, Payload: payload})
+		after = products[len(products)-1].ProductID
+	}
+	cursor, err := EncodeBidRefill(after)
+	if err != nil {
+		return nil, Cursor{}, 0, err
+	}
+	return specs, cursor, 0, nil
+}
+
+func (s *Scheduler) healthyWorkerCount(ctx context.Context, platform Platform, region resource.TargetRegion) (int, error) {
+	combinations, err := s.store.ListCombinationsFor(ctx, platform)
+	if err != nil {
+		return 0, err
+	}
+	now := s.now()
+	count := 0
+	for _, combination := range combinations {
+		resources, found, err := s.store.CombinationResources(ctx, combination.ID)
+		if err != nil || !found {
+			if err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if resources.ValidateForUse(now, region) == nil {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *Scheduler) dispatchWorkers(
+	ctx context.Context,
+	component resource.ComponentID,
+	targets []Target,
+) ([]WorkerOutcome, error) {
+	platforms := make(map[Platform]struct{})
+	for _, target := range targets {
+		if target.Desired() == DesiredEnabled {
+			platforms[target.Platform()] = struct{}{}
+		}
+	}
+	seen := make(map[resource.CombinationID]struct{})
+	jobs := make([]resource.AccountNodeCombination, 0)
+	for platform := range platforms {
+		combinations, err := s.store.ListCombinationsFor(ctx, platform)
+		if err != nil {
+			return nil, err
+		}
+		profile := s.config.Profiles[platform]
+		now := s.now()
+		for _, combination := range combinations {
+			if _, exists := seen[combination.ID]; exists {
+				continue
+			}
+			resources, found, err := s.store.CombinationResources(ctx, combination.ID)
+			if err != nil || !found {
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if resources.ValidateForUse(now, profile.TargetRegion) != nil {
+				continue
+			}
+			seen[combination.ID] = struct{}{}
+			jobs = append(jobs, combination)
+		}
+	}
+	outcomes := make([]WorkerOutcome, len(jobs))
+	var group sync.WaitGroup
+	for index, combination := range jobs {
+		group.Add(1)
+		go func(slot int, combination resource.AccountNodeCombination) {
+			defer group.Done()
+			outcomes[slot] = s.runWorker(ctx, component, combination)
+		}(index, combination)
+	}
+	group.Wait()
+	sort.Slice(outcomes, func(left, right int) bool {
+		return outcomes[left].CombinationID < outcomes[right].CombinationID
+	})
+	return outcomes, nil
+}
+
+func (s *Scheduler) runWorker(
+	ctx context.Context,
+	component resource.ComponentID,
+	combination resource.AccountNodeCombination,
+) WorkerOutcome {
+	outcome := WorkerOutcome{CombinationID: combination.ID}
+	profile, ok := s.config.Profiles[Platform(combination.Platform)]
+	if !ok {
+		return outcome
+	}
+	lease, err := s.coordinator.AcquireCombination(ctx, component, combination.ID, profile.TargetRegion, s.now())
+	if err != nil {
+		if !errors.Is(err, resource.ErrResourceOccupied) &&
+			!errors.Is(err, resource.ErrAccountSessionUnusable) &&
+			!errors.Is(err, resource.ErrResourceUnusable) {
+			outcome.Err = err
+		}
+		return outcome
+	}
+	defer func() { _ = s.coordinator.Release(lease.Token) }()
+
+	task, target, found, err := s.store.ClaimTask(ctx, combination.ID, Platform(combination.Platform))
+	if err != nil {
+		outcome.Err = err
+		return outcome
+	}
+	if !found {
+		return outcome
+	}
+	outcome.TaskID = task.ID()
+	outcome.TargetID = target.ID()
+	return s.executeTask(ctx, lease, task, target, outcome)
+}
+
+func (s *Scheduler) executeTask(
+	ctx context.Context,
+	lease resource.Lease,
+	task Task,
+	target Target,
+	outcome WorkerOutcome,
+) WorkerOutcome {
+	side, _ := target.Side()
+	appID, _ := target.AppID()
+	profile := s.config.Profiles[target.Platform()]
+	endpoint := profile.SummaryEndpoint
+	if side == market.SideBid && profile.BidEndpoint != "" {
+		endpoint = profile.BidEndpoint
+	}
+	request, err := ratelimit.RequestFromLease(lease, endpoint)
+	if err != nil {
+		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+		outcome.Err = err
+		return outcome
+	}
+	decision, err := s.admitter.AdmitRateLimit(ctx, request)
+	if err != nil {
+		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+		outcome.Err = err
+		return outcome
+	}
+	if !decision.Allowed() {
+		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+		return outcome
+	}
+	admission := decision.Admission()
+
+	fetchCtx, cancel := context.WithTimeout(lease.Context(), s.config.PageTimeout)
+	fetched, err := s.fetcher.FetchPage(fetchCtx, PageFetch{
+		TaskType:   target.TaskType(),
+		Platform:   target.Platform(),
+		AppID:      appID,
+		Side:       side,
+		Kind:       task.Kind(),
+		Payload:    task.Payload(),
+		Lease:      lease,
+		Sort:        target.Sort(),
+		PriceRange:  target.PriceRange(),
+		SteamFacets: target.SteamFacets(),
+	})
+	deadlineHit := errors.Is(fetchCtx.Err(), context.DeadlineExceeded)
+	cancel()
+	if err != nil {
+		return s.mapFetchError(ctx, lease, task, target, admission, err, deadlineHit, outcome)
+	}
+
+	cursorBefore, err := taskCursor(task)
+	if err != nil {
+		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+		outcome.Err = err
+		return outcome
+	}
+	collectedAt := s.now()
+	_, _, err = s.store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID:       target.ID(),
+		TaskID:         task.ID(),
+		ExpectedSwitch: target.SwitchVersion(),
+		CursorBefore:   cursorBefore,
+		CursorAfter:    Cursor{},
+		CollectedAt:    collectedAt,
+		Attempts:       fetched.Attempts,
+		Payload:        fetched.Payload,
+		AccountID:      int64(lease.Snapshot.AccountID),
+		ExitAddress:    lease.Snapshot.ExitAddress,
+		AskTotal:       fetched.TotalCount,
+	})
+	if err != nil {
+		if errors.Is(err, ErrFence) || errors.Is(err, ErrTargetDisabled) || errors.Is(err, ErrConflict) {
+			_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+			return outcome
+		}
+		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+		outcome.Err = err
+		return outcome
+	}
+	if err := s.store.CompleteTask(ctx, task.ID(), lease.Snapshot.CombinationID); err != nil {
+		outcome.Err = err
+		return outcome
+	}
+	outcome.Committed = true
+	return outcome
+}
+
+func taskCursor(task Task) (Cursor, error) {
+	switch task.Kind() {
+	case TaskKindAskPage:
+		page, err := task.AskPage()
+		if err != nil {
+			return Cursor{}, err
+		}
+		return EncodeAskRefill(page.Start)
+	case TaskKindBidBatch:
+		batch, err := task.BidBatch()
+		if err != nil {
+			return Cursor{}, err
+		}
+		return EncodeBidRefill(batch.AfterID)
+	default:
+		return Cursor{}, fmt.Errorf("unknown task kind")
+	}
+}
+
+func (s *Scheduler) mapFetchError(
+	ctx context.Context,
+	lease resource.Lease,
+	task Task,
+	target Target,
+	admission ratelimit.Admission,
+	fetchErr error,
+	deadlineHit bool,
+	outcome WorkerOutcome,
+) WorkerOutcome {
+	_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+	var signal *RateLimitSignal
+	switch {
+	case errors.As(fetchErr, &signal):
+		if err := s.admitter.ApplyRateLimitFeedback(ctx, admission, signal.Scopes, signal.Reason, signal.Cooldown); err != nil {
+			outcome.Err = err
+		}
+	case errors.Is(fetchErr, ErrFetchSessionInvalid):
+		// 账号失效由适配器落库；任务已回队，本工人本周期停领。
+	case deadlineHit, errors.Is(fetchErr, context.DeadlineExceeded), errors.Is(fetchErr, ErrFetchNetwork):
+		_, _, _ = s.applyDisposition(ctx, target, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)))
+	default:
+		outcome.Err = fetchErr
+	}
+	return outcome
 }
 
 type dispositionKind int
 
 const (
-	dispositionCompleted dispositionKind = iota
+	dispositionRunning dispositionKind = iota
 	dispositionWaiting
 	dispositionBlocked
 	dispositionError
-	// dispositionDetached 表示目标状态归其他所有者（禁用流程或恢复流程），
-	// 本周期不再改写。
 	dispositionDetached
 )
 
@@ -360,6 +698,10 @@ type disposition struct {
 	kind      dispositionKind
 	reason    TargetReason
 	recheckAt time.Time
+}
+
+func runningDisposition() disposition {
+	return disposition{kind: dispositionRunning}
 }
 
 func waitingDisposition(reason TargetReason, recheckAt time.Time) disposition {
@@ -370,501 +712,34 @@ func blockedDisposition(reason TargetReason, recheckAt time.Time) disposition {
 	return disposition{kind: dispositionBlocked, reason: reason, recheckAt: recheckAt}
 }
 
-func errorDisposition(reason TargetReason) disposition {
-	return disposition{kind: dispositionError, reason: reason}
-}
-
-type runSpec struct {
-	appID    int64
-	endpoint ratelimit.EndpointClass
-}
-
-func (s *Scheduler) processTarget(
-	ctx context.Context,
-	component resource.ComponentID,
-	target Target,
-	semaphore chan struct{},
-) TargetOutcome {
-	outcome := TargetOutcome{
-		TargetID: target.ID(),
-		TaskType: target.TaskType(),
-		Platform: target.Platform(),
-		Target:   target,
+func (s *Scheduler) applyDisposition(ctx context.Context, target Target, disp disposition) (Target, bool, error) {
+	if target.Desired() != DesiredEnabled {
+		return target, true, nil
 	}
-	profile, hasProfile := s.config.Profiles[target.Platform()]
-	spec, specErr := buildRunSpec(target, profile, hasProfile)
-	if specErr != nil {
-		outcome.Target, outcome.Superseded, outcome.Err =
-			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonInvalidConfig, time.Time{}))
-		return outcome
-	}
-
-	updated, err := s.store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(),
-		TargetTransition{State: ActualRunning})
-	if errors.Is(err, ErrConflict) {
-		outcome.Superseded = true
-		return outcome
-	}
-	if err != nil {
-		outcome.Err = fmt.Errorf("mark target running: %w", err)
-		return outcome
-	}
-	target = updated
-	outcome.Target = target
-	outcome.Dispatched = true
-
-	semaphore <- struct{}{}
-	runOutcome, disp := s.executeRun(ctx, component, target, spec)
-	<-semaphore
-	outcome.Runs = []RunOutcome{runOutcome}
-	outcome.Err = runOutcome.Err
-	if disp.kind == dispositionDetached {
-		return outcome
-	}
-	if disp.kind == dispositionCompleted {
-		disp = s.completedDisposition()
-	}
-	var applyErr error
-	outcome.Target, outcome.Superseded, applyErr = s.applyDisposition(ctx, target, disp)
-	outcome.Err = errors.Join(outcome.Err, applyErr)
-	return outcome
-}
-
-func buildRunSpec(target Target, profile PlatformProfile, hasProfile bool) (runSpec, error) {
-	if !hasProfile {
-		return runSpec{}, fmt.Errorf("platform profile is missing")
-	}
-	if target.TaskType() != TaskTypeSummary {
-		return runSpec{}, fmt.Errorf("detail targets are not schedulable")
-	}
-	if profile.SummaryEndpoint == "" {
-		return runSpec{}, fmt.Errorf("summary endpoint class is missing")
-	}
-	endpoint := profile.SummaryEndpoint
-	if side, ok := target.Side(); ok && side == market.SideBid && profile.BidEndpoint != "" {
-		endpoint = profile.BidEndpoint
-	}
-	appID, ok := target.AppID()
-	if !ok || appID < 1 {
-		return runSpec{}, fmt.Errorf("summary target appid is missing")
-	}
-	return runSpec{appID: appID, endpoint: endpoint}, nil
-}
-
-func (s *Scheduler) completedDisposition() disposition {
-	return waitingDisposition(TargetReasonNextCycle, s.now().Add(s.config.SummaryPeriod))
-}
-
-// applyDisposition 把处置写回目标状态；CAS 冲突表示状态已被其他所有者接管，
-// 返回 superseded 供报告观测。写回失败时目标留在 running，下一周期照常派发。
-func (s *Scheduler) applyDisposition(ctx context.Context, target Target, final disposition) (Target, bool, error) {
-	transition := TargetTransition{}
-	switch final.kind {
+	var transition TargetTransition
+	switch disp.kind {
+	case dispositionRunning:
+		transition = TargetTransition{State: ActualRunning}
 	case dispositionWaiting:
-		recheck := s.ensureFuture(final.recheckAt)
-		transition = TargetTransition{State: ActualWaiting, Reason: final.reason, RecheckAt: &recheck}
+		recheck := disp.recheckAt
+		transition = TargetTransition{State: ActualWaiting, Reason: disp.reason, RecheckAt: &recheck}
 	case dispositionBlocked:
-		transition = TargetTransition{State: ActualBlocked, Reason: final.reason}
-		if recovery, ok := blockedRecovery(final.reason); ok && recovery == RecoveryAutomatic {
-			recheck := s.ensureFuture(final.recheckAt)
+		transition = TargetTransition{State: ActualBlocked, Reason: disp.reason}
+		if !disp.recheckAt.IsZero() {
+			recheck := disp.recheckAt
 			transition.RecheckAt = &recheck
 		}
 	case dispositionError:
-		transition = TargetTransition{State: ActualError, Reason: final.reason}
+		transition = TargetTransition{State: ActualError, Reason: disp.reason}
 	default:
-		return target, false, fmt.Errorf("disposition cannot be applied")
+		return target, true, nil
 	}
-	updated, err := s.store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), transition)
+	next, err := s.store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), transition)
 	if errors.Is(err, ErrConflict) {
 		return target, true, nil
 	}
 	if err != nil {
-		return target, false, fmt.Errorf("apply target disposition: %w", err)
+		return target, false, err
 	}
-	return updated, false, nil
-}
-
-func (s *Scheduler) ensureFuture(at time.Time) time.Time {
-	now := s.now()
-	if at.After(now) {
-		return at.UTC().Truncate(time.Microsecond)
-	}
-	return now.Add(s.config.PollInterval)
-}
-
-func (s *Scheduler) executeRun(
-	ctx context.Context,
-	component resource.ComponentID,
-	target Target,
-	spec runSpec,
-) (RunOutcome, disposition) {
-	outcome := RunOutcome{AppID: spec.appID}
-	run, _, err := s.store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), Cursor{})
-	if err != nil {
-		if errors.Is(err, ErrTargetDisabled) || errors.Is(err, ErrConflict) {
-			return outcome, disposition{kind: dispositionDetached}
-		}
-		outcome.Err = fmt.Errorf("create run: %w", err)
-		return outcome, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry))
-	}
-	outcome.RunID = run.ID()
-	if run.State() == RunPending {
-		run, err = s.store.BeginRun(ctx, run.ID())
-		if err != nil {
-			if errors.Is(err, ErrTargetDisabled) || errors.Is(err, ErrConflict) {
-				return outcome, disposition{kind: dispositionDetached}
-			}
-			outcome.Err = fmt.Errorf("begin run: %w", err)
-			outcome.LeftActive = true
-			return outcome, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry))
-		}
-	}
-	outcome.State = run.State()
-	side, _ := target.Side()
-
-	for {
-		if ctx.Err() != nil {
-			return s.stopRun(ctx, run, outcome)
-		}
-		lease, acquireDisp, acquired := s.acquireLease(ctx, component, target.Platform(), spec.appID, side)
-		if !acquired {
-			if acquireDisp.kind == dispositionDetached {
-				return s.stopRun(ctx, run, outcome)
-			}
-			outcome.State = run.State()
-			outcome.LeftActive = true
-			return outcome, acquireDisp
-		}
-		pageOutcome := s.executePage(ctx, target, spec, run, lease)
-		run = pageOutcome.run
-		if pageOutcome.committed {
-			outcome.PagesCommitted++
-		}
-		if pageOutcome.err != nil {
-			outcome.Err = pageOutcome.err
-		}
-		if !pageOutcome.stop {
-			continue
-		}
-		if pageOutcome.finished {
-			outcome.State = pageOutcome.state
-			outcome.Completeness = pageOutcome.completeness
-			outcome.Reason = pageOutcome.reason
-		} else {
-			outcome.State = run.State()
-			outcome.LeftActive = true
-		}
-		return outcome, pageOutcome.disp
-	}
-}
-
-// stopRun 在周期取消时结束运行；目标状态留给恢复流程。
-func (s *Scheduler) stopRun(ctx context.Context, run Run, outcome RunOutcome) (RunOutcome, disposition) {
-	finished, err := s.store.FinishRun(context.WithoutCancel(ctx), run.ID(), RunStopped, CompletenessPartial, RunReasonCancelled)
-	if err != nil {
-		outcome.Err = fmt.Errorf("stop cancelled run: %w", err)
-		outcome.LeftActive = true
-		return outcome, disposition{kind: dispositionDetached}
-	}
-	outcome.State = finished.State()
-	outcome.Completeness = finished.Completeness()
-	outcome.Reason = finished.Reason()
-	return outcome, disposition{kind: dispositionDetached}
-}
-
-type pageOutcome struct {
-	run          Run
-	committed    bool
-	stop         bool
-	finished     bool
-	state        RunState
-	completeness Completeness
-	reason       RunReason
-	disp         disposition
-	err          error
-}
-
-// executePage 在一次租约占用内完成准入、请求与提交；返回前释放租约。
-func (s *Scheduler) executePage(
-	ctx context.Context,
-	target Target,
-	spec runSpec,
-	run Run,
-	lease resource.Lease,
-) pageOutcome {
-	defer func() { _ = s.coordinator.Release(lease.Token) }()
-	outcome := pageOutcome{run: run}
-
-	request, err := ratelimit.RequestFromLease(lease, spec.endpoint)
-	if err != nil {
-		outcome.stop = true
-		outcome.disp = errorDisposition(TargetReasonSchedulerFailure)
-		outcome.err = fmt.Errorf("build rate-limit request: %w", err)
-		return outcome
-	}
-	decision, err := s.admitter.AdmitRateLimit(ctx, request)
-	if err != nil {
-		outcome.stop = true
-		if errors.Is(err, ratelimit.ErrPolicyUnavailable) {
-			outcome.disp = blockedDisposition(TargetReasonMissingRatePolicy, time.Time{})
-			return outcome
-		}
-		outcome.disp = waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry))
-		outcome.err = fmt.Errorf("rate-limit admission: %w", err)
-		return outcome
-	}
-	if !decision.Allowed() {
-		outcome.stop = true
-		outcome.disp = blockedDisposition(TargetReasonCooldown, decision.RetryAt())
-		return outcome
-	}
-	admission := decision.Admission()
-
-	pageSequence := Sequence(run.LastPageSequence() + 1)
-	side, _ := target.Side()
-	fetchCtx, cancel := context.WithTimeout(lease.Context(), s.config.PageTimeout)
-	fetched, err := s.fetcher.FetchPage(fetchCtx, PageFetch{
-		TaskType:     target.TaskType(),
-		Platform:     target.Platform(),
-		AppID:        spec.appID,
-		Side:         side,
-		PageSequence: pageSequence,
-		Cursor:       run.CurrentCursor(),
-		Lease:        lease,
-		Sort:         target.Sort(),
-	})
-	deadlineHit := errors.Is(fetchCtx.Err(), context.DeadlineExceeded)
-	cancel()
-	if err != nil {
-		return s.mapFetchError(ctx, run, admission, err, deadlineHit, outcome)
-	}
-
-	// 页面与 attempt 的采集时间都以运行开始时间为下界，避免应用与数据库
-	// 时钟偏斜把合法页面判成非法输入。
-	collectedAt := s.now()
-	attempts := fetched.Attempts
-	if startedAt, started := run.StartedAt(); started {
-		if collectedAt.Before(startedAt) {
-			collectedAt = startedAt
-		}
-		attempts = clampAttemptTimes(attempts, startedAt)
-	}
-	page, _, err := s.store.CommitSummaryPage(ctx, SummaryPageCommit{
-		RunID:        run.ID(),
-		PageSequence: pageSequence,
-		CursorBefore: run.CurrentCursor(),
-		CursorAfter:  fetched.CursorAfter,
-		CollectedAt:  collectedAt,
-		Attempts:     attempts,
-		Payload:      fetched.Payload,
-		AccountID:    int64(lease.Snapshot.AccountID),
-		ExitAddress:  lease.Snapshot.ExitAddress,
-	})
-	if err != nil {
-		return s.mapCommitError(ctx, run, err, outcome)
-	}
-	advanced, err := run.CommitPage(page)
-	if err != nil {
-		outcome.err = fmt.Errorf("advance run cursor: %w", err)
-		return s.finishRun(ctx, run, RunFailed, RunReasonInternalError, errorDisposition(TargetReasonStateIntegrity), outcome)
-	}
-	outcome.run = advanced
-	outcome.committed = true
-	if fetched.Final {
-		return s.succeedRun(ctx, advanced, outcome)
-	}
-	return outcome
-}
-
-// clampAttemptTimes 把早于运行开始时间的 attempt 观测时间抬到下界，
-// 与页面采集时间的钳制口径一致；没有越界时直接复用原切片。
-func clampAttemptTimes(attempts []AttemptWrite, floor time.Time) []AttemptWrite {
-	needsClamp := false
-	for _, attempt := range attempts {
-		if attempt.Observation.CollectedAt.Before(floor) {
-			needsClamp = true
-			break
-		}
-	}
-	if !needsClamp {
-		return attempts
-	}
-	clamped := make([]AttemptWrite, len(attempts))
-	copy(clamped, attempts)
-	for i := range clamped {
-		if clamped[i].Observation.CollectedAt.Before(floor) {
-			clamped[i].Observation.CollectedAt = floor
-		}
-	}
-	return clamped
-}
-
-func (s *Scheduler) mapFetchError(
-	ctx context.Context,
-	run Run,
-	admission ratelimit.Admission,
-	fetchErr error,
-	deadlineHit bool,
-	outcome pageOutcome,
-) pageOutcome {
-	var signal *RateLimitSignal
-	switch {
-	case errors.As(fetchErr, &signal):
-		if err := s.admitter.ApplyRateLimitFeedback(ctx, admission, signal.Scopes, signal.Reason, signal.Cooldown); err != nil {
-			outcome.err = fmt.Errorf("apply rate-limit feedback: %w", err)
-		}
-		recheck := s.now().Add(s.config.TransientRetry)
-		if signal.Cooldown > 0 {
-			recheck = s.now().Add(signal.Cooldown)
-		}
-		outcome.stop = true
-		outcome.disp = blockedDisposition(TargetReasonCooldown, recheck)
-		return outcome
-	case errors.Is(fetchErr, ErrFetchSessionInvalid):
-		return s.finishRun(ctx, run, RunFailed, RunReasonLoginInvalid, blockedDisposition(TargetReasonSessionInvalid, time.Time{}), outcome)
-	case ctx.Err() != nil:
-		stopped, disp := s.stopRun(ctx, run, RunOutcome{})
-		outcome.stop = true
-		outcome.finished = !stopped.LeftActive
-		outcome.state = stopped.State
-		outcome.completeness = stopped.Completeness
-		outcome.reason = stopped.Reason
-		outcome.disp = disp
-		outcome.err = stopped.Err
-		return outcome
-	case deadlineHit || errors.Is(fetchErr, context.DeadlineExceeded):
-		return s.finishRun(ctx, run, RunFailed, RunReasonTimeout,
-			waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), outcome)
-	case errors.Is(fetchErr, ErrFetchNetwork):
-		return s.finishRun(ctx, run, RunFailed, RunReasonNetworkError,
-			waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), outcome)
-	default:
-		return s.finishRun(ctx, run, RunFailed, RunReasonPlatformError,
-			waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), outcome)
-	}
-}
-
-func (s *Scheduler) mapCommitError(ctx context.Context, run Run, commitErr error, outcome pageOutcome) pageOutcome {
-	switch {
-	case errors.Is(commitErr, ErrFence), errors.Is(commitErr, ErrTargetDisabled):
-		return s.finishRun(ctx, run, RunStopped, RunReasonSwitchDisabled, disposition{kind: dispositionDetached}, outcome)
-	case errors.Is(commitErr, ErrInvalidInput):
-		outcome.err = fmt.Errorf("commit page: %w", commitErr)
-		return s.finishRun(ctx, run, RunFailed, RunReasonSemanticError,
-			waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), outcome)
-	case errors.Is(commitErr, ErrPageOrder), errors.Is(commitErr, ErrPageConflict), errors.Is(commitErr, ErrIntegrity):
-		outcome.err = fmt.Errorf("commit page: %w", commitErr)
-		return s.finishRun(ctx, run, RunFailed, RunReasonInternalError, errorDisposition(TargetReasonStateIntegrity), outcome)
-	default:
-		outcome.err = fmt.Errorf("commit page: %w", commitErr)
-		outcome.stop = true
-		outcome.disp = waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry))
-		return outcome
-	}
-}
-
-func (s *Scheduler) finishRun(
-	ctx context.Context,
-	run Run,
-	state RunState,
-	reason RunReason,
-	disp disposition,
-	outcome pageOutcome,
-) pageOutcome {
-	finished, err := s.store.FinishRun(context.WithoutCancel(ctx), run.ID(), state, CompletenessPartial, reason)
-	outcome.stop = true
-	outcome.disp = disp
-	if err != nil {
-		if outcome.err == nil {
-			outcome.err = fmt.Errorf("finish run: %w", err)
-		}
-		return outcome
-	}
-	outcome.finished = true
-	outcome.state = finished.State()
-	outcome.completeness = finished.Completeness()
-	outcome.reason = finished.Reason()
-	outcome.run = finished
-	return outcome
-}
-
-func (s *Scheduler) succeedRun(ctx context.Context, run Run, outcome pageOutcome) pageOutcome {
-	finished, err := s.store.FinishRun(context.WithoutCancel(ctx), run.ID(), RunSucceeded, CompletenessComplete, RunReasonNone)
-	outcome.stop = true
-	outcome.disp = disposition{kind: dispositionCompleted}
-	if err != nil {
-		outcome.err = fmt.Errorf("finish successful run: %w", err)
-		outcome.disp = waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry))
-		return outcome
-	}
-	outcome.finished = true
-	outcome.state = finished.State()
-	outcome.completeness = finished.Completeness()
-	outcome.reason = finished.Reason()
-	outcome.run = finished
-	return outcome
-}
-
-// acquireLease 为一个页面请求占用一个可用组合。被占用时按 PollInterval
-// 有界等待；没有任何组合或全部不可用时返回对应阻塞处置。
-func (s *Scheduler) acquireLease(
-	ctx context.Context,
-	component resource.ComponentID,
-	platform Platform,
-	appID int64,
-	side market.Side,
-) (resource.Lease, disposition, bool) {
-	region := s.config.Profiles[platform].TargetRegion
-	deadline := time.Now().Add(s.config.ResourceWait)
-	for {
-		if ctx.Err() != nil {
-			return resource.Lease{}, disposition{kind: dispositionDetached}, false
-		}
-		combinations, err := s.store.ListCombinationsFor(ctx, platform, appID, side)
-		if err != nil {
-			return resource.Lease{}, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), false
-		}
-		if len(combinations) == 0 {
-			return resource.Lease{}, blockedDisposition(TargetReasonNoCombination, s.now().Add(s.config.TransientRetry)), false
-		}
-		occupied := false
-		infrastructure := false
-		sessionUnusable := false
-		nodeUnusable := false
-		for _, combination := range combinations {
-			lease, err := s.coordinator.AcquireCombination(ctx, component, combination.ID, region, s.now(), appID, side)
-			if err == nil {
-				return lease, disposition{}, true
-			}
-			switch {
-			case errors.Is(err, resource.ErrResourceOccupied):
-				occupied = true
-			case errors.Is(err, resource.ErrComponentUnavailable), ctx.Err() != nil:
-				return resource.Lease{}, disposition{kind: dispositionDetached}, false
-			case errors.Is(err, resource.ErrAccountSessionUnusable):
-				sessionUnusable = true
-			case errors.Is(err, resource.ErrResourceUnusable), errors.Is(err, resource.ErrCombinationNotFound):
-				nodeUnusable = true
-			default:
-				infrastructure = true
-			}
-		}
-		if !occupied {
-			if infrastructure {
-				return resource.Lease{}, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)), false
-			}
-			if sessionUnusable && !nodeUnusable {
-				return resource.Lease{}, blockedDisposition(TargetReasonSessionInvalid, time.Time{}), false
-			}
-			return resource.Lease{}, blockedDisposition(TargetReasonEgressUnavailable, s.now().Add(s.config.TransientRetry)), false
-		}
-		if time.Now().After(deadline) {
-			return resource.Lease{}, waitingDisposition(TargetReasonSchedulerOpportunity, s.now().Add(s.config.TransientRetry)), false
-		}
-		select {
-		case <-ctx.Done():
-			return resource.Lease{}, disposition{kind: dispositionDetached}, false
-		case <-time.After(s.config.PollInterval):
-		}
-	}
+	return next, false, nil
 }

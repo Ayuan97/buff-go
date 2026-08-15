@@ -12,6 +12,7 @@ import (
 	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
+	"buff-go/internal/resource"
 	"buff-go/internal/storage/postgres"
 )
 
@@ -20,6 +21,8 @@ type collectionServiceStub struct {
 	deleted bool
 	desired collection.DesiredState
 	sort    collection.SortOrder
+	bounds  collection.PriceRange
+	facets  collection.SteamFacets
 	err     error
 }
 
@@ -86,6 +89,28 @@ func (s *collectionServiceStub) SetTargetSortOrder(_ context.Context, id collect
 	return s.sample(), nil
 }
 
+func (s *collectionServiceStub) SetTargetPriceRange(_ context.Context, id collection.TargetID, _ collection.Revision, bounds collection.PriceRange) (collection.Target, error) {
+	if s.err != nil {
+		return collection.Target{}, s.err
+	}
+	if id != 4 {
+		return collection.Target{}, collection.ErrNotFound
+	}
+	s.bounds = bounds
+	return s.sample(), nil
+}
+
+func (s *collectionServiceStub) SetTargetSteamFacets(_ context.Context, id collection.TargetID, _ collection.Revision, facets collection.SteamFacets) (collection.Target, error) {
+	if s.err != nil {
+		return collection.Target{}, s.err
+	}
+	if id != 4 {
+		return collection.Target{}, collection.ErrNotFound
+	}
+	s.facets = facets
+	return s.sample(), nil
+}
+
 func (s *collectionServiceStub) DeleteTarget(_ context.Context, id collection.TargetID) error {
 	if s.err != nil {
 		return s.err
@@ -97,72 +122,37 @@ func (s *collectionServiceStub) DeleteTarget(_ context.Context, id collection.Ta
 	return nil
 }
 
-func (s *collectionServiceStub) PageSummaries(_ context.Context, id collection.RunID) ([]postgres.PageSummary, error) {
+func (s *collectionServiceStub) ListWorkers(context.Context) ([]collection.WorkerSnapshot, error) {
 	if s.err != nil {
 		return nil, s.err
-	}
-	if id != 9 {
-		return nil, collection.ErrNotFound
-	}
-	return []postgres.PageSummary{{
-		PageSequence: 1,
-		CursorBefore: "",
-		CursorAfter:  "10",
-		CollectedAt:  time.Date(2026, 8, 13, 12, 0, 2, 0, time.UTC),
-		CommittedAt:  time.Date(2026, 8, 13, 12, 0, 3, 0, time.UTC),
-		PayloadBytes: 10398,
-		AccountID:    1,
-		AccountAlias: "steam",
-		ExitAddress:  "38.175.103.188",
-	}}, nil
-}
-
-func (s *collectionServiceStub) PagePayload(_ context.Context, id collection.RunID, sequence collection.Sequence) ([]byte, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if id != 9 || sequence != 1 {
-		return nil, postgres.ErrPagePayloadNotFound
-	}
-	return []byte(`{"success":true}`), nil
-}
-
-func (s *collectionServiceStub) PageAttempts(_ context.Context, id collection.RunID, sequence collection.Sequence) ([]postgres.PageAttempt, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if id != 9 || sequence != 1 {
-		return nil, collection.ErrNotFound
 	}
 	cents := int64(21)
-	return []postgres.PageAttempt{{
-		ProductID: 3, AppID: 730, Name: "Sealed Graffiti | GLHF (SWAT Blue)",
-		Platform: "steam", Side: "ask", Status: "present",
-		CollectedAt: time.Date(2026, 8, 13, 12, 0, 2, 0, time.UTC),
-		SourceTime:  ptrTime(time.Date(2026, 8, 13, 12, 0, 2, 0, time.UTC)),
-		PriceCents:  &cents,
+	return []collection.WorkerSnapshot{{
+		Combination: resource.AccountNodeCombination{
+			ID: 1, Platform: "steam", AccountID: 2, NodeID: 3,
+		},
+		AccountAlias: "steam",
+		SessionState: resource.AccountSessionStateValid,
+		NodeName:     "hk-1",
+		ExitAddress:  "38.175.103.188",
+		Region:       resource.NodeRegionHongKong,
+		Idle:         false,
+		Claim: &collection.WorkerClaim{
+			TargetID: 4, AppID: 730, Side: market.SideAsk, Platform: "steam",
+			Items: []collection.WorkerItem{{ProductID: 3, Name: "Sealed Graffiti | GLHF (SWAT Blue)", Status: "present", PriceCents: &cents}},
+		},
+		LastPage: &collection.WorkerPage{
+			TargetID: 4, AppID: 730, Side: market.SideAsk, Platform: "steam",
+			CommittedAt: time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC),
+			Items:       []collection.WorkerItem{{ProductID: 3, Name: "Sealed Graffiti | GLHF (SWAT Blue)", Status: "present", PriceCents: &cents}},
+		},
 	}}, nil
-}
-
-func (s *collectionServiceStub) ListRecentRuns(context.Context, int) ([]collection.Run, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	run, err := collection.NewSummaryRun(collection.SummaryRunInput{
-		ID: 9, TargetID: 4, Platform: "steam", AppID: 730, Side: market.SideAsk,
-		SwitchVersion: 2, RunSequence: 1, State: collection.RunRunning,
-		CreatedAt: time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC),
-		StartedAt: ptrTime(time.Date(2026, 8, 13, 12, 0, 1, 0, time.UTC)),
-	})
-	if err != nil {
-		panic(err)
-	}
-	return []collection.Run{run}, nil
 }
 
 type marketServiceStub struct {
 	err    error
 	filter postgres.MarketQuoteFilter
+	ticks  postgres.PriceTickFilter
 }
 
 func (s *marketServiceStub) ListQuotes(_ context.Context, filter postgres.MarketQuoteFilter) (postgres.MarketQuoteResult, error) {
@@ -191,7 +181,18 @@ func (s *marketServiceStub) QuoteFacets(context.Context, int64) (postgres.Market
 	return postgres.MarketFacets{AppIDs: []int64{730}, ItemTypes: []string{"Base Grade Container"}}, nil
 }
 
-func ptrTime(value time.Time) *time.Time { return &value }
+func (s *marketServiceStub) ListPriceTicks(_ context.Context, filter postgres.PriceTickFilter) ([]postgres.PriceTick, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	s.ticks = filter
+	prev := int64(20)
+	return []postgres.PriceTick{{
+		TickID: 1, ProductID: 1, AppID: 730, Name: "Sealed Graffiti | Tilt (Desert Amber)",
+		Platform: "steam", Side: market.SideAsk, PrevCents: &prev, PriceCents: 21,
+		CollectedAt: time.Date(2026, 8, 15, 4, 0, 0, 0, time.UTC),
+	}}, nil
+}
 
 func TestCollectionRoutes(t *testing.T) {
 	targets := &collectionServiceStub{}
@@ -208,21 +209,18 @@ func TestCollectionRoutes(t *testing.T) {
 		{name: "create", method: http.MethodPost, path: "/api/targets", body: `{"platform":"steam","appid":730,"side":"ask","desired":"enabled"}`, status: http.StatusCreated},
 		{name: "desired", method: http.MethodPost, path: "/api/targets/4/desired", body: `{"expected_revision":2,"desired":"disabled"}`, status: http.StatusOK},
 		{name: "sort", method: http.MethodPost, path: "/api/targets/4/sort", body: `{"expected_revision":2,"sort_column":"quantity","sort_dir":"desc"}`, status: http.StatusOK},
+		{name: "price-range", method: http.MethodPost, path: "/api/targets/4/price-range", body: `{"expected_revision":2,"min_cents":1000,"max_cents":879769}`, status: http.StatusOK},
+		{name: "steam-facets", method: http.MethodPost, path: "/api/targets/4/steam-facets", body: `{"expected_revision":2,"steam_cats":["steamcat.armor"],"item_classes":["hoodie"]}`, status: http.StatusOK},
+		{name: "steam-vocab", method: http.MethodGet, path: "/api/steam-facets?appid=252490", status: http.StatusOK},
 		{name: "delete", method: http.MethodPost, path: "/api/targets/4/delete", status: http.StatusOK},
 		{name: "delete-rejects-body", method: http.MethodPost, path: "/api/targets/4/delete", body: `{}`, status: http.StatusBadRequest},
-		{name: "runs", method: http.MethodGet, path: "/api/runs", status: http.StatusOK},
-		{name: "run-pages", method: http.MethodGet, path: "/api/runs/9/pages", status: http.StatusOK},
-		{name: "page-payload", method: http.MethodGet, path: "/api/runs/9/pages/1/payload", status: http.StatusOK},
-		{name: "page-attempts", method: http.MethodGet, path: "/api/runs/9/pages/1/attempts", status: http.StatusOK},
-		{name: "page-payload-evicted", method: http.MethodGet, path: "/api/runs/9/pages/7/payload", status: http.StatusNotFound},
-		{name: "page-bad-sequence", method: http.MethodGet, path: "/api/runs/9/pages/0/payload", status: http.StatusBadRequest},
-		{name: "page-bad-run", method: http.MethodGet, path: "/api/runs/abc/pages", status: http.StatusBadRequest},
-		{name: "page-unknown-leaf", method: http.MethodGet, path: "/api/runs/9/pages/1/raw", status: http.StatusNotFound},
-		{name: "page-post-rejected", method: http.MethodPost, path: "/api/runs/9/pages", status: http.StatusMethodNotAllowed},
+		{name: "workers", method: http.MethodGet, path: "/api/workers", status: http.StatusOK},
+		{name: "workers-post-rejected", method: http.MethodPost, path: "/api/workers", status: http.StatusMethodNotAllowed},
 		{name: "quotes", method: http.MethodGet, path: "/api/quotes?appid=730&platform=steam", status: http.StatusOK},
 		{name: "quote-facets", method: http.MethodGet, path: "/api/quote-facets?appid=730", status: http.StatusOK},
 		{name: "quotes-bad-price", method: http.MethodGet, path: "/api/quotes?min_cents=-1", status: http.StatusBadRequest},
 		{name: "quotes-bad-offset", method: http.MethodGet, path: "/api/quotes?offset=-1", status: http.StatusBadRequest},
+		{name: "price-ticks", method: http.MethodGet, path: "/api/price-ticks?product_id=9&limit=20", status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(test.method, "http://localhost"+test.path, strings.NewReader(test.body))
@@ -259,6 +257,10 @@ func TestCollectionRoutes(t *testing.T) {
 	if targets.sort != (collection.SortOrder{Column: collection.SortColumnQuantity, Direction: collection.SortDescending}) {
 		t.Fatalf("sort order = %+v", targets.sort)
 	}
+	if len(targets.facets.Cats) != 1 || targets.facets.Cats[0] != "steamcat.armor" ||
+		len(targets.facets.Classes) != 1 || targets.facets.Classes[0] != "hoodie" {
+		t.Fatalf("steam facets = %+v", targets.facets)
+	}
 }
 
 func TestCollectionDeleteConflictMapping(t *testing.T) {
@@ -293,8 +295,9 @@ func TestQuoteFiltersReachStorage(t *testing.T) {
 	quotes := &marketServiceStub{}
 	handler := NewHandlerForAuthority(nil, "", ControlServices{Market: quotes})
 	request := httptest.NewRequest(http.MethodGet,
-		"http://localhost/api/quotes?appid=730&platform=steam&side=ask&keyword=Tilt&item_type=Base%20Grade%20Container"+
-			"&min_cents=10&max_cents=5000&sort=price_asc&limit=24&offset=48", nil)
+		"http://localhost/api/quotes?appid=730&product_id=9&platform=steam&side=ask&keyword=Tilt&item_type=Base%20Grade%20Container"+
+			"&item_types=Hoodie&item_types=AK47u&steam_cats=steamcat.clothing"+
+			"&min_cents=10&max_cents=5000&dropped=1&drop_window=7d&min_drop_cents=150&sort=drop_pct_desc&limit=24&offset=48", nil)
 	request.Host = "localhost"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -302,13 +305,19 @@ func TestQuoteFiltersReachStorage(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	got := quotes.filter
-	if got.AppID != 730 || got.Platform != "steam" || got.Side != market.SideAsk ||
+	if got.AppID != 730 || got.ProductID != 9 || got.Platform != "steam" || got.Side != market.SideAsk ||
 		got.Keyword != "Tilt" || got.ItemType != "Base Grade Container" ||
-		got.Sort != postgres.QuoteSortPriceAsc || got.Limit != 24 || got.Offset != 48 {
+		len(got.ItemTypes) != 2 || got.ItemTypes[0] != "Hoodie" || got.ItemTypes[1] != "AK47u" ||
+		len(got.SteamCats) != 1 || got.SteamCats[0] != "steamcat.clothing" ||
+		!got.DropsOnly || got.DropWindow != postgres.DropWindow7d ||
+		got.Sort != postgres.QuoteSortDropPctDesc || got.Limit != 24 || got.Offset != 48 {
 		t.Fatalf("filter = %+v", got)
 	}
 	if got.MinCents == nil || *got.MinCents != 10 || got.MaxCents == nil || *got.MaxCents != 5000 {
 		t.Fatalf("price range = %v %v", got.MinCents, got.MaxCents)
+	}
+	if got.MinDropCents == nil || *got.MinDropCents != 150 {
+		t.Fatalf("min drop = %v", got.MinDropCents)
 	}
 	var payload struct {
 		Total  int64 `json:"total"`
@@ -327,18 +336,77 @@ func TestQuoteFiltersReachStorage(t *testing.T) {
 	}
 }
 
-// 原始响应必须逐字节回传，控制台只展示不改写。
-func TestPagePayloadIsReturnedVerbatim(t *testing.T) {
-	handler := NewHandlerForAuthority(nil, "", ControlServices{Collection: &collectionServiceStub{}})
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/runs/9/pages/1/payload", nil)
+func TestPriceTickFiltersReachStorage(t *testing.T) {
+	quotes := &marketServiceStub{}
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Market: quotes})
+	request := httptest.NewRequest(http.MethodGet,
+		"http://localhost/api/price-ticks?product_id=9&platform=steam&side=ask&limit=20", nil)
 	request.Host = "localhost"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Body.String() != `{"success":true}` {
+	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Fatalf("nosniff header = %q", response.Header().Get("X-Content-Type-Options"))
+	got := quotes.ticks
+	if got.ProductID != 9 || got.Platform != "steam" || got.Side != market.SideAsk || got.Limit != 20 {
+		t.Fatalf("filter = %+v", got)
+	}
+	var payload struct {
+		Ticks []struct {
+			PriceCents int64 `json:"price_cents"`
+		} `json:"ticks"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Ticks) != 1 || payload.Ticks[0].PriceCents != 21 {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestWorkersJSON(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Collection: &collectionServiceStub{}})
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/workers", nil)
+	request.Host = "localhost"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) != 1 || payload[0]["account_alias"] != "steam" || payload[0]["idle"] != false {
+		t.Fatalf("payload=%v", payload)
+	}
+	if _, ok := payload[0]["last_page"].(map[string]any); !ok {
+		t.Fatalf("last_page missing: %v", payload[0])
+	}
+}
+
+func TestSteamFacetsVocab(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{})
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/steam-facets?appid=252490", nil)
+	request.Host = "localhost"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Categories []struct {
+			Slug string `json:"slug"`
+		} `json:"categories"`
+		ItemClasses []struct {
+			Slug string `json:"slug"`
+		} `json:"item_classes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Categories) == 0 || len(payload.ItemClasses) == 0 {
+		t.Fatalf("payload=%+v", payload)
 	}
 }
 

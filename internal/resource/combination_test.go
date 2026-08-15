@@ -12,20 +12,20 @@ func TestCombinationResourcesValidateForUse(t *testing.T) {
 
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	resources := usableCombinationResources(now, 1, 11, 21)
-	if err := resources.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); err != nil {
+	if err := resources.ValidateForUse(now, TargetRegionDomestic); err != nil {
 		t.Fatalf("ValidateForUse() error = %v", err)
 	}
 
 	unverified := cloneCombinationResources(resources)
 	unverified.Account.SessionState = AccountSessionStateUnverified
 	unverified.Account.LastCheckedAt = nil
-	if err := unverified.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); err != nil {
+	if err := unverified.ValidateForUse(now, TargetRegionDomestic); err != nil {
 		t.Fatalf("unverified ValidateForUse() error = %v", err)
 	}
 
 	invalid := cloneCombinationResources(resources)
 	invalid.Account.SessionState = AccountSessionStateInvalid
-	if err := invalid.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); !errors.Is(err, ErrAccountSessionUnusable) {
+	if err := invalid.ValidateForUse(now, TargetRegionDomestic); !errors.Is(err, ErrAccountSessionUnusable) {
 		t.Fatalf("invalid session error = %v", err)
 	}
 
@@ -37,7 +37,6 @@ func TestCombinationResourcesValidateForUse(t *testing.T) {
 		{name: "wrong account id", mutate: func(value *CombinationResources) { value.Combination.AccountID++ }},
 		{name: "wrong node id", mutate: func(value *CombinationResources) { value.Combination.NodeID++ }},
 		{name: "wrong account platform", mutate: func(value *CombinationResources) { value.Account.Platform = "buff" }},
-		{name: "unassigned node", mutate: func(value *CombinationResources) { value.Node.AppID = 0; value.Node.Sides = nil }},
 		{name: "invalid account session", mutate: func(value *CombinationResources) {
 			value.Account.SessionState = AccountSessionStateInvalid
 		}},
@@ -53,16 +52,16 @@ func TestCombinationResourcesValidateForUse(t *testing.T) {
 			t.Parallel()
 			value := cloneCombinationResources(resources)
 			test.mutate(&value)
-			if err := value.ValidateForUse(now, TargetRegionDomestic, 730, "ask"); err == nil {
+			if err := value.ValidateForUse(now, TargetRegionDomestic); err == nil {
 				t.Fatal("ValidateForUse() succeeded")
 			}
 		})
 	}
 
-	if err := resources.ValidateForUse(time.Time{}, TargetRegionDomestic, 730, "ask"); err == nil {
+	if err := resources.ValidateForUse(time.Time{}, TargetRegionDomestic); err == nil {
 		t.Fatal("ValidateForUse() accepted zero acquisition time")
 	}
-	if err := resources.ValidateForUse(now, TargetRegion("dual"), 730, "ask"); err == nil {
+	if err := resources.ValidateForUse(now, TargetRegion("dual")); err == nil {
 		t.Fatal("ValidateForUse() accepted invalid target region")
 	}
 }
@@ -90,8 +89,6 @@ func usableCombinationResources(now time.Time, combinationID CombinationID, acco
 		Node: AccessNode{
 			ID: nodeID, Name: "node", Kind: NodeKindDirect, Region: NodeRegionDomestic,
 			EgressMode: EgressModeStatic, State: NodeStateAvailable, EgressRevision: 4,
-			AssignmentRevision: 2, AppID: 730,
-			Sides: []NodeSideAssignment{{Platform: "steam", Side: "ask"}},
 			ExitVerification: &ExitVerification{
 				VerifiedRevision: 4, Address: netip.MustParseAddr("8.8.8.8"),
 				VerifiedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour),

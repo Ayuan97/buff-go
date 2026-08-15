@@ -22,6 +22,7 @@ import {
   gameFullName,
   gameName,
   isPacingBeat,
+  KNOWN_GAMES,
   platformLabel,
   sideText,
   targetReasonText,
@@ -71,21 +72,19 @@ let poll = 0
 
 function buildGames(nodes: AccessNode[], targets: Target[]): GameDraft[] {
   const appids = new Set<number>()
-  for (const n of nodes) if (n.appid) appids.add(n.appid)
   for (const t of targets) appids.add(t.appid)
   const list = [...appids].sort((a, b) => a - b)
   return list.map((appid) => {
-    const gameNodes = nodes.filter((n) => n.appid === appid)
     const platforms = ['steam']
     return {
       appid,
       shortName: gameName(appid),
       name: gameFullName(appid),
-      nodeIds: gameNodes.map((n) => n.id),
+      nodeIds: nodes.map((n) => n.id),
       platforms: platforms.map((platform) => ({
         platform,
-        bid: makeSide(appid, platform, 'bid', gameNodes, targets),
-        ask: makeSide(appid, platform, 'ask', gameNodes, targets),
+        bid: makeSide(appid, platform, 'bid', nodes, targets),
+        ask: makeSide(appid, platform, 'ask', nodes, targets),
       })),
     }
   })
@@ -93,14 +92,14 @@ function buildGames(nodes: AccessNode[], targets: Target[]): GameDraft[] {
 
 function makeSide(appid: number, platform: string, side: Side, nodes: AccessNode[], targets: Target[]): SideDraft {
   const target = targets.find((t) => t.appid === appid && t.platform === platform && t.side === side) ?? null
-  const assigned = nodes.filter((n) => n.sides.some((s) => s.platform === platform && s.side === side))
+  const usable = nodes.filter((n) => n.state === 'available')
   return {
     enabled: target?.desired === 'enabled',
     actual: target?.actual ?? 'stopped',
     reason: target?.reason ?? null,
     recheckAt: target?.recheck_at ?? null,
-    nodeIds: assigned.map((n) => n.id),
-    usableNodeCount: assigned.filter((n) => n.state === 'available').length,
+    nodeIds: usable.map((n) => n.id),
+    usableNodeCount: usable.length,
     target,
   }
 }
@@ -279,13 +278,8 @@ async function removeTarget(id: number) {
   }
 }
 
-async function addGame() {
-  const raw = newAppid.value.trim()
-  const appid = Number(raw)
-  if (!raw || !Number.isInteger(appid) || appid < 1) {
-    actionError.value = '游戏编号要填正整数的 Steam appid，例如 730'
-    return
-  }
+async function addGameByAppid(appid: number) {
+  if (busy.value || games.value.some((game) => game.appid === appid)) return
   busy.value = true
   actionError.value = null
   try {
@@ -297,6 +291,16 @@ async function addGame() {
   } finally {
     busy.value = false
   }
+}
+
+async function addGame() {
+  const raw = newAppid.value.trim()
+  const appid = Number(raw)
+  if (!raw || !Number.isInteger(appid) || appid < 1) {
+    actionError.value = '游戏编号要填正整数的 Steam appid，例如 730'
+    return
+  }
+  await addGameByAppid(appid)
 }
 
 function onConfirm() {
@@ -350,7 +354,17 @@ function onConfirm() {
       </section>
 
       <form class="add-game" @submit.prevent="addGame">
-        <input v-model="newAppid" class="inp" placeholder="游戏编号，如 730" inputmode="numeric" />
+        <div class="presets">
+          <button
+            v-for="game in KNOWN_GAMES"
+            :key="game.appid"
+            class="btn sm"
+            type="button"
+            :disabled="busy || games.some((row) => row.appid === game.appid)"
+            @click="addGameByAppid(game.appid)"
+          >{{ game.short }}</button>
+        </div>
+        <input v-model="newAppid" class="inp" placeholder="或其他 Steam appid" inputmode="numeric" />
         <button class="btn sm" type="submit" :disabled="busy">加入游戏</button>
       </form>
 
@@ -462,9 +476,9 @@ function onConfirm() {
 <style scoped>
 .ov {
   width: 100%;
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: clamp(12px, 2.5vw, 28px) clamp(12px, 2.5vw, 32px) 40px;
+  max-width: none;
+  margin: 0;
+  padding: 20px 28px 40px;
   box-sizing: border-box;
 }
 .hero {
@@ -683,7 +697,8 @@ function onConfirm() {
 .rm:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .empty-cta { margin-top: 16px; border: 1px solid var(--line); }
-.add-game { display: flex; gap: 8px; margin-bottom: 14px; }
+.add-game { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
 .inp {
   height: 28px;
   padding: 0 8px;

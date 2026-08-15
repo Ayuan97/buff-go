@@ -91,6 +91,22 @@ func TestCombinationRoutes(t *testing.T) {
 	}
 }
 
+func TestCombinationDeleteMapsDependency(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Combinations: &combinationServiceStub{err: postgres.ErrResourceDependency}})
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/combinations/4/delete", nil)
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "resource_in_use") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestCombinationRoutesMapProtectedErrors(t *testing.T) {
 	handler := NewHandlerForAuthority(nil, "", ControlServices{Combinations: &combinationServiceStub{err: postgres.ErrCombinationIncompatible}})
 	cookie, token := issueContext(t, handler)
@@ -103,6 +119,48 @@ func TestCombinationRoutesMapProtectedErrors(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "combination_incompatible") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestCreateCombinationRejectsDomesticSteam(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{
+		Accounts: &accountServiceStub{accounts: []resource.PlatformAccount{{
+			ID: 3, Platform: "steam", Alias: "main",
+			SessionState: resource.AccountSessionStateUnverified, SessionRevision: 1,
+		}}},
+		Nodes:           &nodeServiceStub{region: resource.NodeRegionDomestic},
+		Combinations:    &combinationServiceStub{},
+		PlatformRegions: steamRegions(),
+	})
+	assertCombinationRegionRejected(t, handler)
+}
+
+func TestCreateCombinationRejectsForeignBuff(t *testing.T) {
+	handler := NewHandlerForAuthority(nil, "", ControlServices{
+		Accounts: &accountServiceStub{accounts: []resource.PlatformAccount{{
+			ID: 3, Platform: "buff", Alias: "buff",
+			SessionState: resource.AccountSessionStateUnverified, SessionRevision: 1,
+		}}},
+		Nodes:           &nodeServiceStub{region: resource.NodeRegionForeign},
+		Combinations:    &combinationServiceStub{},
+		PlatformRegions: steamRegions(),
+	})
+	assertCombinationRegionRejected(t, handler)
+}
+
+func assertCombinationRegionRejected(t *testing.T, handler *Handler) {
+	t.Helper()
+	cookie, token := issueContext(t, handler)
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/combinations", strings.NewReader(`{"account_id":3,"node_id":7}`))
+	request.Host = "localhost"
+	request.Header.Set("Origin", "http://localhost")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(CSRFHeaderName, token)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

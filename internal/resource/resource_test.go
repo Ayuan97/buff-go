@@ -203,9 +203,6 @@ func TestAccessNodeValidate(t *testing.T) {
 		EgressMode:              EgressModeSticky,
 		State:                   NodeStateAvailable,
 		EgressRevision:          4,
-		AssignmentRevision:      2,
-		AppID:                   730,
-		Sides:                   []NodeSideAssignment{{Platform: "buff", Side: "ask"}},
 		HasProxyCredential:      true,
 		StickySessionValidUntil: timePtr(now.Add(2 * time.Hour)),
 		ExitVerification: &ExitVerification{
@@ -235,9 +232,6 @@ func TestAccessNodeValidate(t *testing.T) {
 		{name: "invalid egress mode", mutate: func(node *AccessNode) { node.EgressMode = "dynamic" }},
 		{name: "invalid state", mutate: func(node *AccessNode) { node.State = "healthy" }},
 		{name: "missing revision", mutate: func(node *AccessNode) { node.EgressRevision = 0 }},
-		{name: "missing assignment revision", mutate: func(node *AccessNode) { node.AssignmentRevision = 0 }},
-		{name: "invalid assignment", mutate: func(node *AccessNode) { node.Sides = []NodeSideAssignment{{Platform: "BUFF", Side: "ask"}} }},
-		{name: "sides without game", mutate: func(node *AccessNode) { node.AppID = 0 }},
 		{name: "proxy without credential", mutate: func(node *AccessNode) { node.HasProxyCredential = false }},
 		{name: "sticky without deadline", mutate: func(node *AccessNode) { node.StickySessionValidUntil = nil }},
 		{name: "sticky deadline before verification", mutate: func(node *AccessNode) {
@@ -268,14 +262,13 @@ func TestAccessNodeDirectConstraints(t *testing.T) {
 	t.Parallel()
 
 	valid := AccessNode{
-		ID:                 2,
-		Name:               "local",
-		Kind:               NodeKindDirect,
-		Region:             NodeRegionDomestic,
-		EgressMode:         EgressModeStatic,
-		State:              NodeStateValidating,
-		EgressRevision:     1,
-		AssignmentRevision: 1,
+		ID:             2,
+		Name:           "local",
+		Kind:           NodeKindDirect,
+		Region:         NodeRegionDomestic,
+		EgressMode:     EgressModeStatic,
+		State:          NodeStateValidating,
+		EgressRevision: 1,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
@@ -312,14 +305,13 @@ func TestAccessNodeUsableAt(t *testing.T) {
 
 	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	node := AccessNode{
-		ID:                 1,
-		Name:               "direct-1",
-		Kind:               NodeKindDirect,
-		Region:             NodeRegionForeign,
-		EgressMode:         EgressModeStatic,
-		State:              NodeStateAvailable,
-		EgressRevision:     2,
-		AssignmentRevision: 1,
+		ID:             1,
+		Name:           "direct-1",
+		Kind:           NodeKindDirect,
+		Region:         NodeRegionForeign,
+		EgressMode:     EgressModeStatic,
+		State:          NodeStateAvailable,
+		EgressRevision: 2,
 		ExitVerification: &ExitVerification{
 			VerifiedRevision: 2,
 			Address:          netip.MustParseAddr("2606:4700:4700::1111"),

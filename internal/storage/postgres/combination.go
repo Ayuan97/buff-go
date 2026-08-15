@@ -24,7 +24,7 @@ const combinationResourceReadColumns = `
 c.combination_id, c.platform, c.account_id, c.node_id,
 a.account_id, a.platform, a.alias, a.session_state, a.session_revision, a.last_checked_at,
 n.node_id, n.name, n.kind, n.region, n.egress_mode, n.state, n.egress_revision,
-n.assignment_revision, n.appid, (n.proxy_plaintext IS NOT NULL), n.sticky_session_valid_until,
+(n.proxy_plaintext IS NOT NULL), n.sticky_session_valid_until,
 n.exit_verified_revision, host(n.exit_address), n.exit_verified_at, n.exit_valid_until`
 
 // CreateCombination records one explicit account-node pairing. The platform is
@@ -44,9 +44,7 @@ func (s *Store) CreateCombination(ctx context.Context, accountID resource.Accoun
 INSERT INTO account_node_combinations (platform, account_id, node_id)
 SELECT account.platform, account.account_id, node.node_id
 FROM platform_accounts account
-JOIN access_nodes node ON node.node_id = $2 AND node.appid IS NOT NULL
-JOIN node_direction_assignments direction
-    ON direction.node_id = node.node_id AND direction.platform = account.platform
+JOIN access_nodes node ON node.node_id = $2
 WHERE account.account_id = $1
 ON CONFLICT (account_id, node_id) DO NOTHING
 RETURNING `+combinationReadColumns, int64(accountID), int64(nodeID)))
@@ -176,9 +174,6 @@ WHERE c.combination_id = $1`, int64(id)).Scan(destinations...)
 	if err != nil {
 		return resource.CombinationResources{}, false, ErrResourceIntegrity
 	}
-	if err := attachNodeSides(ctx, s.db, &node); err != nil {
-		return resource.CombinationResources{}, false, err
-	}
 	resources := resource.CombinationResources{Combination: combination, Account: account, Node: node}
 	if err := resources.Validate(); err != nil {
 		return resource.CombinationResources{}, false, ErrResourceIntegrity
@@ -202,6 +197,9 @@ RETURNING combination_id`, int64(id)).Scan(&deleted)
 		return ErrResourceNotFound
 	}
 	if err != nil {
+		if postgresErrorCode(err) == "23503" {
+			return ErrResourceDependency
+		}
 		return ErrResourceStorage
 	}
 	if deleted != int64(id) {
@@ -285,17 +283,6 @@ func mapCombinationWriteError(err error) error {
 		return ErrCombinationIncompatible
 	case "23505":
 		return ErrCombinationConflict
-	default:
-		return ErrResourceStorage
-	}
-}
-
-func mapAssignmentWriteError(err error) error {
-	switch postgresErrorCode(err) {
-	case "23503":
-		return ErrResourceDependency
-	case "23505":
-		return ErrNodeAssignmentConflict
 	default:
 		return ErrResourceStorage
 	}

@@ -7,9 +7,7 @@
 --
 -- 不要加 --schema=public：那会生成 CREATE SCHEMA public，导出的快照就没法直接重放。
 --
--- 导出自应用到 000012_target_sort_order 的库，并验证过重放到空库能得到同一套结构。
--- 与直接跑迁移的结果逐行比对只差两处 CHECK 表达式的括号分组，语义相同，
--- 那是经过一次导出重放往返后 PostgreSQL 重新格式化的产物。
+-- 导出自应用到 000016_target_price_range 的库。
 -- buffgo_storage_migrations 是迁移执行器自己建的记录表，不在迁移文件里。
 -- 只含结构不含数据，所以不会带出平台会话与代理凭据。
 
@@ -79,11 +77,7 @@ CREATE TABLE public.access_nodes (
     exit_verified_revision bigint,
     exit_verified_at timestamp with time zone,
     exit_valid_until timestamp with time zone,
-    assignment_revision bigint DEFAULT 1 NOT NULL,
     proxy_plaintext bytea,
-    appid bigint,
-    CONSTRAINT access_nodes_appid_positive CHECK (((appid IS NULL) OR (appid > 0))),
-    CONSTRAINT access_nodes_assignment_revision_positive CHECK ((assignment_revision > 0)),
     CONSTRAINT access_nodes_direct_static CHECK (((kind <> 'direct'::text) OR (egress_mode = 'static'::text))),
     CONSTRAINT access_nodes_egress_mode_valid CHECK ((egress_mode = ANY (ARRAY['static'::text, 'sticky'::text]))),
     CONSTRAINT access_nodes_egress_revision_positive CHECK ((egress_revision > 0)),
@@ -160,30 +154,12 @@ CREATE TABLE public.buffgo_storage_migrations (
 
 
 --
--- Name: collection_page_payloads; Type: TABLE; Schema: public; Owner: -
+-- Name: collection_latest_pages; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.collection_page_payloads (
-    run_id bigint NOT NULL,
-    page_sequence bigint NOT NULL,
-    payload_gzip bytea NOT NULL,
-    byte_size bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT collection_page_payloads_byte_size_positive CHECK ((byte_size > 0)),
-    CONSTRAINT collection_page_payloads_created_at_valid CHECK (isfinite(created_at)),
-    CONSTRAINT collection_page_payloads_gzip_size CHECK (((octet_length(payload_gzip) >= 1) AND (octet_length(payload_gzip) <= 1048576))),
-    CONSTRAINT collection_page_payloads_page_sequence_positive CHECK ((page_sequence > 0)),
-    CONSTRAINT collection_page_payloads_run_id_positive CHECK ((run_id > 0))
-);
-
-
---
--- Name: collection_pages; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.collection_pages (
-    run_id bigint NOT NULL,
-    page_sequence bigint NOT NULL,
+CREATE TABLE public.collection_latest_pages (
+    target_id bigint NOT NULL,
+    write_seq bigint NOT NULL,
     cursor_before bytea NOT NULL,
     cursor_after bytea NOT NULL,
     payload_digest bytea NOT NULL,
@@ -191,68 +167,15 @@ CREATE TABLE public.collection_pages (
     committed_at timestamp with time zone NOT NULL,
     account_id bigint,
     exit_address inet,
-    CONSTRAINT collection_pages_account_id_positive CHECK (((account_id IS NULL) OR (account_id > 0))),
-    CONSTRAINT collection_pages_cursor_size CHECK (((octet_length(cursor_before) <= 4096) AND (octet_length(cursor_after) <= 4096))),
-    CONSTRAINT collection_pages_exit_host_address CHECK (((exit_address IS NULL) OR ((family(exit_address) = 4) AND (masklen(exit_address) = 32)) OR ((family(exit_address) = 6) AND (masklen(exit_address) = 128)))),
-    CONSTRAINT collection_pages_page_sequence_positive CHECK ((page_sequence > 0)),
-    CONSTRAINT collection_pages_payload_digest_canonical CHECK (((octet_length(payload_digest) = 32) AND (payload_digest <> decode(repeat('00'::text, 32), 'hex'::text)))),
-    CONSTRAINT collection_pages_run_id_positive CHECK ((run_id > 0)),
-    CONSTRAINT collection_pages_times_valid CHECK ((isfinite(collected_at) AND isfinite(committed_at) AND (committed_at >= collected_at)))
-);
-
-
---
--- Name: collection_runs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.collection_runs (
-    run_id bigint NOT NULL,
-    target_id bigint,
-    kind text NOT NULL COLLATE pg_catalog."C",
-    platform text NOT NULL COLLATE pg_catalog."C",
-    appid bigint NOT NULL,
-    side text COLLATE pg_catalog."C",
-    product_id bigint,
-    switch_version bigint,
-    run_sequence bigint NOT NULL,
-    status text NOT NULL COLLATE pg_catalog."C",
-    completeness text COLLATE pg_catalog."C",
-    reason_code text DEFAULT ''::text NOT NULL COLLATE pg_catalog."C",
-    current_cursor bytea NOT NULL,
-    last_page_sequence bigint DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    started_at timestamp with time zone,
-    finished_at timestamp with time zone,
-    CONSTRAINT collection_runs_complete_has_page CHECK (((completeness IS DISTINCT FROM 'complete'::text) OR (last_page_sequence > 0))),
-    CONSTRAINT collection_runs_completeness_valid CHECK (((completeness IS NULL) OR (completeness = ANY (ARRAY['complete'::text, 'partial'::text])))),
-    CONSTRAINT collection_runs_cursor_size CHECK ((octet_length(current_cursor) <= 4096)),
-    CONSTRAINT collection_runs_identity_positive CHECK (((run_id > 0) AND (appid > 0) AND ((target_id IS NULL) OR (target_id > 0)) AND ((product_id IS NULL) OR (product_id > 0)))),
-    CONSTRAINT collection_runs_kind_shape CHECK ((((kind = 'summary'::text) AND (target_id IS NOT NULL) AND (side IS NOT NULL) AND (side = ANY (ARRAY['bid'::text, 'ask'::text])) AND (product_id IS NULL) AND (switch_version IS NOT NULL) AND (switch_version > 0)) OR ((kind = 'detail'::text) AND (target_id IS NULL) AND (side IS NOT NULL) AND (side = ANY (ARRAY['bid'::text, 'ask'::text])) AND (product_id IS NOT NULL) AND (product_id > 0) AND (switch_version IS NULL)))),
-    CONSTRAINT collection_runs_kind_valid CHECK ((kind = ANY (ARRAY['summary'::text, 'detail'::text]))),
-    CONSTRAINT collection_runs_last_page_sequence_nonnegative CHECK ((last_page_sequence >= 0)),
-    CONSTRAINT collection_runs_page_progress_shape CHECK (((last_page_sequence = 0) OR (started_at IS NOT NULL))),
-    CONSTRAINT collection_runs_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
-    CONSTRAINT collection_runs_reason_valid CHECK (((reason_code = ''::text) OR (reason_code = ANY (ARRAY['network_error'::text, 'platform_error'::text, 'timeout'::text, 'login_invalid'::text, 'parse_error'::text, 'semantic_error'::text, 'configuration_error'::text, 'internal_error'::text, 'process_restarted'::text, 'switch_disabled'::text, 'cancelled'::text])))),
-    CONSTRAINT collection_runs_run_sequence_positive CHECK ((run_sequence > 0)),
-    CONSTRAINT collection_runs_side_valid CHECK (((side IS NULL) OR (side = ANY (ARRAY['bid'::text, 'ask'::text])))),
-    CONSTRAINT collection_runs_status_valid CHECK ((status = ANY (ARRAY['pending'::text, 'running'::text, 'succeeded'::text, 'failed'::text, 'stopped'::text]))),
-    CONSTRAINT collection_runs_succeeded_has_page CHECK (((status <> 'succeeded'::text) OR (last_page_sequence > 0))),
-    CONSTRAINT collection_runs_terminal_shape CHECK ((((status = 'pending'::text) AND (completeness IS NULL) AND (reason_code = ''::text) AND (last_page_sequence = 0) AND (started_at IS NULL) AND (finished_at IS NULL)) OR ((status = 'running'::text) AND (completeness IS NULL) AND (reason_code = ''::text) AND (started_at IS NOT NULL) AND (finished_at IS NULL)) OR ((status = 'succeeded'::text) AND (completeness IS NOT NULL) AND (completeness = ANY (ARRAY['complete'::text, 'partial'::text])) AND (reason_code = ''::text) AND (started_at IS NOT NULL) AND (finished_at IS NOT NULL)) OR ((status = 'failed'::text) AND (completeness IS NOT NULL) AND (completeness = ANY (ARRAY['complete'::text, 'partial'::text])) AND (reason_code = ANY (ARRAY['network_error'::text, 'platform_error'::text, 'timeout'::text, 'login_invalid'::text, 'parse_error'::text, 'semantic_error'::text, 'configuration_error'::text, 'internal_error'::text, 'process_restarted'::text])) AND ((started_at IS NOT NULL) OR (completeness = 'partial'::text)) AND (finished_at IS NOT NULL)) OR ((status = 'stopped'::text) AND (completeness IS NOT NULL) AND (completeness = ANY (ARRAY['complete'::text, 'partial'::text])) AND (reason_code = ANY (ARRAY['switch_disabled'::text, 'cancelled'::text])) AND ((started_at IS NOT NULL) OR (completeness = 'partial'::text)) AND (finished_at IS NOT NULL)))),
-    CONSTRAINT collection_runs_times_valid CHECK ((isfinite(created_at) AND ((started_at IS NULL) OR (isfinite(started_at) AND (started_at >= created_at))) AND ((finished_at IS NULL) OR (isfinite(finished_at) AND (finished_at >= created_at))) AND ((started_at IS NULL) OR (finished_at IS NULL) OR (finished_at >= started_at))))
-);
-
-
---
--- Name: collection_runs_run_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-ALTER TABLE public.collection_runs ALTER COLUMN run_id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME public.collection_runs_run_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
+    payload_gzip bytea,
+    payload_bytes bigint,
+    CONSTRAINT collection_latest_pages_account_id_positive CHECK (((account_id IS NULL) OR (account_id > 0))),
+    CONSTRAINT collection_latest_pages_cursor_size CHECK (((octet_length(cursor_before) <= 4096) AND (octet_length(cursor_after) <= 4096))),
+    CONSTRAINT collection_latest_pages_exit_host_address CHECK (((exit_address IS NULL) OR ((family(exit_address) = 4) AND (masklen(exit_address) = 32)) OR ((family(exit_address) = 6) AND (masklen(exit_address) = 128)))),
+    CONSTRAINT collection_latest_pages_payload_digest_canonical CHECK (((octet_length(payload_digest) = 32) AND (payload_digest <> decode(repeat('00'::text, 32), 'hex'::text)))),
+    CONSTRAINT collection_latest_pages_payload_shape CHECK ((((payload_gzip IS NULL) AND (payload_bytes IS NULL)) OR ((payload_gzip IS NOT NULL) AND ((octet_length(payload_gzip) >= 1) AND (octet_length(payload_gzip) <= 1048576)) AND (payload_bytes IS NOT NULL) AND (payload_bytes > 0)))),
+    CONSTRAINT collection_latest_pages_times_valid CHECK ((isfinite(collected_at) AND isfinite(committed_at) AND (committed_at >= collected_at))),
+    CONSTRAINT collection_latest_pages_write_seq_positive CHECK ((write_seq > 0))
 );
 
 
@@ -274,10 +197,14 @@ CREATE TABLE public.collection_targets (
     period_microseconds bigint,
     revision bigint DEFAULT 1 NOT NULL,
     switch_version bigint DEFAULT 1 NOT NULL,
-    next_run_sequence bigint DEFAULT 1 NOT NULL,
     changed_at timestamp with time zone NOT NULL,
     sort_column text DEFAULT 'price'::text NOT NULL COLLATE pg_catalog."C",
     sort_dir text DEFAULT 'asc'::text NOT NULL COLLATE pg_catalog."C",
+    price_min_cents bigint,
+    price_max_cents bigint,
+    refill_cursor bytea DEFAULT '\x'::bytea NOT NULL,
+    write_seq bigint DEFAULT 0 NOT NULL,
+    refill_total bigint DEFAULT 0 NOT NULL,
     CONSTRAINT collection_targets_actual_state_valid CHECK ((actual_state = ANY (ARRAY['starting'::text, 'waiting'::text, 'running'::text, 'blocked'::text, 'stopping'::text, 'stopped'::text, 'error'::text]))),
     CONSTRAINT collection_targets_changed_at_finite CHECK (isfinite(changed_at)),
     CONSTRAINT collection_targets_desired_actual_shape CHECK ((((desired_state = 'enabled'::text) AND (actual_state = ANY (ARRAY['starting'::text, 'waiting'::text, 'running'::text, 'blocked'::text, 'error'::text]))) OR ((desired_state = 'disabled'::text) AND (actual_state = ANY (ARRAY['stopping'::text, 'stopped'::text]))))),
@@ -286,15 +213,18 @@ CREATE TABLE public.collection_targets (
     CONSTRAINT collection_targets_identity_positive CHECK ((target_id > 0)),
     CONSTRAINT collection_targets_kind_shape CHECK (((kind = 'summary'::text) AND (appid IS NOT NULL) AND (appid > 0) AND (side IS NOT NULL) AND (side = ANY (ARRAY['bid'::text, 'ask'::text])) AND (period_microseconds IS NULL))),
     CONSTRAINT collection_targets_kind_valid CHECK ((kind = 'summary'::text)),
-    CONSTRAINT collection_targets_next_run_sequence_positive CHECK ((next_run_sequence > 0)),
     CONSTRAINT collection_targets_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
     CONSTRAINT collection_targets_reason_valid CHECK (((reason_code = ''::text) OR (reason_code = ANY (ARRAY['next_cycle'::text, 'scheduler_opportunity'::text, 'transient_failure'::text, 'no_combination'::text, 'cooldown'::text, 'egress_unavailable'::text, 'missing_rate_policy'::text, 'session_invalid'::text, 'invalid_config'::text, 'interface_unverified'::text, 'scheduler_failure'::text, 'state_integrity'::text])))),
     CONSTRAINT collection_targets_recovery_mode_valid CHECK ((recovery_mode = ANY (ARRAY[''::text, 'automatic'::text, 'manual'::text]))),
+    CONSTRAINT collection_targets_refill_cursor_size CHECK ((octet_length(refill_cursor) <= 4096)),
+    CONSTRAINT collection_targets_refill_total_nonnegative CHECK ((refill_total >= 0)),
     CONSTRAINT collection_targets_revision_positive CHECK ((revision > 0)),
     CONSTRAINT collection_targets_side_valid CHECK (((side IS NULL) OR (side = ANY (ARRAY['bid'::text, 'ask'::text])))),
     CONSTRAINT collection_targets_sort_column_valid CHECK ((sort_column = ANY (ARRAY['price'::text, 'quantity'::text, 'name'::text]))),
     CONSTRAINT collection_targets_sort_dir_valid CHECK ((sort_dir = ANY (ARRAY['asc'::text, 'desc'::text]))),
-    CONSTRAINT collection_targets_switch_version_positive CHECK ((switch_version > 0))
+    CONSTRAINT collection_targets_price_range_valid CHECK (((price_min_cents IS NULL OR price_min_cents >= 0) AND (price_max_cents IS NULL OR price_max_cents >= 0) AND (price_min_cents IS NULL OR price_max_cents IS NULL OR price_min_cents <= price_max_cents))),
+    CONSTRAINT collection_targets_switch_version_positive CHECK ((switch_version > 0)),
+    CONSTRAINT collection_targets_write_seq_nonnegative CHECK ((write_seq >= 0))
 );
 
 
@@ -304,6 +234,42 @@ CREATE TABLE public.collection_targets (
 
 ALTER TABLE public.collection_targets ALTER COLUMN target_id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.collection_targets_target_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: collection_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.collection_tasks (
+    task_id bigint NOT NULL,
+    target_id bigint NOT NULL,
+    enqueue_seq bigint NOT NULL,
+    enqueued_at timestamp with time zone NOT NULL,
+    kind text NOT NULL COLLATE pg_catalog."C",
+    payload jsonb NOT NULL,
+    state text NOT NULL COLLATE pg_catalog."C",
+    claimed_by bigint,
+    claimed_at timestamp with time zone,
+    CONSTRAINT collection_tasks_claim_shape CHECK ((((state = 'queued'::text) AND (claimed_by IS NULL) AND (claimed_at IS NULL)) OR ((state = 'claimed'::text) AND (claimed_by IS NOT NULL) AND (claimed_by > 0) AND (claimed_at IS NOT NULL) AND isfinite(claimed_at)))),
+    CONSTRAINT collection_tasks_enqueued_at_valid CHECK (isfinite(enqueued_at)),
+    CONSTRAINT collection_tasks_identity_positive CHECK (((task_id > 0) AND (target_id > 0) AND (enqueue_seq > 0))),
+    CONSTRAINT collection_tasks_kind_valid CHECK ((kind = ANY (ARRAY['ask_page'::text, 'bid_batch'::text]))),
+    CONSTRAINT collection_tasks_state_valid CHECK ((state = ANY (ARRAY['queued'::text, 'claimed'::text])))
+);
+
+
+--
+-- Name: collection_tasks_task_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.collection_tasks ALTER COLUMN task_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.collection_tasks_task_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -326,19 +292,17 @@ CREATE TABLE public.market_last_present (
     source_time timestamp with time zone,
     collected_at timestamp with time zone NOT NULL,
     switch_version bigint NOT NULL,
-    run_sequence bigint NOT NULL,
-    page_sequence bigint NOT NULL,
+    write_seq bigint NOT NULL,
     CONSTRAINT market_last_present_collected_at_finite CHECK (isfinite(collected_at)),
     CONSTRAINT market_last_present_item_count_nonnegative CHECK (((item_count IS NULL) OR (item_count >= 0))),
     CONSTRAINT market_last_present_order_count_nonnegative CHECK (((order_count IS NULL) OR (order_count >= 0))),
-    CONSTRAINT market_last_present_page_sequence_positive CHECK ((page_sequence > 0)),
     CONSTRAINT market_last_present_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
     CONSTRAINT market_last_present_price_nonnegative CHECK ((price_cny_cents >= 0)),
     CONSTRAINT market_last_present_product_id_positive CHECK ((product_id > 0)),
-    CONSTRAINT market_last_present_run_sequence_positive CHECK ((run_sequence > 0)),
     CONSTRAINT market_last_present_side_valid CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text]))),
     CONSTRAINT market_last_present_source_time_finite CHECK (((source_time IS NULL) OR isfinite(source_time))),
-    CONSTRAINT market_last_present_switch_version_positive CHECK ((switch_version > 0))
+    CONSTRAINT market_last_present_switch_version_positive CHECK ((switch_version > 0)),
+    CONSTRAINT market_last_present_write_seq_positive CHECK ((write_seq > 0))
 );
 
 
@@ -355,31 +319,16 @@ CREATE TABLE public.market_latest_attempts (
     source_time timestamp with time zone,
     collected_at timestamp with time zone NOT NULL,
     switch_version bigint NOT NULL,
-    run_sequence bigint NOT NULL,
-    page_sequence bigint NOT NULL,
+    write_seq bigint NOT NULL,
     CONSTRAINT market_latest_attempts_collected_at_finite CHECK (isfinite(collected_at)),
-    CONSTRAINT market_latest_attempts_page_sequence_positive CHECK ((page_sequence > 0)),
     CONSTRAINT market_latest_attempts_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
     CONSTRAINT market_latest_attempts_product_id_positive CHECK ((product_id > 0)),
     CONSTRAINT market_latest_attempts_reason_valid CHECK ((((status = ANY (ARRAY['present'::text, 'empty'::text])) AND (reason_code = ''::text)) OR ((status = ANY (ARRAY['unavailable'::text, 'failed'::text])) AND (reason_code ~ '^[a-z][a-z0-9_.-]{0,63}$'::text)))),
-    CONSTRAINT market_latest_attempts_run_sequence_positive CHECK ((run_sequence > 0)),
     CONSTRAINT market_latest_attempts_side_valid CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text]))),
     CONSTRAINT market_latest_attempts_source_time_finite CHECK (((source_time IS NULL) OR isfinite(source_time))),
     CONSTRAINT market_latest_attempts_status_valid CHECK ((status = ANY (ARRAY['present'::text, 'empty'::text, 'unavailable'::text, 'failed'::text]))),
-    CONSTRAINT market_latest_attempts_switch_version_positive CHECK ((switch_version > 0))
-);
-
-
---
--- Name: node_direction_assignments; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.node_direction_assignments (
-    node_id bigint NOT NULL,
-    platform text NOT NULL COLLATE pg_catalog."C",
-    side text NOT NULL COLLATE pg_catalog."C",
-    CONSTRAINT node_direction_assignments_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
-    CONSTRAINT node_direction_assignments_side_valid CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text])))
+    CONSTRAINT market_latest_attempts_switch_version_positive CHECK ((switch_version > 0)),
+    CONSTRAINT market_latest_attempts_write_seq_positive CHECK ((write_seq > 0))
 );
 
 
@@ -665,35 +614,11 @@ ALTER TABLE ONLY public.buffgo_storage_migrations
 
 
 --
--- Name: collection_page_payloads collection_page_payloads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_latest_pages collection_latest_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.collection_page_payloads
-    ADD CONSTRAINT collection_page_payloads_pkey PRIMARY KEY (run_id, page_sequence);
-
-
---
--- Name: collection_pages collection_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.collection_pages
-    ADD CONSTRAINT collection_pages_pkey PRIMARY KEY (run_id, page_sequence);
-
-
---
--- Name: collection_runs collection_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.collection_runs
-    ADD CONSTRAINT collection_runs_pkey PRIMARY KEY (run_id);
-
-
---
--- Name: collection_runs collection_runs_target_sequence_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.collection_runs
-    ADD CONSTRAINT collection_runs_target_sequence_key UNIQUE (target_id, run_sequence);
+ALTER TABLE ONLY public.collection_latest_pages
+    ADD CONSTRAINT collection_latest_pages_pkey PRIMARY KEY (target_id);
 
 
 --
@@ -702,6 +627,22 @@ ALTER TABLE ONLY public.collection_runs
 
 ALTER TABLE ONLY public.collection_targets
     ADD CONSTRAINT collection_targets_pkey PRIMARY KEY (target_id);
+
+
+--
+-- Name: collection_tasks collection_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_tasks
+    ADD CONSTRAINT collection_tasks_pkey PRIMARY KEY (task_id);
+
+
+--
+-- Name: collection_tasks collection_tasks_target_enqueue_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_tasks
+    ADD CONSTRAINT collection_tasks_target_enqueue_key UNIQUE (target_id, enqueue_seq);
 
 
 --
@@ -718,14 +659,6 @@ ALTER TABLE ONLY public.market_last_present
 
 ALTER TABLE ONLY public.market_latest_attempts
     ADD CONSTRAINT market_latest_attempts_pkey PRIMARY KEY (product_id, platform, side);
-
-
---
--- Name: node_direction_assignments node_direction_assignments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.node_direction_assignments
-    ADD CONSTRAINT node_direction_assignments_pkey PRIMARY KEY (node_id, platform);
 
 
 --
@@ -848,31 +781,24 @@ CREATE INDEX account_node_combinations_node_id_idx ON public.account_node_combin
 
 
 --
--- Name: collection_page_payloads_recent; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX collection_page_payloads_recent ON public.collection_page_payloads USING btree (created_at DESC, run_id DESC, page_sequence DESC);
-
-
---
--- Name: collection_runs_active_detail_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX collection_runs_active_detail_key ON public.collection_runs USING btree (platform, appid, side, product_id) WHERE ((kind = 'detail'::text) AND (status = ANY (ARRAY['pending'::text, 'running'::text])));
-
-
---
--- Name: collection_runs_active_summary_key; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX collection_runs_active_summary_key ON public.collection_runs USING btree (target_id) WHERE ((kind = 'summary'::text) AND (status = ANY (ARRAY['pending'::text, 'running'::text])));
-
-
---
 -- Name: collection_targets_summary_identity_key; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX collection_targets_summary_identity_key ON public.collection_targets USING btree (platform, appid, side) WHERE (kind = 'summary'::text);
+
+
+--
+-- Name: collection_tasks_claim_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX collection_tasks_claim_order ON public.collection_tasks USING btree (enqueued_at, task_id) WHERE (state = 'queued'::text);
+
+
+--
+-- Name: collection_tasks_claimed_by; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX collection_tasks_claimed_by ON public.collection_tasks USING btree (claimed_by) WHERE (state = 'claimed'::text);
 
 
 --
@@ -940,43 +866,35 @@ ALTER TABLE ONLY public.account_node_combinations
 
 
 --
--- Name: account_node_combinations account_node_combinations_node_direction_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: account_node_combinations account_node_combinations_node_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.account_node_combinations
-    ADD CONSTRAINT account_node_combinations_node_direction_fkey FOREIGN KEY (node_id, platform) REFERENCES public.node_direction_assignments(node_id, platform) ON UPDATE RESTRICT ON DELETE RESTRICT;
+    ADD CONSTRAINT account_node_combinations_node_fkey FOREIGN KEY (node_id) REFERENCES public.access_nodes(node_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
--- Name: collection_page_payloads collection_page_payloads_page_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_latest_pages collection_latest_pages_target_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.collection_page_payloads
-    ADD CONSTRAINT collection_page_payloads_page_fkey FOREIGN KEY (run_id, page_sequence) REFERENCES public.collection_pages(run_id, page_sequence) ON UPDATE RESTRICT ON DELETE CASCADE;
-
-
---
--- Name: collection_pages collection_pages_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.collection_pages
-    ADD CONSTRAINT collection_pages_run_fkey FOREIGN KEY (run_id) REFERENCES public.collection_runs(run_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+ALTER TABLE ONLY public.collection_latest_pages
+    ADD CONSTRAINT collection_latest_pages_target_fkey FOREIGN KEY (target_id) REFERENCES public.collection_targets(target_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
--- Name: collection_runs collection_runs_detail_product_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_tasks collection_tasks_claimed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.collection_runs
-    ADD CONSTRAINT collection_runs_detail_product_fkey FOREIGN KEY (product_id, appid) REFERENCES public.steam_products(product_id, appid) ON UPDATE RESTRICT ON DELETE RESTRICT;
+ALTER TABLE ONLY public.collection_tasks
+    ADD CONSTRAINT collection_tasks_claimed_by_fkey FOREIGN KEY (claimed_by) REFERENCES public.account_node_combinations(combination_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
--- Name: collection_runs collection_runs_target_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: collection_tasks collection_tasks_target_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.collection_runs
-    ADD CONSTRAINT collection_runs_target_fkey FOREIGN KEY (target_id) REFERENCES public.collection_targets(target_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+ALTER TABLE ONLY public.collection_tasks
+    ADD CONSTRAINT collection_tasks_target_fkey FOREIGN KEY (target_id) REFERENCES public.collection_targets(target_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --
@@ -993,14 +911,6 @@ ALTER TABLE ONLY public.market_last_present
 
 ALTER TABLE ONLY public.market_latest_attempts
     ADD CONSTRAINT market_latest_attempts_product_fkey FOREIGN KEY (product_id) REFERENCES public.steam_products(product_id) ON DELETE RESTRICT;
-
-
---
--- Name: node_direction_assignments node_direction_assignments_node_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.node_direction_assignments
-    ADD CONSTRAINT node_direction_assignments_node_fkey FOREIGN KEY (node_id) REFERENCES public.access_nodes(node_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 --

@@ -77,6 +77,9 @@ func TestTargetConstructorsRejectInvalidShapes(t *testing.T) {
 		}},
 		{"non UTC time", func(input *SummaryTargetInput) { input.ChangedAt = input.ChangedAt.In(time.FixedZone("offset", 0)) }},
 		{"nanosecond time", func(input *SummaryTargetInput) { input.ChangedAt = input.ChangedAt.Add(time.Nanosecond) }},
+		{"cs2 steam facets", func(input *SummaryTargetInput) {
+			input.SteamFacets = SteamFacets{Cats: []string{"steamcat.armor"}}
+		}},
 	}
 	for _, test := range summaryCases {
 		t.Run("summary "+test.name, func(t *testing.T) {
@@ -144,6 +147,9 @@ func TestTargetTransitionsAndFences(t *testing.T) {
 	}
 	if enabled.Desired() != DesiredEnabled || enabled.Actual() != ActualStarting || enabled.Revision() != 2 || enabled.SwitchVersion() != 2 {
 		t.Fatalf("enabled target = %+v", enabled)
+	}
+	if !enabled.RefillCursor().Equal(Cursor{}) || enabled.RefillTotal() != 0 {
+		t.Fatal("Enable must reset refill cursor")
 	}
 	if appID, ok := enabled.AppID(); !ok || appID != 730 {
 		t.Fatalf("summary AppID() = %d, %v", appID, ok)
@@ -312,5 +318,91 @@ func TestTargetAutomaticRecoveryWaitsForRecheck(t *testing.T) {
 	}
 	if running.Actual() != ActualRunning || running.Recovery() != RecoveryNone {
 		t.Fatalf("running target = %+v", running)
+	}
+}
+
+func TestTargetSwitchResetsRefillKeepsWriteSeq(t *testing.T) {
+	cursor, err := EncodeAskRefill(40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := stoppedSummaryTargetInput()
+	input.WriteSeq = 9
+	input.RefillCursor = cursor
+	input.RefillTotal = 120
+	target, err := NewSummaryTarget(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := target.Enable(targetTime(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled.WriteSeq() != 9 || !enabled.RefillCursor().Equal(Cursor{}) || enabled.RefillTotal() != 0 {
+		t.Fatalf("enable refill write=%d cursor=%q total=%d", enabled.WriteSeq(), enabled.RefillCursor().Bytes(), enabled.RefillTotal())
+	}
+	sorted, err := enabled.SetSortOrder(SortOrder{Column: SortColumnQuantity, Direction: SortDescending}, targetTime(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sorted.WriteSeq() != 9 || !sorted.RefillCursor().Equal(Cursor{}) {
+		t.Fatalf("sort kept write_seq and reset refill: write=%d", sorted.WriteSeq())
+	}
+	minCents := int64(1000)
+	maxCents := int64(879769)
+	ranged, err := sorted.SetPriceRange(PriceRange{MinCents: &minCents, MaxCents: &maxCents}, targetTime(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ranged.WriteSeq() != 9 || !ranged.RefillCursor().Equal(Cursor{}) {
+		t.Fatalf("price range kept write_seq and reset refill: write=%d", ranged.WriteSeq())
+	}
+	if ranged.PriceRange().MinCents == nil || *ranged.PriceRange().MinCents != 1000 {
+		t.Fatalf("price range = %+v", ranged.PriceRange())
+	}
+}
+
+func TestSetSteamFacetsResetsRefill(t *testing.T) {
+	input := stoppedSummaryTargetInput()
+	input.AppID = 252490
+	input.WriteSeq = 9
+	target, err := NewSummaryTarget(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := target.Enable(targetTime(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := enabled.SetSteamFacets(SteamFacets{
+		Cats:    []string{"steamcat.weapon"},
+		Classes: []string{"ak47u"},
+	}, targetTime(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.WriteSeq() != 9 || !changed.RefillCursor().Equal(Cursor{}) {
+		t.Fatalf("steam facets kept write_seq and reset refill: write=%d", changed.WriteSeq())
+	}
+	if len(changed.SteamFacets().Cats) != 1 || changed.SteamFacets().Cats[0] != "steamcat.weapon" {
+		t.Fatalf("steam facets = %+v", changed.SteamFacets())
+	}
+}
+
+func TestSetSteamFacetsRejectsNonRust(t *testing.T) {
+	target, err := NewSummaryTarget(stoppedSummaryTargetInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.SetSteamFacets(SteamFacets{Cats: []string{"steamcat.armor"}}, targetTime(1)); err == nil {
+		t.Fatal("cs2 target must reject rust facets")
+	}
+}
+
+func TestPriceRangeRejectsInvertedBounds(t *testing.T) {
+	minCents := int64(200)
+	maxCents := int64(100)
+	if err := (PriceRange{MinCents: &minCents, MaxCents: &maxCents}).Validate(); err == nil {
+		t.Fatal("inverted range must fail")
 	}
 }

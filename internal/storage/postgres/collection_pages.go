@@ -3,182 +3,232 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"time"
 
 	"buff-go/internal/collection"
+	"buff-go/internal/market"
+	"buff-go/internal/resource"
 )
 
-// ErrPagePayloadNotFound 表示这一页的原始响应不在保留窗口内，或这个方向本来就不产出单页响应。
-var ErrPagePayloadNotFound = errors.New("collection page payload not found")
-
-// PageSummary 是一页的展示信息。PayloadBytes 为 0 表示原始响应副本已被淘汰或从未保存。
-type PageSummary struct {
-	PageSequence int64
-	CursorBefore string
-	CursorAfter  string
-	CollectedAt  time.Time
-	CommittedAt  time.Time
-	PayloadBytes int64
-	// 执行这一页的账号与出口。000011 迁移之前提交的页没有记录，两者都为空。
-	AccountID    int64
-	AccountAlias string
-	ExitAddress  string
-}
-
-// PageAttempt 是某一页写入的一条行情事实，附带商品名与最近一次有效价。
-type PageAttempt struct {
-	ProductID   int64
-	AppID       int64
-	Name        string
-	Platform    string
-	Side        string
-	Status      string
-	ReasonCode  string
-	CollectedAt time.Time
-	// SourceTime 只有 present 状态才有，empty 与失败状态是空的
-	SourceTime *time.Time
-	PriceCents *int64
-	OrderCount *int64
-}
-
-// PageSummaries 列出一个批次已提交的页。与 Pages 不同，这里不校验游标链，
-// 只为控制台展示服务。
-func (s *Store) PageSummaries(ctx context.Context, id collection.RunID) ([]PageSummary, error) {
+// ListWorkers returns one row per combination for the run page.
+func (s *Store) ListWorkers(ctx context.Context) ([]collection.WorkerSnapshot, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return nil, err
 	}
-	if id.Validate() != nil {
-		return nil, ErrCollectionInvalidInput
-	}
-	// 账号别名用左连接：账号被删不该让采集历史查不出来
 	rows, err := s.db.QueryContext(ctx, `
-SELECT pg.page_sequence, pg.cursor_before, pg.cursor_after, pg.collected_at, pg.committed_at,
-       COALESCE(pl.byte_size, 0), pg.account_id, ac.alias, pg.exit_address
-FROM collection_pages pg
-LEFT JOIN collection_page_payloads pl
-  ON pl.run_id = pg.run_id AND pl.page_sequence = pg.page_sequence
-LEFT JOIN platform_accounts ac ON ac.account_id = pg.account_id
-WHERE pg.run_id = $1
-ORDER BY pg.page_sequence`, int64(id))
+SELECT c.combination_id, c.platform, c.account_id, c.node_id,
+       a.alias, a.session_state, n.name, n.region, host(n.exit_address),
+       t.target_id, t.appid, t.side, t.platform
+FROM account_node_combinations c
+JOIN platform_accounts a ON a.account_id = c.account_id AND a.platform = c.platform
+JOIN access_nodes n ON n.node_id = c.node_id
+LEFT JOIN collection_tasks task
+  ON task.claimed_by = c.combination_id AND task.state = 'claimed'
+LEFT JOIN collection_targets t ON t.target_id = task.target_id
+ORDER BY c.combination_id`)
 	if err != nil {
-		return nil, mapCollectionReadError(ctx, err)
+		return nil, collectionStorageError(ctx)
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
-	summaries := make([]PageSummary, 0, 16)
+	workers := make([]collection.WorkerSnapshot, 0)
+	type claimed struct {
+		index    int
+		targetID collection.TargetID
+		platform collection.Platform
+		side     market.Side
+	}
+	claims := make([]claimed, 0)
 	for rows.Next() {
-		var summary PageSummary
-		var before, after []byte
-		var accountID sql.NullInt64
-		var alias, exitAddress sql.NullString
-		if err := rows.Scan(&summary.PageSequence, &before, &after,
-			&summary.CollectedAt, &summary.CommittedAt, &summary.PayloadBytes,
-			&accountID, &alias, &exitAddress); err != nil {
+		var (
+			combinationID, accountID, nodeID       int64
+			platform, alias, session, name, region string
+			exit                                   sql.NullString
+			targetID, appID                        sql.NullInt64
+			side, targetPlatform                   sql.NullString
+		)
+		if err := rows.Scan(&combinationID, &platform, &accountID, &nodeID,
+			&alias, &session, &name, &region, &exit,
+			&targetID, &appID, &side, &targetPlatform); err != nil {
 			return nil, mapCollectionReadError(ctx, err)
 		}
-		summary.CursorBefore = string(before)
-		summary.CursorAfter = string(after)
-		summary.AccountID = accountID.Int64
-		summary.AccountAlias = alias.String
-		summary.ExitAddress = exitAddress.String
-		summaries = append(summaries, summary)
+		worker := collection.WorkerSnapshot{
+			Combination: resource.AccountNodeCombination{
+				ID:        resource.CombinationID(combinationID),
+				Platform:  resource.Platform(platform),
+				AccountID: resource.AccountID(accountID),
+				NodeID:    resource.NodeID(nodeID),
+			},
+			AccountAlias: alias,
+			SessionState: resource.AccountSessionState(session),
+			NodeName:     name,
+			ExitAddress:  exit.String,
+			Region:       resource.NodeRegion(region),
+			Idle:         !targetID.Valid,
+		}
+		if targetID.Valid {
+			claim := &collection.WorkerClaim{
+				TargetID: collection.TargetID(targetID.Int64),
+				AppID:    appID.Int64,
+				Side:     market.Side(side.String),
+				Platform: collection.Platform(targetPlatform.String),
+			}
+			worker.Claim = claim
+			claims = append(claims, claimed{
+				index:    len(workers),
+				targetID: claim.TargetID,
+				platform: claim.Platform,
+				side:     claim.Side,
+			})
+		}
+		workers = append(workers, worker)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, mapCollectionReadError(ctx, err)
+		return nil, collectionStorageError(ctx)
 	}
-	return summaries, nil
+	pages, err := s.latestPagesByWorker(ctx)
+	if err != nil {
+		return nil, err
+	}
+	loaded := make(map[collection.TargetID][]collection.WorkerItem)
+	for _, item := range claims {
+		items, err := s.latestPageItems(ctx, item.targetID, item.platform, item.side)
+		if err != nil {
+			return nil, err
+		}
+		loaded[item.targetID] = items
+		if workers[item.index].Claim != nil {
+			workers[item.index].Claim.Items = items
+		}
+	}
+	for index := range workers {
+		page, ok := matchWorkerPage(workers[index], pages)
+		if !ok {
+			continue
+		}
+		items, ok := loaded[page.TargetID]
+		if !ok {
+			items, err = s.latestPageItems(ctx, page.TargetID, page.Platform, page.Side)
+			if err != nil {
+				return nil, err
+			}
+			loaded[page.TargetID] = items
+		}
+		page.Items = items
+		workers[index].LastPage = &page
+	}
+	return workers, nil
 }
 
-// PagePayload 返回一页的平台原始响应。副本被淘汰或从未保存时报 ErrPagePayloadNotFound。
-func (s *Store) PagePayload(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]byte, error) {
-	if err := s.validateCollectionStore(); err != nil {
-		return nil, err
-	}
-	if id.Validate() != nil || sequence.Validate() != nil {
-		return nil, ErrCollectionInvalidInput
-	}
-	var compressed []byte
-	err := s.db.QueryRowContext(ctx, `
-SELECT payload_gzip
-FROM collection_page_payloads
-WHERE run_id = $1 AND page_sequence = $2`, int64(id), int64(sequence)).Scan(&compressed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrPagePayloadNotFound
-	}
-	if err != nil {
-		return nil, mapCollectionReadError(ctx, err)
-	}
-	payload, err := gunzipPayload(compressed)
-	if err != nil {
-		return nil, ErrCollectionIntegrity
-	}
-	return payload, nil
+type workerPageRow struct {
+	accountID   int64
+	exit        string
+	targetID    collection.TargetID
+	appID       int64
+	side        market.Side
+	platform    collection.Platform
+	committedAt time.Time
 }
 
-// PageAttempts 列出一页写入的行情事实。因为 market_latest_attempts 按商品保留
-// 最新一次结果，后续批次重新采到同一商品时这里会查不到那条，返回的是当前仍
-// 归属这一页的部分。
-func (s *Store) PageAttempts(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]PageAttempt, error) {
-	if err := s.validateCollectionStore(); err != nil {
-		return nil, err
-	}
-	if id.Validate() != nil || sequence.Validate() != nil {
-		return nil, ErrCollectionInvalidInput
-	}
-	run, found, err := s.Run(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return nil, ErrCollectionNotFound
-	}
-	side, hasSide := run.Side()
-	switchVersion, hasSwitch := run.SwitchVersion()
-	if !hasSide || !hasSwitch {
-		return []PageAttempt{}, nil
-	}
+func (s *Store) latestPagesByWorker(ctx context.Context) ([]workerPageRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT p.product_id, p.appid, p.name, a.platform, a.side, a.status, a.reason_code,
-       a.collected_at, a.source_time,
-       lp.price_cny_cents, lp.order_count
-FROM market_latest_attempts a
+SELECT DISTINCT ON (pg.account_id, host(pg.exit_address))
+       pg.account_id, COALESCE(host(pg.exit_address), ''),
+       pg.target_id, pg.committed_at, t.appid, t.side, t.platform
+FROM collection_latest_pages pg
+JOIN collection_targets t ON t.target_id = pg.target_id
+WHERE pg.account_id IS NOT NULL
+ORDER BY pg.account_id, host(pg.exit_address), pg.committed_at DESC`)
+	if err != nil {
+		return nil, mapCollectionReadError(ctx, err)
+	}
+	defer rows.Close()
+
+	pages := make([]workerPageRow, 0)
+	for rows.Next() {
+		var page workerPageRow
+		var side, platform string
+		if err := rows.Scan(&page.accountID, &page.exit, &page.targetID, &page.committedAt, &page.appID, &side, &platform); err != nil {
+			return nil, mapCollectionReadError(ctx, err)
+		}
+		page.side = market.Side(side)
+		page.platform = collection.Platform(platform)
+		pages = append(pages, page)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	return pages, nil
+}
+
+func matchWorkerPage(worker collection.WorkerSnapshot, pages []workerPageRow) (collection.WorkerPage, bool) {
+	accountID := int64(worker.Combination.AccountID)
+	var fallback workerPageRow
+	var hasFallback bool
+	for _, page := range pages {
+		if page.accountID != accountID {
+			continue
+		}
+		if worker.ExitAddress != "" && page.exit != "" && worker.ExitAddress == page.exit {
+			return toWorkerPage(page), true
+		}
+		if page.exit == "" || worker.ExitAddress == "" {
+			fallback, hasFallback = page, true
+		}
+	}
+	if hasFallback {
+		return toWorkerPage(fallback), true
+	}
+	return collection.WorkerPage{}, false
+}
+
+func toWorkerPage(page workerPageRow) collection.WorkerPage {
+	return collection.WorkerPage{
+		TargetID:    page.targetID,
+		AppID:       page.appID,
+		Side:        page.side,
+		Platform:    page.platform,
+		CommittedAt: page.committedAt,
+	}
+}
+
+func (s *Store) latestPageItems(
+	ctx context.Context,
+	targetID collection.TargetID,
+	platform collection.Platform,
+	side market.Side,
+) ([]collection.WorkerItem, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT p.product_id, p.name, a.status, lp.price_cny_cents
+FROM collection_latest_pages pg
+JOIN collection_targets t ON t.target_id = pg.target_id
+JOIN market_latest_attempts a
+  ON a.platform = t.platform AND a.side = t.side
+ AND a.switch_version = t.switch_version AND a.write_seq = pg.write_seq
 JOIN steam_products p ON p.product_id = a.product_id
 LEFT JOIN market_last_present lp
   ON lp.product_id = a.product_id AND lp.platform = a.platform AND lp.side = a.side
-WHERE a.platform = $1 AND a.side = $2
-  AND a.switch_version = $3 AND a.run_sequence = $4 AND a.page_sequence = $5
-ORDER BY p.product_id`,
-		string(run.Platform()), string(side), int64(switchVersion),
-		int64(run.RunSequence()), int64(sequence))
+WHERE pg.target_id = $1 AND t.platform = $2 AND t.side = $3
+ORDER BY p.product_id`, int64(targetID), string(platform), string(side))
 	if err != nil {
 		return nil, mapCollectionReadError(ctx, err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer rows.Close()
 
-	attempts := make([]PageAttempt, 0, 16)
+	items := make([]collection.WorkerItem, 0)
 	for rows.Next() {
-		var attempt PageAttempt
-		var price, count sql.NullInt64
-		var sourceTime sql.NullTime
-		if err := rows.Scan(&attempt.ProductID, &attempt.AppID, &attempt.Name,
-			&attempt.Platform, &attempt.Side, &attempt.Status, &attempt.ReasonCode,
-			&attempt.CollectedAt, &sourceTime, &price, &count); err != nil {
+		var item collection.WorkerItem
+		var price sql.NullInt64
+		if err := rows.Scan(&item.ProductID, &item.Name, &item.Status, &price); err != nil {
 			return nil, mapCollectionReadError(ctx, err)
 		}
-		if sourceTime.Valid {
-			attempt.SourceTime = &sourceTime.Time
-		}
 		if price.Valid {
-			attempt.PriceCents = &price.Int64
+			item.PriceCents = &price.Int64
 		}
-		if count.Valid {
-			attempt.OrderCount = &count.Int64
-		}
-		attempts = append(attempts, attempt)
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, mapCollectionReadError(ctx, err)
 	}
-	return attempts, nil
+	return items, nil
 }

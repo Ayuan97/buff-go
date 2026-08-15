@@ -1,7 +1,31 @@
 // 展示格式化：金额分整数 → 元；时间 → 本地相对/绝对文本
-export function fenToYuan(fen: number | null): string {
-  if (fen === null) return '—'
+export function fenToYuan(fen: number | null | undefined): string {
+  if (fen == null) return '—'
   return '¥' + (fen / 100).toFixed(2)
+}
+
+export function dropPctText(bp: number | null | undefined): string {
+  if (bp == null || bp <= 0) return ''
+  const pct = bp / 100
+  return `-${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}%`
+}
+
+export function dropWindowLabel(window: string): string {
+  if (window === '7d') return '7 天'
+  if (window === '30d') return '30 天'
+  return '24 小时'
+}
+
+export function tickDelta(prevCents: number | undefined, priceCents: number): number | null {
+  if (prevCents == null) return null
+  return priceCents - prevCents
+}
+
+export function tickDeltaText(prevCents: number | undefined, priceCents: number): string {
+  const delta = tickDelta(prevCents, priceCents)
+  if (delta == null) return '首次入价'
+  const sign = delta > 0 ? '+' : ''
+  return `${sign}${fenToYuan(delta)}`
 }
 
 export function fmtTime(iso: string | null): string {
@@ -69,12 +93,18 @@ export const nodeKindText = (k: 'direct' | 'proxy'): string =>
 export const egressModeText = (m: 'static' | 'sticky'): string =>
   m === 'static' ? '固定出口' : '会话保持'
 
-const GAMES: Record<number, { short: string; full: string }> = {
-  730: { short: 'CS2', full: 'Counter-Strike 2' },
-  570: { short: 'Dota2', full: 'Dota 2' },
-  440: { short: 'TF2', full: 'Team Fortress 2' },
-  252490: { short: 'Rust', full: 'Rust' },
-}
+export const RUST_APPID = 252490
+
+export const KNOWN_GAMES = [
+  { appid: 730, short: 'CS2', full: 'Counter-Strike 2' },
+  { appid: 570, short: 'Dota2', full: 'Dota 2' },
+  { appid: 440, short: 'TF2', full: 'Team Fortress 2' },
+  { appid: RUST_APPID, short: 'Rust', full: 'Rust' },
+] as const
+
+const GAMES: Record<number, { short: string; full: string }> = Object.fromEntries(
+  KNOWN_GAMES.map((game) => [game.appid, { short: game.short, full: game.full }]),
+)
 
 export const gameName = (appid: number): string => GAMES[appid]?.short ?? `游戏 ${appid}`
 
@@ -85,39 +115,18 @@ const PLATFORM_LABELS: Record<string, string> = { steam: 'Steam', buff: 'BUFF', 
 export const platformLabel = (platform: string): string =>
   PLATFORM_LABELS[platform.toLowerCase()] ?? platform
 
-export const runStateText = (s: 'pending' | 'running' | 'succeeded' | 'failed' | 'stopped'): string => {
-  const map: Record<string, string> = {
-    pending: '待开始',
-    running: '进行中',
-    succeeded: '成功',
-    failed: '失败',
-    stopped: '已停止',
+// Steam 商品页用 appid + market_hash_name 就能定位。BUFF/IGXE 的商品页要平台自己的 goods_id，
+// 目录里没有，不能拿 Steam 名字去猜。
+export function platformItemURL(platform: string, appid: number, name: string): string | null {
+  const hash = name.trim()
+  if (!hash || appid < 1) return null
+  if (platform.toLowerCase() === 'steam') {
+    return `https://steamcommunity.com/market/listings/${appid}/${encodeURIComponent(hash)}`
   }
-  return map[s] ?? s
+  return null
 }
 
-export const completenessText = (c: '' | 'complete' | 'partial' | undefined): string =>
-  c === 'complete' ? '抓全了' : c === 'partial' ? '只抓了一部分' : ''
-
-export const runReasonText = (reason: string | undefined): string => {
-  if (!reason) return ''
-  const map: Record<string, string> = {
-    network_error: '网络不通',
-    platform_error: '平台返回错误',
-    timeout: '超时',
-    login_invalid: '登录失效',
-    parse_error: '响应解析失败',
-    semantic_error: '数据不符合约定',
-    configuration_error: '配置有问题',
-    internal_error: '程序内部错误',
-    process_restarted: '进程重启后放弃续点',
-    switch_disabled: '被关掉了',
-    cancelled: '已取消',
-  }
-  return map[reason] ?? reason
-}
-
-// 行情单格的原因码和批次的原因码是两套词表：批次那套有库约束枚举，
+// 行情单格的原因码和目标状态原因码是两套词表：目标那套有库约束枚举，
 // 这套是抓取器按商品写的自由 slug，只有下面三个会真实出现。
 export const quoteStatusText = (status: 'present' | 'empty' | 'unavailable' | 'failed'): string =>
   ({ present: '有价', empty: '空行情', unavailable: '不可用', failed: '采集失败' })[status] ?? status
@@ -146,13 +155,12 @@ export const apiErrorText = (code: string): string => {
     node_occupied: '节点采集中，先关掉对应方向再改',
     node_in_use: '节点还绑着组合，先解绑',
     node_revision_conflict: '节点已被改过，刷新后再试',
-    node_assignment_conflict: '归属已被改过，刷新后再试',
     node_name_conflict: '节点名已存在',
     invalid_node: '节点内容不合法',
     invalid_exit_address: '出口必须是公网 IP，不能填 127.0.0.1 或内网地址',
     platform_region_mismatch: '节点地域和平台不匹配：Steam 要国外或香港节点，BUFF、IGXE 要国内或香港节点',
     combination_occupied: '组合采集中，先关掉对应方向再改',
-    combination_incompatible: '这个账号和节点不能绑：平台不一致，或节点还没划游戏和方向',
+    combination_incompatible: '这个账号和节点不能绑：账号或节点不存在',
     combination_conflict: '这对账号和节点已经绑过了',
     combination_not_found: '组合不存在，刷新后再试',
     resource_in_use: '还有组合在用，先解绑',
@@ -174,6 +182,9 @@ export const apiErrorText = (code: string): string => {
     resource_storage_unavailable: '数据库不可用，稍后再试',
     resource_integrity: '资源数据异常，检查服务日志',
     resource_error: '资源操作失败，检查服务日志',
+    invalid_product_id: '商品不存在或不合法',
+    invalid_side: '方向只能是求购或出售',
+    invalid_price_ticks: '变价记录查询不合法',
     invalid_json: '请求内容不合法',
     body_not_allowed: '请求内容不合法',
     csrf_rejected: '页面过期，刷新后再试',

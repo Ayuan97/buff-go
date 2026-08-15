@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"buff-go/internal/market"
 	"buff-go/internal/resource"
 	"buff-go/internal/storage/postgres"
 )
@@ -22,17 +22,9 @@ type nodeResponse struct {
 	EgressMode              resource.EgressMode `json:"egress_mode"`
 	State                   resource.NodeState  `json:"state"`
 	EgressRevision          int64               `json:"egress_revision"`
-	AssignmentRevision      int64               `json:"assignment_revision"`
-	AppID                   *int64              `json:"appid,omitempty"`
-	Sides                   []nodeSideResponse  `json:"sides"`
 	HasProxyCredential      bool                `json:"has_proxy_credential"`
 	StickySessionValidUntil *time.Time          `json:"sticky_session_valid_until,omitempty"`
 	ExitVerification        *nodeExitResponse   `json:"exit,omitempty"`
-}
-
-type nodeSideResponse struct {
-	Platform resource.Platform `json:"platform"`
-	Side     market.Side       `json:"side"`
 }
 
 type nodeExitResponse struct {
@@ -67,17 +59,6 @@ type nodeExitRequest struct {
 	ExpectedEgressRevision int64     `json:"expected_egress_revision"`
 	Address                string    `json:"address"`
 	ValidUntil             time.Time `json:"valid_until"`
-}
-
-type nodeAssignGameRequest struct {
-	ExpectedAssignmentRevision int64  `json:"expected_assignment_revision"`
-	AppID                      *int64 `json:"appid"`
-}
-
-type nodeAssignSideRequest struct {
-	ExpectedAssignmentRevision int64             `json:"expected_assignment_revision"`
-	Platform                   resource.Platform `json:"platform"`
-	Side                       *market.Side      `json:"side"`
 }
 
 func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
@@ -155,21 +136,20 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		// 换线路会改地域，已划出去的方向必须仍能用新地域，否则调度器只会静默跳过这个节点。
-		current, found, err := h.nodes.Node(r.Context(), id)
-		if err != nil {
+		if _, found, err := h.nodes.Node(r.Context(), id); err != nil {
 			writeNodeError(w, err)
 			return
-		}
-		if !found {
+		} else if !found {
 			writeError(w, http.StatusNotFound, "node_not_found")
 			return
 		}
-		for _, assignment := range current.Sides {
-			if !h.platformAllowsRegion(assignment.Platform, input.Region) {
+		if err := h.ensureNodeRegionAllowsBoundPlatforms(r.Context(), id, input.Region); err != nil {
+			if errors.Is(err, errPlatformRegionMismatch) {
 				writeError(w, http.StatusConflict, "platform_region_mismatch")
 				return
 			}
+			writeNodeError(w, err)
+			return
 		}
 		node, err := h.nodes.ReplaceNodeConnection(r.Context(), id, input.ExpectedEgressRevision, nodeConnectionInput(input.Kind, input.Region, input.EgressMode, input.StickySessionValidUntil, input.ProxyCredential))
 		if err != nil {
@@ -188,51 +168,6 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		node, err := h.nodes.RecordNodeExit(r.Context(), id, input.ExpectedEgressRevision, address, input.ValidUntil)
-		if err != nil {
-			writeNodeError(w, err)
-			return
-		}
-		writeAccountJSON(w, http.StatusOK, toNodeResponse(node))
-	case "assign-game":
-		var input nodeAssignGameRequest
-		if !decodeJSON(w, r, &input) {
-			return
-		}
-		var appID int64
-		if input.AppID != nil {
-			appID = *input.AppID
-		}
-		node, err := h.nodes.AssignNodeGame(r.Context(), id, input.ExpectedAssignmentRevision, appID)
-		if err != nil {
-			writeNodeError(w, err)
-			return
-		}
-		writeAccountJSON(w, http.StatusOK, toNodeResponse(node))
-	case "assign-side":
-		var input nodeAssignSideRequest
-		if !decodeJSON(w, r, &input) {
-			return
-		}
-		var side market.Side
-		if input.Side != nil {
-			side = *input.Side
-		}
-		if side != "" {
-			node, found, err := h.nodes.Node(r.Context(), id)
-			if err != nil {
-				writeNodeError(w, err)
-				return
-			}
-			if !found {
-				writeError(w, http.StatusNotFound, "node_not_found")
-				return
-			}
-			if !h.platformAllowsRegion(input.Platform, node.Region) {
-				writeError(w, http.StatusConflict, "platform_region_mismatch")
-				return
-			}
-		}
-		node, err := h.nodes.AssignNodeSide(r.Context(), id, input.ExpectedAssignmentRevision, input.Platform, side)
 		if err != nil {
 			writeNodeError(w, err)
 			return
@@ -257,7 +192,7 @@ func (h *Handler) serveNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // platformAllowsRegion 判断节点地域能否服务某个平台。规则来自采集侧的平台档案，
-// 与调度器挑组合时用的 NodeRegion.Allows 是同一条判断；没有档案的平台不做限制。
+// 与工人认领时用的 NodeRegion.Allows 是同一条判断；没有档案的平台不做限制。
 func (h *Handler) platformAllowsRegion(platform resource.Platform, region resource.NodeRegion) bool {
 	target, ok := h.platformRegions[platform]
 	if !ok {
@@ -274,20 +209,30 @@ func nodeConnectionInput(kind resource.NodeKind, region resource.NodeRegion, mod
 	return input
 }
 
+var errPlatformRegionMismatch = errors.New("platform region mismatch")
+
+func (h *Handler) ensureNodeRegionAllowsBoundPlatforms(ctx context.Context, id resource.NodeID, region resource.NodeRegion) error {
+	if h.combinations == nil {
+		return nil
+	}
+	combinations, err := h.combinations.ListCombinations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, combination := range combinations {
+		if combination.NodeID == id && !h.platformAllowsRegion(combination.Platform, region) {
+			return errPlatformRegionMismatch
+		}
+	}
+	return nil
+}
+
 func toNodeResponse(node resource.AccessNode) nodeResponse {
 	out := nodeResponse{
 		ID: node.ID, Name: node.Name, Kind: node.Kind, Region: node.Region,
 		EgressMode: node.EgressMode, State: node.State, EgressRevision: node.EgressRevision,
-		AssignmentRevision: node.AssignmentRevision, HasProxyCredential: node.HasProxyCredential,
+		HasProxyCredential:      node.HasProxyCredential,
 		StickySessionValidUntil: node.StickySessionValidUntil,
-		Sides:                   make([]nodeSideResponse, 0, len(node.Sides)),
-	}
-	if node.AppID > 0 {
-		appID := node.AppID
-		out.AppID = &appID
-	}
-	for _, assignment := range node.Sides {
-		out.Sides = append(out.Sides, nodeSideResponse{Platform: assignment.Platform, Side: assignment.Side})
 	}
 	if node.ExitVerification != nil {
 		out.ExitVerification = &nodeExitResponse{
@@ -309,8 +254,6 @@ func writeNodeError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "node_not_found")
 	case errors.Is(err, postgres.ErrResourceRevisionConflict):
 		writeError(w, http.StatusConflict, "node_revision_conflict")
-	case errors.Is(err, postgres.ErrNodeAssignmentConflict):
-		writeError(w, http.StatusConflict, "node_assignment_conflict")
 	case errors.Is(err, postgres.ErrNodeNameConflict):
 		writeError(w, http.StatusConflict, "node_name_conflict")
 	case errors.Is(err, postgres.ErrCombinationIncompatible):

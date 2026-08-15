@@ -3,6 +3,7 @@ package steam
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,16 +135,16 @@ func (f *Fetcher) FetchPage(ctx context.Context, request collection.PageFetch) (
 }
 
 func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
-	start, err := cursorOffset(request.Cursor)
+	page, err := decodeAskPayload(request)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
 	query := url.Values{}
 	query.Set("query", "")
-	query.Set("start", strconv.Itoa(start))
-	query.Set("count", strconv.Itoa(f.pageSize))
+	query.Set("start", strconv.Itoa(page.Start))
+	query.Set("count", strconv.Itoa(page.Count))
 	query.Set("search_descriptions", "0")
-	// 顺序由采集目标决定：换了顺序游标就失效，所以目标改配置时会作废批次重开一轮
+	// 顺序由采集目标决定：换了顺序补货游标归零，队列也会被清空
 	sort := request.Sort
 	if sort.Validate() != nil {
 		sort = collection.DefaultSortOrder()
@@ -152,7 +153,9 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	query.Set("sort_dir", string(sort.Direction))
 	query.Set("appid", strconv.FormatInt(request.AppID, 10))
 	query.Set("norender", "1")
-	body, err := f.get(ctx, client, cookie, request.Lease, searchPath+"?"+query.Encode(), true)
+	applySearchPriceRange(query, request.PriceRange)
+	applySearchSteamFacets(query, request.AppID, request.SteamFacets)
+	body, err := f.get(ctx, client, cookie, request.Lease, searchPath+"?"+query.Encode(), false)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
@@ -160,6 +163,13 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
+	for _, item := range parsed.Results {
+		if isDollarPrice(item.SellPriceText) || isDollarPrice(item.SalePriceText) {
+			_ = f.recordSession(ctx, request.Lease, false)
+			return collection.FetchedPage{}, collection.ErrFetchSessionInvalid
+		}
+	}
+	_ = f.recordSession(ctx, request.Lease, true)
 	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(parsed.Results))
 	for _, item := range parsed.Results {
@@ -169,31 +179,20 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 		}
 		attempts = append(attempts, attempt)
 	}
-	next := start + len(parsed.Results)
-	after, err := encodeOffset(next)
-	if err != nil {
-		return collection.FetchedPage{}, err
-	}
-	final := parsed.TotalCount == 0 || next >= parsed.TotalCount || len(parsed.Results) == 0
-	// 出售摘要一页就是一个搜索响应，原样留给控制台下钻；求购按商品逐个请求，没有单一页面响应。
-	return collection.FetchedPage{CursorAfter: after, Attempts: attempts, Final: final, Payload: body}, nil
+	return collection.FetchedPage{Attempts: attempts, Payload: body, TotalCount: int64(parsed.TotalCount)}, nil
 }
 
 func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
-	afterID, err := cursorProductID(request.Cursor)
+	batch, err := decodeBidPayload(request)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
-	products, err := f.catalog.ListSteamProductsAfter(ctx, request.AppID, afterID, f.bidBatch)
+	products, err := f.catalog.ListSteamProductsAfter(ctx, request.AppID, batch.AfterID, batch.Limit)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
 	if len(products) == 0 {
-		after, err := encodeProductID(afterID)
-		if err != nil {
-			return collection.FetchedPage{}, err
-		}
-		return collection.FetchedPage{CursorAfter: after, Final: true}, nil
+		return collection.FetchedPage{}, nil
 	}
 	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(products))
@@ -204,16 +203,16 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 		}
 		attempt, err := orderbookAttempt(product, market.SideBid, body, collectedAt)
 		if err != nil {
+			if errors.Is(err, errForeignCurrency) {
+				_ = f.recordSession(ctx, request.Lease, false)
+				return collection.FetchedPage{}, collection.ErrFetchSessionInvalid
+			}
 			return collection.FetchedPage{}, err
 		}
 		attempts = append(attempts, attempt)
 	}
-	last := products[len(products)-1].ProductID
-	after, err := encodeProductID(last)
-	if err != nil {
-		return collection.FetchedPage{}, err
-	}
-	return collection.FetchedPage{CursorAfter: after, Attempts: attempts, Final: len(products) < f.bidBatch}, nil
+	_ = f.recordSession(ctx, request.Lease, true)
+	return collection.FetchedPage{Attempts: attempts}, nil
 }
 
 func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (collection.AttemptWrite, error) {
@@ -224,7 +223,7 @@ func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (colle
 	if err != nil {
 		return collection.AttemptWrite{}, err
 	}
-	media := searchMedia(item)
+	media := searchMedia(appID, hash, item)
 	price, err := parseYuanAsk(item)
 	if err != nil {
 		obs := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: collectedAt}
@@ -248,12 +247,33 @@ func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (colle
 }
 
 // searchMedia 提取展示用元数据。这些字段不参与行情判定，取不到就留空。
-func searchMedia(item searchResult) catalog.ProductMedia {
-	return catalog.ProductMedia{
+func searchMedia(appID int64, name string, item searchResult) catalog.ProductMedia {
+	media := catalog.ProductMedia{
 		IconPath:  item.AssetDescription.IconURL,
 		ItemType:  item.AssetDescription.Type,
 		NameColor: item.AssetDescription.NameColor,
-	}.Normalized()
+	}
+	// Rust 的 type 是「创意工坊物品」，用商品名对上 Steam item class 才有筛选价值
+	if appID == catalog.AppIDRust && (media.ItemType == "" || catalog.IsRustWorkshopType(media.ItemType)) {
+		if class, ok := catalog.MatchRustItemClass(name); ok {
+			media.ItemType = class.Label
+		}
+	}
+	return media.Normalized()
+}
+
+// applySearchSteamFacets 把配置页的 Rust 分类多选原样交给 search/render。
+// 参数名来自 Steam 市场 URL：category_steamcat / category_itemclass。
+func applySearchSteamFacets(query url.Values, appID int64, facets collection.SteamFacets) {
+	if appID != catalog.AppIDRust {
+		return
+	}
+	for _, slug := range facets.Normalized().Cats {
+		query.Add("category_steamcat", slug)
+	}
+	for _, slug := range facets.Normalized().Classes {
+		query.Add("category_itemclass", slug)
+	}
 }
 
 func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byte, collectedAt time.Time) (collection.AttemptWrite, error) {
@@ -269,6 +289,9 @@ func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byt
 	}
 	cents, empty, err := orderbookBest(side, *parsed.Data)
 	if err != nil {
+		if errors.Is(err, errForeignCurrency) {
+			return collection.AttemptWrite{}, err
+		}
 		write.Observation = market.Observation{Side: side, Status: market.StatusFailed, CollectedAt: collectedAt}
 		write.ReasonCode = "currency_rejected"
 		return write, nil
@@ -297,6 +320,21 @@ func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byt
 	}
 	write.Observation = obs
 	return write, nil
+}
+
+// applySearchPriceRange 把配置页的人民币分区间原样交给 search/render。
+// Steam 市场搜索用 price_min / price_max / price_currency=23，不是事后过滤。
+func applySearchPriceRange(query url.Values, bounds collection.PriceRange) {
+	if bounds.MinCents == nil && bounds.MaxCents == nil {
+		return
+	}
+	query.Set("price_currency", strconv.Itoa(evidencedCNYCurrency))
+	if bounds.MinCents != nil {
+		query.Set("price_min", strconv.FormatInt(*bounds.MinCents, 10))
+	}
+	if bounds.MaxCents != nil {
+		query.Set("price_max", strconv.FormatInt(*bounds.MaxCents, 10))
+	}
 }
 
 func orderbookQuery(appID int64, name string) string {

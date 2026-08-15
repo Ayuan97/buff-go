@@ -222,7 +222,7 @@ paths:
               $ref: "#/components/schemas/NodeRename"
       responses:
         "200":
-          description: Name updated; connection and assignment stay unchanged
+          description: Name updated; connection and exit evidence stay unchanged
           content:
             application/json:
               schema:
@@ -275,56 +275,6 @@ paths:
       responses:
         "200":
           description: Manual exit evidence recorded; node becomes available when valid
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Node"
-        "400":
-          $ref: "#/components/responses/Error"
-        "409":
-          $ref: "#/components/responses/Error"
-  /api/nodes/{id}/assign-game:
-    parameters:
-      - $ref: "#/components/parameters/NodeID"
-    post:
-      operationId: assignNodeGame
-      security:
-        - controlSession: []
-          csrfToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NodeAssignGame"
-      responses:
-        "200":
-          description: Game quota assigned or cleared
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Node"
-        "400":
-          $ref: "#/components/responses/Error"
-        "409":
-          $ref: "#/components/responses/Error"
-  /api/nodes/{id}/assign-side:
-    parameters:
-      - $ref: "#/components/parameters/NodeID"
-    post:
-      operationId: assignNodeSide
-      security:
-        - controlSession: []
-          csrfToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NodeAssignSide"
-      responses:
-        "200":
-          description: Game-platform-side assignment set or cleared
           content:
             application/json:
               schema:
@@ -625,9 +575,10 @@ paths:
     post:
       operationId: setTargetSortOrder
       description: >-
-        Changes the platform ordering this target collects with. The cursor is a
-        list offset, so this voids the active batch and the next cycle restarts
-        from the beginning. Stored market facts are kept.
+        Changes the platform ordering this target collects with. The refill
+        cursor is a list offset, so this advances switch_version, clears the
+        direction queue, and resets the refill cursor. Stored market facts and
+        write_seq are kept.
       security:
         - controlSession: []
           csrfToken: []
@@ -639,7 +590,68 @@ paths:
               $ref: "#/components/schemas/TargetSortOrder"
       responses:
         "200":
-          description: Ordering applied; the active batch is voided
+          description: Ordering applied; the direction queue is cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/targets/{id}/price-range:
+    parameters:
+      - $ref: "#/components/parameters/TargetID"
+    post:
+      operationId: setTargetPriceRange
+      description: >-
+        Sets the CNY fen bounds sent to Steam search/render as price_min /
+        price_max / price_currency=23. Bid collection has no matching Steam
+        parameter. Changing bounds advances switch_version and clears the
+        direction queue. Stored market facts and write_seq are kept.
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetPriceRange"
+      responses:
+        "200":
+          description: Price range applied; the direction queue is cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/targets/{id}/steam-facets:
+    parameters:
+      - $ref: "#/components/parameters/TargetID"
+    post:
+      operationId: setTargetSteamFacets
+      description: >-
+        Sets Rust category_steamcat / category_itemclass multi-select sent to
+        Steam search/render. Bid collection has no matching Steam parameter.
+        Changing the selection advances switch_version and clears the
+        direction queue. Stored market facts and write_seq are kept.
+        Only Rust (appid 252490) accepts a non-empty selection.
+      security:
+        - controlSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetSteamFacets"
+      responses:
+        "200":
+          description: Facets applied; the direction queue is cleared
           content:
             application/json:
               schema:
@@ -666,90 +678,62 @@ paths:
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
-  /api/runs:
+  /api/workers:
     get:
-      operationId: listRuns
+      operationId: listWorkers
+      description: >-
+        One row per account-node combination. Idle workers have no claim;
+        busy workers include the current direction and the latest page items.
+      responses:
+        "200":
+          description: Account plus egress IP workers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Worker"
+  /api/steam-facets:
+    get:
+      operationId: listSteamFacets
+      description: Static Steam market facet vocabulary for one game. Rust returns category and item class slugs.
       parameters:
-        - name: limit
+        - name: appid
           in: query
-          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
       responses:
         "200":
-          description: Recent collection runs
+          description: Facet vocabulary; empty lists when the game has none
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Run"
-  /api/runs/{id}/pages:
-    get:
-      operationId: listRunPages
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: {type: integer, format: int64, minimum: 1}
-      responses:
-        "200":
-          description: Committed pages of one run
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/CollectionPage"
+                type: object
+                additionalProperties: false
+                required: [categories, item_classes]
+                properties:
+                  categories:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [slug, label, name]
+                      properties:
+                        slug: {type: string}
+                        label: {type: string}
+                        name: {type: string}
+                  item_classes:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [slug, label, name, category]
+                      properties:
+                        slug: {type: string}
+                        label: {type: string}
+                        name: {type: string}
+                        category: {type: string}
         "400": {$ref: "#/components/responses/Error"}
-  /api/runs/{id}/pages/{sequence}/payload:
-    get:
-      operationId: getRunPagePayload
-      description: >-
-        Raw platform response for one page, returned verbatim. Only the most
-        recent pages are retained, and directions that issue one request per
-        product never store a payload.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: {type: integer, format: int64, minimum: 1}
-        - name: sequence
-          in: path
-          required: true
-          schema: {type: integer, format: int64, minimum: 1}
-      responses:
-        "200":
-          description: Raw platform response
-          content:
-            application/json:
-              schema: {type: object, additionalProperties: true}
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
-  /api/runs/{id}/pages/{sequence}/attempts:
-    get:
-      operationId: listRunPageAttempts
-      description: >-
-        Market facts still attributed to this page. Later runs overwrite a
-        product's latest attempt, so older pages report fewer rows over time.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: {type: integer, format: int64, minimum: 1}
-        - name: sequence
-          in: path
-          required: true
-          schema: {type: integer, format: int64, minimum: 1}
-      responses:
-        "200":
-          description: Market facts written by this page
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/PageAttempt"
-        "400": {$ref: "#/components/responses/Error"}
-        "404": {$ref: "#/components/responses/Error"}
   /api/quote-facets:
     get:
       operationId: listQuoteFacets
@@ -783,6 +767,10 @@ paths:
         - name: appid
           in: query
           schema: {type: integer, format: int64, minimum: 1}
+        - name: product_id
+          in: query
+          description: All platform and side quotes for one catalog product.
+          schema: {type: integer, format: int64, minimum: 1}
         - name: platform
           in: query
           schema: {type: string}
@@ -796,6 +784,24 @@ paths:
         - name: item_type
           in: query
           schema: {type: string, maxLength: 128}
+        - name: item_types
+          in: query
+          description: Repeated product item_type labels. Combined with steam_cats by AND.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 128
+            items: {type: string, maxLength: 128}
+        - name: steam_cats
+          in: query
+          description: Repeated Rust category_steamcat slugs expanded to item class labels.
+          style: form
+          explode: true
+          schema:
+            type: array
+            maxItems: 8
+            items: {type: string}
         - name: min_cents
           in: query
           description: Only products with a last present price at or above this value.
@@ -803,11 +809,23 @@ paths:
         - name: max_cents
           in: query
           schema: {type: integer, format: int64, minimum: 0}
+        - name: dropped
+          in: query
+          description: If 1, only quotes whose current present price is below the window high.
+          schema: {type: string, enum: ["1", "true"]}
+        - name: drop_window
+          in: query
+          description: Lookback used for window high, drop amount, and drop percent. Default 24h.
+          schema: {type: string, enum: [24h, 7d, 30d], default: 24h}
+        - name: min_drop_cents
+          in: query
+          description: Only quotes whose window drop is at least this many cents.
+          schema: {type: integer, format: int64, minimum: 0}
         - name: sort
           in: query
           schema:
             type: string
-            enum: [price_desc, price_asc, listings_desc, name]
+            enum: [price_desc, price_asc, listings_desc, name, drop_desc, drop_pct_desc]
             default: price_desc
         - name: offset
           in: query
@@ -830,6 +848,37 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Quote"
+  /api/price-ticks:
+    get:
+      operationId: listPriceTicks
+      parameters:
+        - name: product_id
+          in: query
+          schema: {type: integer, format: int64, minimum: 1}
+        - name: platform
+          in: query
+          schema: {type: string}
+        - name: side
+          in: query
+          schema: {type: string, enum: [bid, ask]}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      responses:
+        "200":
+          description: Recent CNY-cent price changes, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [ticks]
+                properties:
+                  ticks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PriceTick"
+        "400": {$ref: "#/components/responses/Error"}
 components:
   parameters:
     AccountID:
@@ -932,7 +981,6 @@ components:
             - node_occupied
             - node_in_use
             - node_revision_conflict
-            - node_assignment_conflict
             - node_name_conflict
             - platform_region_mismatch
             - invalid_node
@@ -968,6 +1016,9 @@ components:
             - invalid_price_range
             - invalid_appid
             - invalid_quotes
+            - invalid_product_id
+            - invalid_side
+            - invalid_price_ticks
     Capabilities:
       type: object
       additionalProperties: false
@@ -1009,7 +1060,7 @@ components:
     Node:
       type: object
       additionalProperties: false
-      required: [id, name, kind, region, egress_mode, state, egress_revision, assignment_revision, sides, has_proxy_credential]
+      required: [id, name, kind, region, egress_mode, state, egress_revision, has_proxy_credential]
       properties:
         id: {type: integer, format: int64, minimum: 1}
         name: {type: string}
@@ -1018,23 +1069,10 @@ components:
         egress_mode: {type: string, enum: [static, sticky]}
         state: {type: string, enum: [validating, available, unavailable]}
         egress_revision: {type: integer, format: int64, minimum: 1}
-        assignment_revision: {type: integer, format: int64, minimum: 1}
-        appid: {type: integer, format: int64, minimum: 1}
-        sides:
-          type: array
-          items:
-            $ref: "#/components/schemas/NodeSide"
         has_proxy_credential: {type: boolean}
         sticky_session_valid_until: {type: string, format: date-time}
         exit:
           $ref: "#/components/schemas/NodeExitView"
-    NodeSide:
-      type: object
-      additionalProperties: false
-      required: [platform, side]
-      properties:
-        platform: {type: string}
-        side: {type: string, enum: [bid, ask]}
     NodeExitView:
       type: object
       additionalProperties: false
@@ -1079,21 +1117,6 @@ components:
         expected_egress_revision: {type: integer, format: int64, minimum: 1}
         address: {type: string}
         valid_until: {type: string, format: date-time}
-    NodeAssignGame:
-      type: object
-      additionalProperties: false
-      required: [expected_assignment_revision]
-      properties:
-        expected_assignment_revision: {type: integer, format: int64, minimum: 1}
-        appid: {type: integer, format: int64, minimum: 0}
-    NodeAssignSide:
-      type: object
-      additionalProperties: false
-      required: [expected_assignment_revision, platform]
-      properties:
-        expected_assignment_revision: {type: integer, format: int64, minimum: 1}
-        platform: {type: string}
-        side: {type: string, enum: [bid, ask]}
     Combination:
       type: object
       additionalProperties: false
@@ -1192,6 +1215,14 @@ components:
           enum: [price, quantity, name]
           description: Platform ordering this target collects with.
         sort_dir: {type: string, enum: [asc, desc]}
+        price_min_cents: {type: integer, format: int64, minimum: 0}
+        price_max_cents: {type: integer, format: int64, minimum: 0}
+        steam_cats:
+          type: array
+          items: {type: string}
+        item_classes:
+          type: array
+          items: {type: string}
         recheck_at: {type: string, format: date-time}
         changed_at: {type: string, format: date-time}
     TargetCreate:
@@ -1218,65 +1249,92 @@ components:
         expected_revision: {type: integer, format: int64, minimum: 1}
         sort_column: {type: string, enum: [price, quantity, name]}
         sort_dir: {type: string, enum: [asc, desc]}
-    Run:
+    TargetPriceRange:
       type: object
       additionalProperties: false
-      required: [id, task_type, platform, appid, state, last_page_sequence, created_at]
+      required: [expected_revision]
       properties:
-        id: {type: integer, format: int64, minimum: 1}
-        target_id: {type: integer, format: int64, minimum: 1}
-        task_type: {type: string, enum: [summary, detail]}
-        platform: {type: string}
-        appid: {type: integer, format: int64, minimum: 1}
-        side: {type: string, enum: [bid, ask]}
-        state: {type: string, enum: [pending, running, succeeded, failed, stopped]}
-        completeness: {type: string, enum: [complete, partial]}
-        reason: {type: string}
-        cursor: {type: string}
-        last_page_sequence: {type: integer, format: int64, minimum: 0}
-        created_at: {type: string, format: date-time}
-        started_at: {type: string, format: date-time}
-        finished_at: {type: string, format: date-time}
-    CollectionPage:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        min_cents: {type: integer, format: int64, minimum: 0, nullable: true}
+        max_cents: {type: integer, format: int64, minimum: 0, nullable: true}
+    TargetSteamFacets:
       type: object
       additionalProperties: false
-      required: [page_sequence, collected_at, committed_at, payload_bytes]
+      required: [expected_revision]
       properties:
-        page_sequence: {type: integer, format: int64, minimum: 1}
-        cursor_before: {type: string}
-        cursor_after: {type: string}
-        collected_at: {type: string, format: date-time}
-        committed_at: {type: string, format: date-time}
-        payload_bytes:
-          type: integer
-          format: int64
-          minimum: 0
-          description: Uncompressed size of the retained raw response, 0 when none is kept.
-        account_id:
-          type: integer
-          format: int64
-          minimum: 1
-          description: Account that fetched this page. Absent for pages committed before attribution existed.
-        account_alias: {type: string}
-        exit_address:
-          type: string
-          description: Egress IP used for this page, as seen by the platform.
-    PageAttempt:
+        expected_revision: {type: integer, format: int64, minimum: 1}
+        steam_cats:
+          type: array
+          maxItems: 8
+          items: {type: string}
+        item_classes:
+          type: array
+          maxItems: 128
+          items: {type: string}
+    WorkerItem:
       type: object
       additionalProperties: false
-      required: [product_id, appid, name, platform, side, status, collected_at]
+      required: [product_id, name, status]
       properties:
         product_id: {type: integer, format: int64, minimum: 1}
-        appid: {type: integer, format: int64, minimum: 1}
         name: {type: string}
-        platform: {type: string}
-        side: {type: string, enum: [bid, ask]}
-        status: {type: string, enum: [present, empty, unavailable, failed]}
-        reason_code: {type: string}
-        collected_at: {type: string, format: date-time}
-        source_time: {type: string, format: date-time}
+        status: {type: string}
         present_cents: {type: integer, format: int64, minimum: 0}
-        present_order_count: {type: integer, format: int64, minimum: 0}
+    WorkerClaim:
+      type: object
+      additionalProperties: false
+      required: [target_id, appid, side, platform, items]
+      properties:
+        target_id: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 1}
+        side: {type: string, enum: [bid, ask]}
+        platform: {type: string}
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkerItem"
+    Worker:
+      type: object
+      additionalProperties: false
+      required:
+        - combination_id
+        - account_id
+        - account_alias
+        - platform
+        - node_id
+        - node_name
+        - region
+        - session_state
+        - idle
+      properties:
+        combination_id: {type: integer, format: int64, minimum: 1}
+        account_id: {type: integer, format: int64, minimum: 1}
+        account_alias: {type: string}
+        platform: {type: string}
+        node_id: {type: integer, format: int64, minimum: 1}
+        node_name: {type: string}
+        exit_address: {type: string}
+        region: {type: string, enum: [domestic, foreign, hongkong]}
+        session_state: {type: string, enum: [unverified, valid, invalid]}
+        idle: {type: boolean}
+        claim:
+          $ref: "#/components/schemas/WorkerClaim"
+        last_page:
+          $ref: "#/components/schemas/WorkerPage"
+    WorkerPage:
+      type: object
+      additionalProperties: false
+      required: [target_id, appid, side, platform, committed_at, items]
+      properties:
+        target_id: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 1}
+        side: {type: string, enum: [bid, ask]}
+        platform: {type: string}
+        committed_at: {type: string, format: date-time}
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkerItem"
     Quote:
       type: object
       additionalProperties: false
@@ -1308,6 +1366,44 @@ components:
         present_cents: {type: integer, format: int64, minimum: 0}
         present_order_count: {type: integer, format: int64, minimum: 0}
         present_collected_at: {type: string, format: date-time}
+        drop_cents:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Cents cheaper than the highest present price in drop_window. Absent if already at the window high.
+        high_cents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Highest present price seen in drop_window, including the price before the first in-window tick.
+        drop_pct_bp:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Window drop in basis points (1234 = 12.34%).
+        drop_count:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Number of down ticks inside drop_window.
+        last_drop_at:
+          type: string
+          format: date-time
+          description: Collected time of the latest down tick inside drop_window.
+    PriceTick:
+      type: object
+      additionalProperties: false
+      required: [tick_id, product_id, appid, name, platform, side, price_cents, collected_at]
+      properties:
+        tick_id: {type: integer, format: int64, minimum: 1}
+        product_id: {type: integer, format: int64, minimum: 1}
+        appid: {type: integer, format: int64, minimum: 1}
+        name: {type: string}
+        platform: {type: string}
+        side: {type: string, enum: [bid, ask]}
+        prev_cents: {type: integer, format: int64, minimum: 0}
+        price_cents: {type: integer, format: int64, minimum: 0}
+        collected_at: {type: string, format: date-time}
   responses:
     Error:
       description: Request rejected without reflecting request data or credentials

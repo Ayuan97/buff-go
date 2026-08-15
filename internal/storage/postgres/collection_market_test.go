@@ -20,20 +20,24 @@ import (
 
 func TestSummaryPageCommitValidatesPublicInputBeforeDatabaseAccess(t *testing.T) {
 	base := SummaryPageCommit{
-		RunID:        1,
-		PageSequence: 1,
-		CursorBefore: mustSummaryPageCursor(t, nil),
-		CursorAfter:  mustSummaryPageCursor(t, []byte("next")),
-		CollectedAt:  time.Date(2026, 8, 11, 12, 0, 0, 123456000, time.UTC),
+		TargetID:       1,
+		TaskID:         1,
+		ExpectedSwitch: 1,
+		CursorBefore:   mustSummaryPageCursor(t, nil),
+		CursorAfter:    mustSummaryPageCursor(t, []byte("next")),
+		CollectedAt:    time.Date(2026, 8, 11, 12, 0, 0, 123456000, time.UTC),
 	}
 	tests := []struct {
 		name   string
 		mutate func(*SummaryPageCommit)
 	}{
-		{name: "zero run id", mutate: func(input *SummaryPageCommit) { input.RunID = 0 }},
-		{name: "negative run id", mutate: func(input *SummaryPageCommit) { input.RunID = -1 }},
-		{name: "zero page sequence", mutate: func(input *SummaryPageCommit) { input.PageSequence = 0 }},
-		{name: "negative page sequence", mutate: func(input *SummaryPageCommit) { input.PageSequence = -1 }},
+		{name: "zero target id", mutate: func(input *SummaryPageCommit) { input.TargetID = 0 }},
+		{name: "negative target id", mutate: func(input *SummaryPageCommit) { input.TargetID = -1 }},
+		{name: "zero task id", mutate: func(input *SummaryPageCommit) { input.TaskID = 0 }},
+		{name: "negative task id", mutate: func(input *SummaryPageCommit) { input.TaskID = -1 }},
+		{name: "zero expected switch", mutate: func(input *SummaryPageCommit) { input.ExpectedSwitch = 0 }},
+		{name: "negative expected switch", mutate: func(input *SummaryPageCommit) { input.ExpectedSwitch = -1 }},
+		{name: "negative ask total", mutate: func(input *SummaryPageCommit) { input.AskTotal = -1 }},
 		{name: "zero collected time", mutate: func(input *SummaryPageCommit) { input.CollectedAt = time.Time{} }},
 		{name: "year before postgres range", mutate: func(input *SummaryPageCommit) {
 			input.CollectedAt = time.Date(0, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -70,21 +74,23 @@ func TestSummaryPageCommitValidatesPublicInputBeforeDatabaseAccess(t *testing.T)
 		{
 			name: "minimum identity and timestamp",
 			input: SummaryPageCommit{
-				RunID:        1,
-				PageSequence: 1,
-				CursorBefore: mustSummaryPageCursor(t, nil),
-				CursorAfter:  mustSummaryPageCursor(t, nil),
-				CollectedAt:  time.Date(1, 1, 1, 0, 0, 0, int(time.Microsecond), time.UTC),
+				TargetID:       1,
+				TaskID:         1,
+				ExpectedSwitch: 1,
+				CursorBefore:   mustSummaryPageCursor(t, nil),
+				CursorAfter:    mustSummaryPageCursor(t, nil),
+				CollectedAt:    time.Date(1, 1, 1, 0, 0, 0, int(time.Microsecond), time.UTC),
 			},
 		},
 		{
 			name: "maximum identity cursor and timestamp",
 			input: SummaryPageCommit{
-				RunID:        collection.RunID(1<<63 - 1),
-				PageSequence: collection.Sequence(1<<63 - 1),
-				CursorBefore: maximumCursor,
-				CursorAfter:  maximumCursor,
-				CollectedAt:  time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC),
+				TargetID:       collection.TargetID(1<<63 - 1),
+				TaskID:         collection.TaskID(1<<63 - 1),
+				ExpectedSwitch: collection.Revision(1<<63 - 1),
+				CursorBefore:   maximumCursor,
+				CursorAfter:    maximumCursor,
+				CollectedAt:    time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC),
 			},
 		},
 	}
@@ -135,7 +141,7 @@ func TestSummaryPageDigestCanonicalizesAttemptOrder(t *testing.T) {
 		AppID:    730,
 		Platform: "steam",
 		Side:     market.SideAsk,
-		Order:    market.WriteOrder{SwitchVersion: 2, RunSequence: 4, PageSequence: 6},
+		Order:    market.WriteOrder{SwitchVersion: 2, WriteSequence: 6},
 		Attempts: firstAttempts,
 	}
 	secondBatch := firstBatch
@@ -152,16 +158,18 @@ func TestSummaryPageDigestCanonicalizesAttemptOrder(t *testing.T) {
 		t.Fatalf("snapshots were not canonically ordered: %#v", firstSnapshots)
 	}
 	input := SummaryPageCommit{
-		RunID:        5,
-		PageSequence: 6,
-		CursorBefore: mustSummaryPageCursor(t, []byte("before")),
-		CursorAfter:  mustSummaryPageCursor(t, []byte("after")),
-		CollectedAt:  collectedAt,
-		Attempts:     firstAttempts,
+		TargetID:       5,
+		TaskID:         7,
+		ExpectedSwitch: 2,
+		CursorBefore:   mustSummaryPageCursor(t, []byte("before")),
+		CursorAfter:    mustSummaryPageCursor(t, []byte("after")),
+		CollectedAt:    collectedAt,
+		Attempts:       firstAttempts,
 	}
-	firstDigest := summaryPageDigest(input, firstBatch, firstSnapshots)
+	const writeSeq int64 = 6
+	firstDigest := summaryPageDigest(input, writeSeq, firstBatch, firstSnapshots)
 	input.Attempts = secondAttempts
-	secondDigest := summaryPageDigest(input, secondBatch, secondSnapshots)
+	secondDigest := summaryPageDigest(input, writeSeq, secondBatch, secondSnapshots)
 	if firstDigest != secondDigest {
 		t.Fatalf("attempt order changed canonical digest: %x != %x", firstDigest, secondDigest)
 	}
@@ -169,21 +177,22 @@ func TestSummaryPageDigestCanonicalizesAttemptOrder(t *testing.T) {
 
 func TestSummaryPageDigestIncludesEverySemanticField(t *testing.T) {
 	base := newSummaryDigestFixture(t)
-	baseDigest := summaryPageDigest(base.input, base.batch, base.snapshots)
-	const wantBaseDigest = "1ff0b7272329df69fc4853bf2f69d3a4017d24c6e35935ebc7a475ec7b84143b"
+	baseDigest := summaryPageDigest(base.input, base.writeSeq, base.batch, base.snapshots)
+	const wantBaseDigest = "bf0b50657d1b42bc144dcd9c958c63d59df5811eb52eca8dcc07127c1ac292f8"
 	if got := fmt.Sprintf("%x", baseDigest); got != wantBaseDigest {
-		t.Fatalf("summary digest = %s, want canonical v1 digest %s", got, wantBaseDigest)
+		t.Fatalf("summary digest = %s, want canonical v2 digest %s", got, wantBaseDigest)
 	}
 	clone := base.clone()
-	if got := summaryPageDigest(clone.input, clone.batch, clone.snapshots); got != baseDigest {
+	if got := summaryPageDigest(clone.input, clone.writeSeq, clone.batch, clone.snapshots); got != baseDigest {
 		t.Fatalf("cloning fixture changed digest: %x != %x", got, baseDigest)
 	}
 	tests := []struct {
 		name   string
 		mutate func(*summaryDigestFixture)
 	}{
-		{name: "run id", mutate: func(fixture *summaryDigestFixture) { fixture.input.RunID++ }},
-		{name: "page sequence", mutate: func(fixture *summaryDigestFixture) { fixture.input.PageSequence++ }},
+		{name: "target id", mutate: func(fixture *summaryDigestFixture) { fixture.input.TargetID++ }},
+		{name: "task id", mutate: func(fixture *summaryDigestFixture) { fixture.input.TaskID++ }},
+		{name: "write seq", mutate: func(fixture *summaryDigestFixture) { fixture.writeSeq++ }},
 		{name: "cursor before", mutate: func(fixture *summaryDigestFixture) {
 			fixture.input.CursorBefore = mustSummaryPageCursor(t, []byte("different-before"))
 		}},
@@ -197,8 +206,7 @@ func TestSummaryPageDigestIncludesEverySemanticField(t *testing.T) {
 		{name: "platform", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Platform = "buff" }},
 		{name: "side", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Side = market.SideBid }},
 		{name: "switch version", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Order.SwitchVersion++ }},
-		{name: "run sequence", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Order.RunSequence++ }},
-		{name: "derived page sequence", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Order.PageSequence++ }},
+		{name: "write sequence", mutate: func(fixture *summaryDigestFixture) { fixture.batch.Order.WriteSequence++ }},
 		{name: "attempt count", mutate: func(fixture *summaryDigestFixture) {
 			fixture.snapshots = append(fixture.snapshots, attemptSnapshot{
 				productID:   30,
@@ -252,7 +260,7 @@ func TestSummaryPageDigestIncludesEverySemanticField(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := base.clone()
 			tt.mutate(&fixture)
-			got := summaryPageDigest(fixture.input, fixture.batch, fixture.snapshots)
+			got := summaryPageDigest(fixture.input, fixture.writeSeq, fixture.batch, fixture.snapshots)
 			if got == baseDigest {
 				t.Fatalf("changing %s did not change digest %x", tt.name, got)
 			}
@@ -268,8 +276,8 @@ func TestSummaryPageDigestEmptyPageIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := summaryPageDigest(fixture.input, fixture.batch, nilSnapshots)
-	second := summaryPageDigest(fixture.input, fixture.batch, nilSnapshots)
+	first := summaryPageDigest(fixture.input, fixture.writeSeq, fixture.batch, nilSnapshots)
+	second := summaryPageDigest(fixture.input, fixture.writeSeq, fixture.batch, nilSnapshots)
 	if first != second {
 		t.Fatalf("repeated empty page digest changed: %x != %x", first, second)
 	}
@@ -283,7 +291,7 @@ func TestSummaryPageDigestEmptyPageIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	explicitEmpty := summaryPageDigest(fixture.input, fixture.batch, emptySnapshots)
+	explicitEmpty := summaryPageDigest(fixture.input, fixture.writeSeq, fixture.batch, emptySnapshots)
 	if first != explicitEmpty {
 		t.Fatalf("nil and explicit empty pages differ: %x != %x", first, explicitEmpty)
 	}
@@ -330,8 +338,9 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 		name   string
 		typeOf reflect.Type
 	}{
-		{name: "RunID", typeOf: reflect.TypeOf(collection.RunID(0))},
-		{name: "PageSequence", typeOf: reflect.TypeOf(collection.Sequence(0))},
+		{name: "TargetID", typeOf: reflect.TypeOf(collection.TargetID(0))},
+		{name: "TaskID", typeOf: reflect.TypeOf(collection.TaskID(0))},
+		{name: "ExpectedSwitch", typeOf: reflect.TypeOf(collection.Revision(0))},
 		{name: "CursorBefore", typeOf: reflect.TypeOf(collection.Cursor{})},
 		{name: "CursorAfter", typeOf: reflect.TypeOf(collection.Cursor{})},
 		{name: "CollectedAt", typeOf: reflect.TypeOf(time.Time{})},
@@ -339,9 +348,10 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 		// Payload 是平台原始响应，只作展示副本。它既不是作用域也不是因果顺序，
 		// 更不是页面摘要（摘要仍由存储层从 attempts 派生，不接受调用方提交）。
 		{name: "Payload", typeOf: reflect.TypeOf([]byte(nil))},
-		// 执行身份只有持有租约的调度器知道，存储层无法从运行派生，因此必须由调用方提交。
+		// 执行身份只有持有租约的调度器知道，存储层无法从目标派生，因此必须由调用方提交。
 		{name: "AccountID", typeOf: reflect.TypeOf(int64(0))},
 		{name: "ExitAddress", typeOf: reflect.TypeOf(netip.Addr{})},
+		{name: "AskTotal", typeOf: reflect.TypeOf(int64(0))},
 	}
 	if typeOf.NumField() != len(want) {
 		t.Fatalf("SummaryPageCommit has %d fields, want exactly %d page facts", typeOf.NumField(), len(want))
@@ -391,6 +401,7 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 
 type summaryDigestFixture struct {
 	input     SummaryPageCommit
+	writeSeq  int64
 	batch     observationBatch
 	snapshots []attemptSnapshot
 }
@@ -403,17 +414,19 @@ func newSummaryDigestFixture(t *testing.T) summaryDigestFixture {
 	items := int64(3)
 	return summaryDigestFixture{
 		input: SummaryPageCommit{
-			RunID:        5,
-			PageSequence: 6,
-			CursorBefore: mustSummaryPageCursor(t, []byte("before")),
-			CursorAfter:  mustSummaryPageCursor(t, []byte("after")),
-			CollectedAt:  collectedAt,
+			TargetID:       5,
+			TaskID:         7,
+			ExpectedSwitch: 2,
+			CursorBefore:   mustSummaryPageCursor(t, []byte("before")),
+			CursorAfter:    mustSummaryPageCursor(t, []byte("after")),
+			CollectedAt:    collectedAt,
 		},
+		writeSeq: 6,
 		batch: observationBatch{
 			AppID:    730,
 			Platform: "steam",
 			Side:     market.SideAsk,
-			Order:    market.WriteOrder{SwitchVersion: 2, RunSequence: 4, PageSequence: 6},
+			Order:    market.WriteOrder{SwitchVersion: 2, WriteSequence: 6},
 		},
 		snapshots: []attemptSnapshot{
 			{

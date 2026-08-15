@@ -103,6 +103,29 @@ func TestOrderbookFakeItem(t *testing.T) {
 	}
 }
 
+func TestParseOrderbookUnwrapsQueryActionEnvelope(t *testing.T) {
+	// 2026-08-15 实打 AK Royale / Redline：顶层只有 data，success 在里面。
+	body := []byte(`{"data":{"success":true,"data":{"amtMaxBuyOrder":5617,"amtMinSellOrder":6502,"eCurrency":23,"cBuyOrders":188,"cSellOrders":12,"rgCompactBuyOrders":[5617,2],"rgCompactSellOrders":[6502,1]}}}`)
+	parsed, err := parseOrderbook(body)
+	if err != nil || !parsed.Success || parsed.Data == nil || parsed.Data.ECurrency != 23 {
+		t.Fatalf("parsed=%+v err=%v", parsed, err)
+	}
+	if parsed.Data.AmtMaxBuyOrder == nil || *parsed.Data.AmtMaxBuyOrder != 5617 {
+		t.Fatalf("max buy=%v", parsed.Data.AmtMaxBuyOrder)
+	}
+	cents, empty, err := orderbookBest(market.SideBid, *parsed.Data)
+	if err != nil || empty || cents != 5617 {
+		t.Fatalf("cents=%d empty=%v err=%v", cents, empty, err)
+	}
+}
+
+func TestParseOrderbookWrappedFakeItem(t *testing.T) {
+	parsed, err := parseOrderbook([]byte(`{"data":{"success":false}}`))
+	if err != nil || parsed.Success || parsed.Data != nil {
+		t.Fatalf("parsed=%+v err=%v", parsed, err)
+	}
+}
+
 func TestSearchEmptyPage(t *testing.T) {
 	parsed, err := parseSearchRender([]byte(`{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`))
 	if err != nil || parsed.TotalCount != 0 || len(parsed.Results) != 0 {

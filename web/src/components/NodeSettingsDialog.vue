@@ -1,27 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { AccessNode, Region, Side } from '../api'
+import type { AccessNode, Region } from '../api'
 import { useEscape } from '../utils/escape'
-import { egressModeText, fmtTime, gameName, nodeKindText, nodeStateText, platformLabel, regionText } from '../utils/format'
-import {
-  nodeAllowsPlatform,
-  platformTargetRegion,
-  regionAllowsTarget,
-  regionMismatchReason,
-} from '../utils/platformRegion'
+import { egressModeText, fmtTime, nodeKindText, nodeStateText, regionText } from '../utils/format'
 
 const props = defineProps<{
   node: AccessNode
-  platforms: string[]
-  hasBoundAccounts: boolean
   busy?: boolean
 }>()
 
 const emit = defineEmits<{
   close: []
   exit: [address: string, validUntil: string]
-  game: [appid: number]
-  side: [platform: string, side: Side | '']
   rename: [name: string]
   connection: [payload: {
     kind: 'direct' | 'proxy'
@@ -38,7 +28,6 @@ const REGIONS: Region[] = ['foreign', 'hongkong', 'domestic']
 
 const exitAddress = ref('')
 const exitValidUntil = ref('')
-const gameDraft = ref(props.node.appid ? String(props.node.appid) : '')
 const nameDraft = ref(props.node.name)
 const connDraft = ref({
   kind: props.node.kind,
@@ -54,13 +43,6 @@ const line = computed(() => {
   if (props.node.kind === 'proxy') parts.push(egressModeText(props.node.egress_mode))
   return parts.join(' · ')
 })
-
-// 节点有方向归属时，后端拒绝改游戏；先让使用者解除方向。
-const hasSides = computed(() => props.node.sides.length > 0)
-
-function sideOf(platform: string): Side | '' {
-  return props.node.sides.find((s) => s.platform === platform)?.side ?? ''
-}
 
 function localToISO(value: string): string {
   const date = new Date(value)
@@ -95,21 +77,6 @@ function submitExit() {
   exitValidUntil.value = ''
 }
 
-function submitGame() {
-  localError.value = null
-  const raw = gameDraft.value.trim()
-  if (!raw) {
-    emit('game', 0)
-    return
-  }
-  const appid = Number(raw)
-  if (!Number.isInteger(appid) || appid < 1) {
-    localError.value = '游戏编号必须是正整数，例如 730'
-    return
-  }
-  emit('game', appid)
-}
-
 function submitName() {
   localError.value = null
   const name = nameDraft.value.trim()
@@ -133,24 +100,9 @@ function submitName() {
   emit('rename', name)
 }
 
-// 已划出去的方向决定了地域能选什么：Steam 只打国外站，国内节点采不了。
-function regionBlockedBy(region: Region): string | null {
-  for (const assignment of props.node.sides) {
-    if (!regionAllowsTarget(region, platformTargetRegion(assignment.platform))) {
-      return `${platformLabel(assignment.platform)} 不能用${regionText(region)}节点，先把该方向设成「不用」`
-    }
-  }
-  return null
-}
-
 function submitConnection() {
   localError.value = null
   const draft = connDraft.value
-  const blocked = regionBlockedBy(draft.region)
-  if (blocked) {
-    localError.value = blocked
-    return
-  }
   const credential = draft.proxy_credential.trim()
   if (draft.kind === 'direct' && credential) {
     localError.value = '本机直连不能填代理地址'
@@ -242,48 +194,6 @@ function submitConnection() {
         </section>
 
         <section class="sec">
-          <h3>用于哪个游戏</h3>
-          <p class="note">一个节点只能服务一个游戏。留空表示不划给任何游戏。</p>
-          <div class="ops">
-            <input v-model="gameDraft" class="mini" placeholder="730" :disabled="hasSides" />
-            <span v-if="node.appid" class="muted">{{ gameName(node.appid) }}</span>
-            <span class="spacer" />
-            <button class="btn sm" type="button" :disabled="busy || hasSides" @click="submitGame">保存游戏</button>
-          </div>
-          <p v-if="hasSides" class="note warn">
-            要换游戏，{{ hasBoundAccounts ? '先在资源页解绑这个节点上的账号，再' : '先' }}把下面的方向都设成「不用」。
-          </p>
-        </section>
-
-        <section class="sec">
-          <h3>在这个游戏里采什么</h3>
-          <p class="note">
-            同一个平台上，一个节点只能采一个方向。出售和求购都要采就得配两个节点。
-            不同平台可以共用这个节点，各平台限流互不影响。
-          </p>
-          <p v-if="!node.appid" class="note warn">先划游戏，才能指定方向。</p>
-          <div v-for="platform in platforms" :key="platform" class="plat">
-            <div class="plat-name">{{ platformLabel(platform) }}</div>
-            <div class="ops">
-              <button
-                v-for="option in ([['', '不用'], ['ask', '出售'], ['bid', '求购']] as [Side | '', string][])"
-                :key="option[0]"
-                class="btn sm"
-                :class="{ primary: sideOf(platform) === option[0] }"
-                type="button"
-                :disabled="busy || !node.appid || !nodeAllowsPlatform(node.region, platform) || sideOf(platform) === option[0]"
-                @click="emit('side', platform, option[0])"
-              >
-                {{ option[1] }}
-              </button>
-            </div>
-            <div v-if="!nodeAllowsPlatform(node.region, platform)" class="muted">
-              {{ regionMismatchReason(node.region, platform) }}
-            </div>
-          </div>
-        </section>
-
-        <section class="sec">
           <h3>连接</h3>
           <p class="note">
             换连接会清掉已填的出口 IP，节点回到待填状态，采集会跳过它直到重新填一次。
@@ -300,13 +210,12 @@ function submitConnection() {
             <div class="field">
               <label>地域</label>
               <select v-model="connDraft.region">
-                <option v-for="option in REGIONS" :key="option" :value="option" :disabled="regionBlockedBy(option) !== null">
-                  {{ regionText(option) }}{{ regionBlockedBy(option) ? '（不可用）' : '' }}
+                <option v-for="option in REGIONS" :key="option" :value="option">
+                  {{ regionText(option) }}
                 </option>
               </select>
             </div>
           </div>
-          <p v-if="regionBlockedBy(connDraft.region)" class="note warn">{{ regionBlockedBy(connDraft.region) }}</p>
           <template v-if="connDraft.kind === 'proxy'">
             <div class="field">
               <label>出口模式</label>

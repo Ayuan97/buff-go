@@ -3,6 +3,7 @@ package collection
 import (
 	"bytes"
 	"fmt"
+	"net/netip"
 	"time"
 )
 
@@ -36,8 +37,15 @@ func (cursor Cursor) Validate() error {
 // Bytes returns an isolated copy of the cursor.
 func (cursor Cursor) Bytes() []byte {
 	copied := make([]byte, len(cursor.value))
-	copy(copied, cursor.value)
+	copy(copied, valueOrEmpty(cursor.value))
 	return copied
+}
+
+func valueOrEmpty(value []byte) []byte {
+	if value == nil {
+		return []byte{}
+	}
+	return value
 }
 
 // Equal reports whether two opaque cursors contain identical bytes.
@@ -49,38 +57,44 @@ func (cursor Cursor) clone() Cursor {
 	return Cursor{value: cursor.Bytes()}
 }
 
-// PageInput is one committed collection page.
+// PageInput is the latest committed page of one direction.
 type PageInput struct {
-	RunID         RunID
-	PageSequence  Sequence
+	TargetID      TargetID
+	WriteSeq      int64
 	CursorBefore  Cursor
 	CursorAfter   Cursor
 	PayloadDigest [32]byte
 	CollectedAt   time.Time
 	CommittedAt   time.Time
+	AccountID     int64
+	ExitAddress   netip.Addr
 }
 
-// Page is an immutable page commit record linked only to its run.
+// Page is the current page of one direction. Older pages are not kept.
 type Page struct {
-	runID         RunID
-	pageSequence  Sequence
+	targetID      TargetID
+	writeSeq      int64
 	cursorBefore  Cursor
 	cursorAfter   Cursor
 	payloadDigest [32]byte
 	collectedAt   time.Time
 	committedAt   time.Time
+	accountID     int64
+	exitAddress   netip.Addr
 }
 
-// NewPage validates and copies a page commit.
+// NewPage validates and copies a latest-page record.
 func NewPage(input PageInput) (Page, error) {
 	page := Page{
-		runID:         input.RunID,
-		pageSequence:  input.PageSequence,
+		targetID:      input.TargetID,
+		writeSeq:      input.WriteSeq,
 		cursorBefore:  input.CursorBefore.clone(),
 		cursorAfter:   input.CursorAfter.clone(),
 		payloadDigest: input.PayloadDigest,
 		collectedAt:   input.CollectedAt,
 		committedAt:   input.CommittedAt,
+		accountID:     input.AccountID,
+		exitAddress:   input.ExitAddress,
 	}
 	if err := page.Validate(); err != nil {
 		return Page{}, err
@@ -90,11 +104,11 @@ func NewPage(input PageInput) (Page, error) {
 
 // Validate checks page identity, cursors, digest, and timestamp order.
 func (page Page) Validate() error {
-	if err := page.runID.Validate(); err != nil {
+	if err := page.targetID.Validate(); err != nil {
 		return err
 	}
-	if err := page.pageSequence.Validate(); err != nil {
-		return fmt.Errorf("page_sequence: %w", err)
+	if page.writeSeq < 1 {
+		return fmt.Errorf("write_seq must be at least 1")
 	}
 	if err := page.cursorBefore.Validate(); err != nil {
 		return fmt.Errorf("cursor_before: %w", err)
@@ -114,14 +128,17 @@ func (page Page) Validate() error {
 	if page.committedAt.Before(page.collectedAt) {
 		return fmt.Errorf("committed_at cannot precede collected_at")
 	}
+	if page.accountID < 0 {
+		return fmt.Errorf("account_id cannot be negative")
+	}
 	return nil
 }
 
-// RunID returns the owning run identity.
-func (page Page) RunID() RunID { return page.runID }
+// TargetID returns the owning direction.
+func (page Page) TargetID() TargetID { return page.targetID }
 
-// PageSequence returns the contiguous page number.
-func (page Page) PageSequence() Sequence { return page.pageSequence }
+// WriteSeq returns the target write counter at commit.
+func (page Page) WriteSeq() int64 { return page.writeSeq }
 
 // CursorBefore returns an isolated copy of the request cursor.
 func (page Page) CursorBefore() Cursor { return page.cursorBefore.clone() }
@@ -137,3 +154,9 @@ func (page Page) CollectedAt() time.Time { return page.collectedAt }
 
 // CommittedAt returns when the page was persisted.
 func (page Page) CommittedAt() time.Time { return page.committedAt }
+
+// AccountID returns the worker account when recorded.
+func (page Page) AccountID() int64 { return page.accountID }
+
+// ExitAddress returns the worker exit when recorded.
+func (page Page) ExitAddress() netip.Addr { return page.exitAddress }

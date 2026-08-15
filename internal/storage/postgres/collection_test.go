@@ -63,25 +63,6 @@ func TestCollectionStoreValidation(t *testing.T) {
 		}
 	}
 
-	validFinishes := []struct {
-		state        collection.RunState
-		completeness collection.Completeness
-		reason       collection.RunReason
-	}{
-		{collection.RunSucceeded, collection.CompletenessComplete, collection.RunReasonNone},
-		{collection.RunFailed, collection.CompletenessPartial, collection.RunReasonNetworkError},
-		{collection.RunStopped, collection.CompletenessPartial, collection.RunReasonCancelled},
-	}
-	for _, finish := range validFinishes {
-		if !validRunFinish(finish.state, finish.completeness, finish.reason) {
-			t.Fatalf("valid finish was rejected: %+v", finish)
-		}
-	}
-	if validRunFinish(collection.RunSucceeded, collection.CompletenessNone, collection.RunReasonNone) ||
-		validRunFinish(collection.RunFailed, collection.CompletenessPartial, collection.RunReasonCancelled) {
-		t.Fatal("invalid terminal shape was accepted")
-	}
-
 	empty, err := collection.NewCursor(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -120,48 +101,22 @@ func TestCollectionStoreDomainShapes(t *testing.T) {
 	if !targetHasTransition(waiting, transition) {
 		t.Fatal("exact target transition was not recognized")
 	}
-
-	cursor, err := collection.NewCursor(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := collection.NewSummaryRun(collection.SummaryRunInput{
-		ID: 1, TargetID: target.ID(), Platform: "steam", AppID: 730, Side: market.SideAsk,
-		SwitchVersion: target.SwitchVersion(), RunSequence: 1, State: collection.RunPending,
-		CurrentCursor: cursor, CreatedAt: now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !runMatchesTarget(run, target) {
-		t.Fatal("summary run did not match its target")
-	}
-
-	other, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
-		ID: 2, Revision: 1, Platform: "buff", AppID: 730, Side: market.SideAsk,
-		Desired: collection.DesiredEnabled, Actual: collection.ActualStarting,
-		SwitchVersion: 1, ChangedAt: now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runMatchesTarget(run, other) {
-		t.Fatal("summary run matched a different target")
-	}
-
-	wrongApp, err := collection.NewSummaryRun(collection.SummaryRunInput{
-		ID: 1, TargetID: target.ID(), Platform: "steam", AppID: 252490, Side: market.SideAsk,
-		SwitchVersion: target.SwitchVersion(), RunSequence: 1, State: collection.RunPending,
-		CurrentCursor: cursor, CreatedAt: now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runMatchesTarget(wrongApp, target) {
-		t.Fatal("summary run matched a target with a different appid")
-	}
 }
 
 func collectionStoreTestTime() time.Time {
 	return time.Date(2026, 8, 11, 20, 0, 0, 0, time.UTC)
+}
+
+func TestScanJSONStringArray(t *testing.T) {
+	empty, err := scanJSONStringArray([]byte("[]"))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty = %v err=%v", empty, err)
+	}
+	got, err := scanJSONStringArray([]byte(`["steamcat.armor","hoodie"]`))
+	if err != nil || len(got) != 2 || got[0] != "steamcat.armor" || got[1] != "hoodie" {
+		t.Fatalf("got = %v err=%v", got, err)
+	}
+	if _, err := scanJSONStringArray([]byte("{")); err == nil {
+		t.Fatal("invalid json must fail")
+	}
 }

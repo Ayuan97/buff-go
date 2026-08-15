@@ -10,6 +10,7 @@ export const router = createRouter({
     { path: '/config', component: () => import('./pages/ConfigPage.vue') },
     { path: '/runs', component: () => import('./pages/RunsPage.vue') },
     { path: '/market', component: () => import('./pages/MarketPage.vue') },
+    { path: '/market/:productId', component: () => import('./pages/ProductPage.vue') },
     { path: '/rules', component: () => import('./pages/RulesPage.vue') },
   ],
 })

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"buff-go/internal/market"
 	"buff-go/internal/resource"
 )
 
@@ -238,7 +237,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if direct.HasProxyCredential || direct.State != resource.NodeStateValidating || direct.EgressRevision != 1 {
 		t.Fatalf("direct node = %+v", direct)
 	}
-	if _, err := store.OpenNodeProxyCredentialAt(ctx, direct.ID, direct.EgressRevision, direct.AssignmentRevision); !errors.Is(err, ErrProxyCredentialUnavailable) {
+	if _, err := store.OpenNodeProxyCredentialAt(ctx, direct.ID, direct.EgressRevision); !errors.Is(err, ErrProxyCredentialUnavailable) {
 		t.Fatalf("direct proxy credential error = %v", err)
 	}
 	if _, err := store.CreateNode(ctx, "proxy-empty", resource.NodeConnectionInput{
@@ -249,7 +248,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 
 	renamed, err := publicStore.RenameNode(ctx, direct.ID, "local-direct-renamed")
 	if err != nil || renamed.Name != "local-direct-renamed" ||
-		renamed.EgressRevision != direct.EgressRevision || renamed.AssignmentRevision != direct.AssignmentRevision {
+		renamed.EgressRevision != direct.EgressRevision {
 		t.Fatalf("rename node = %+v err=%v", renamed, err)
 	}
 	if same, err := publicStore.RenameNode(ctx, direct.ID, "local-direct-renamed"); err != nil || same.Name != renamed.Name {
@@ -279,7 +278,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	}); err == nil || bytes.Contains([]byte(err.Error()), errorMarker) {
 		t.Fatalf("duplicate node error leaked secret or was nil: %v", err)
 	}
-	opened, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision, proxy.AssignmentRevision)
+	opened, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision)
 	if err != nil || !bytes.Equal(opened, proxySecret) {
 		t.Fatalf("open proxy credential = %q err=%v", opened, err)
 	}
@@ -292,10 +291,10 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened, err := restarted.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision, proxy.AssignmentRevision); err != nil || !bytes.Equal(opened, proxySecret) {
+	if opened, err := restarted.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision); err != nil || !bytes.Equal(opened, proxySecret) {
 		t.Fatalf("restart open proxy = %q err=%v", opened, err)
 	}
-	if opened, err := publicStore.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision, proxy.AssignmentRevision); err != nil || !bytes.Equal(opened, proxySecret) {
+	if opened, err := publicStore.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision); err != nil || !bytes.Equal(opened, proxySecret) {
 		t.Fatalf("New() open proxy = %q err=%v", opened, err)
 	}
 
@@ -306,11 +305,8 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil || proxy.EgressRevision != 2 || proxy.State != resource.NodeStateValidating {
 		t.Fatalf("replace proxy = %+v err=%v", proxy, err)
 	}
-	if _, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, 1, proxy.AssignmentRevision); !errors.Is(err, ErrResourceRevisionConflict) {
+	if _, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, 1); !errors.Is(err, ErrResourceRevisionConflict) {
 		t.Fatalf("stale node credential open error = %v", err)
-	}
-	if _, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision, proxy.AssignmentRevision+1); !errors.Is(err, ErrResourceRevisionConflict) {
-		t.Fatalf("stale assignment credential open error = %v", err)
 	}
 	if _, err := store.RecordNodeExit(ctx, proxy.ID, 1, netip.MustParseAddr("1.1.1.1"), now, now.Add(time.Hour)); !errors.Is(err, ErrResourceRevisionConflict) {
 		t.Fatalf("stale node verification error = %v", err)
@@ -319,7 +315,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil || proxy.EgressRevision != 3 {
 		t.Fatalf("begin revalidation = %+v err=%v", proxy, err)
 	}
-	if opened, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision, proxy.AssignmentRevision); err != nil || !bytes.Equal(opened, replacedSecret) {
+	if opened, err := store.OpenNodeProxyCredentialAt(ctx, proxy.ID, proxy.EgressRevision); err != nil || !bytes.Equal(opened, replacedSecret) {
 		t.Fatalf("revalidation did not preserve proxy material = %q err=%v", opened, err)
 	}
 	assertMarkerPlaintext(t, db, "access_nodes", "proxy_plaintext", "node_id", int64(proxy.ID), replacedSecret)
@@ -334,96 +330,6 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	direct, err = store.RecordNodeExit(ctx, direct.ID, 1, netip.MustParseAddr("1.1.1.1"), now, now.Add(30*time.Minute))
 	if err != nil || !direct.UsableAt(now.Add(time.Minute)) {
 		t.Fatalf("shared exit address rejected = %+v err=%v", direct, err)
-	}
-	direct, err = store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 730)
-	if err != nil || direct.AssignmentRevision != 2 || direct.AppID != 730 {
-		t.Fatalf("assign game = %+v err=%v", direct, err)
-	}
-	if _, err := store.AssignNodeGame(ctx, direct.ID, 1, 730); !errors.Is(err, ErrResourceRevisionConflict) {
-		t.Fatalf("stale game assignment error = %v", err)
-	}
-	if _, err := store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 730); err != nil {
-		t.Fatalf("same game retry: %v", err)
-	}
-	direct, err = store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 252490)
-	if err != nil || direct.AppID != 252490 || direct.AssignmentRevision != 3 {
-		t.Fatalf("change game = %+v err=%v", direct, err)
-	}
-	direct, err = store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 730)
-	if err != nil || direct.AppID != 730 {
-		t.Fatal(err)
-	}
-	if _, err := store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", ""); !errors.Is(err, ErrNodeAssignmentConflict) {
-		t.Fatalf("delete missing side error = %v", err)
-	}
-	direct, err = store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", market.SideAsk)
-	if err != nil || direct.AssignmentRevision != 5 {
-		t.Fatalf("assign steam side = %+v err=%v", direct, err)
-	}
-	if side, ok := direct.SideFor("steam"); !ok || side != market.SideAsk {
-		t.Fatalf("steam side = %q ok=%v", side, ok)
-	}
-	if _, err := store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", market.SideAsk); err != nil {
-		t.Fatalf("same side retry: %v", err)
-	}
-	direct, err = store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "buff", market.SideAsk)
-	if err != nil {
-		t.Fatalf("assign buff side = %+v err=%v", direct, err)
-	}
-	if _, ok := direct.SideFor("steam"); !ok {
-		t.Fatal("steam side lost after buff assignment")
-	}
-	if side, ok := direct.SideFor("buff"); !ok || side != market.SideAsk {
-		t.Fatalf("buff side = %q ok=%v", side, ok)
-	}
-	listed, err := store.ListNodes(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var listedDirect resource.AccessNode
-	for _, node := range listed {
-		if node.ID == direct.ID {
-			listedDirect = node
-			break
-		}
-	}
-	if listedDirect.AppID != 730 {
-		t.Fatalf("list nodes lost game = %+v", listedDirect)
-	}
-	if _, ok := listedDirect.SideFor("steam"); !ok {
-		t.Fatalf("list nodes lost steam side = %+v", listedDirect)
-	}
-	if _, ok := listedDirect.SideFor("buff"); !ok {
-		t.Fatalf("list nodes lost buff side = %+v", listedDirect)
-	}
-	firstSteamRevision := direct.AssignmentRevision
-	direct, err = store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", market.SideBid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AssignNodeSide(ctx, direct.ID, firstSteamRevision, "steam", ""); !errors.Is(err, ErrResourceRevisionConflict) {
-		t.Fatalf("ABA stale side delete error = %v", err)
-	}
-	if _, err := store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 0); !errors.Is(err, ErrResourceDependency) {
-		t.Fatalf("clear game with sides error = %v", err)
-	}
-	direct, err = store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := direct.SideFor("steam"); ok {
-		t.Fatal("steam side remained after delete")
-	}
-	direct, err = store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "buff", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	direct, err = store.AssignNodeGame(ctx, direct.ID, direct.AssignmentRevision, 0)
-	if err != nil || direct.AppID != 0 {
-		t.Fatalf("clear game = %+v err=%v", direct, err)
-	}
-	if _, err := store.AssignNodeSide(ctx, direct.ID, direct.AssignmentRevision, "steam", market.SideAsk); !errors.Is(err, ErrNodeAssignmentConflict) {
-		t.Fatalf("side without game error = %v", err)
 	}
 
 	stickyDeadline := now.Add(time.Hour)
@@ -515,7 +421,7 @@ SET proxy_plaintext = source.proxy_plaintext
 FROM access_nodes source WHERE target.node_id=$1 AND source.node_id=$2`, int64(swapTarget.ID), int64(swapSource.ID)); err != nil {
 		t.Fatal(err)
 	}
-	if opened, err := store.OpenNodeProxyCredentialAt(ctx, swapTarget.ID, swapTarget.EgressRevision, swapTarget.AssignmentRevision); err != nil ||
+	if opened, err := store.OpenNodeProxyCredentialAt(ctx, swapTarget.ID, swapTarget.EgressRevision); err != nil ||
 		!bytes.Equal(opened, []byte("synthetic-swap-source-material")) {
 		t.Fatalf("plaintext swap open = %q err=%v", opened, err)
 	}
@@ -550,34 +456,9 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unassigned, err := store.CreateNode(ctx, "combination-unassigned", resource.NodeConnectionInput{
+	spare, err := store.CreateNode(ctx, "combination-spare", resource.NodeConnectionInput{
 		Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateCombination(ctx, accountOne.ID, unassigned.ID); !errors.Is(err, ErrCombinationIncompatible) {
-		t.Fatalf("unassigned-node combination error = %v", err)
-	}
-	if _, err := store.CreateCombination(ctx, accountOne.ID, nodeOne.ID); !errors.Is(err, ErrCombinationIncompatible) {
-		t.Fatalf("ungamed-node combination error = %v", err)
-	}
-	nodeOne, err = store.AssignNodeGame(ctx, nodeOne.ID, nodeOne.AssignmentRevision, 730)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeTwo, err = store.AssignNodeGame(ctx, nodeTwo.ID, nodeTwo.AssignmentRevision, 730)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateCombination(ctx, accountOne.ID, nodeOne.ID); !errors.Is(err, ErrCombinationIncompatible) {
-		t.Fatalf("undirected-node combination error = %v", err)
-	}
-	nodeOne, err = store.AssignNodeSide(ctx, nodeOne.ID, nodeOne.AssignmentRevision, "steam", market.SideAsk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeTwo, err = store.AssignNodeSide(ctx, nodeTwo.ID, nodeTwo.AssignmentRevision, "steam", market.SideAsk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,13 +503,6 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 		created = append(created, combination)
 	}
 
-	if _, err := store.CreateCombination(ctx, buffAccount.ID, nodeOne.ID); !errors.Is(err, ErrCombinationIncompatible) {
-		t.Fatalf("buff combination without direction error = %v", err)
-	}
-	nodeOne, err = store.AssignNodeSide(ctx, nodeOne.ID, nodeOne.AssignmentRevision, "buff", market.SideAsk)
-	if err != nil {
-		t.Fatal(err)
-	}
 	buffCombination, err := store.CreateCombination(ctx, buffAccount.ID, nodeOne.ID)
 	if err != nil || buffCombination.Platform != "buff" {
 		t.Fatalf("same-node buff combination = %+v err=%v", buffCombination, err)
@@ -644,31 +518,22 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 			t.Fatalf("combination order = %+v", listed)
 		}
 	}
-	steamListed, err := store.ListCombinationsFor(ctx, "steam", 730, market.SideAsk)
+	steamListed, err := store.ListCombinationsFor(ctx, "steam")
 	if err != nil || len(steamListed) != 4 {
-		t.Fatalf("steam ask combinations = %+v err=%v", steamListed, err)
+		t.Fatalf("steam combinations = %+v err=%v", steamListed, err)
 	}
-	buffListed, err := store.ListCombinationsFor(ctx, "buff", 730, market.SideAsk)
+	buffListed, err := store.ListCombinationsFor(ctx, "buff")
 	if err != nil || len(buffListed) != 1 || buffListed[0].ID != buffCombination.ID {
 		t.Fatalf("buff ask combinations = %+v err=%v", buffListed, err)
 	}
-	bidListed, err := store.ListCombinationsFor(ctx, "steam", 730, market.SideBid)
-	if err != nil || len(bidListed) != 0 {
-		t.Fatalf("steam bid combinations = %+v err=%v", bidListed, err)
+	steamAgain, err := store.ListCombinationsFor(ctx, "steam")
+	if err != nil || len(steamAgain) != 4 {
+		t.Fatalf("steam combinations again = %+v err=%v", steamAgain, err)
 	}
 
 	joined, found, err := store.CombinationResources(ctx, primary.ID)
 	if err != nil || !found || joined.Validate() != nil {
 		t.Fatalf("combination resources = %+v found=%v err=%v validate=%v", joined, found, err, joined.Validate())
-	}
-	if joined.Node.AppID != 730 {
-		t.Fatalf("combination node appid = %d", joined.Node.AppID)
-	}
-	if _, ok := joined.Node.SideFor("steam"); !ok {
-		t.Fatal("combination node missing steam side")
-	}
-	if _, ok := joined.Node.SideFor("buff"); !ok {
-		t.Fatal("combination node missing buff side")
 	}
 	if encoded := []byte(fmt.Sprintf("%+v", joined)); bytes.Contains(encoded, proxyMarker) ||
 		bytes.Contains(encoded, []byte("synthetic-combination-account-one")) {
@@ -678,15 +543,11 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatal("safe combination node lost credential presence")
 	}
 
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO account_node_combinations(platform, account_id, node_id)
-VALUES ('steam', $1, $2)`, int64(accountOne.ID), int64(unassigned.ID)); err == nil {
-		t.Fatal("database accepted a combination with an unassigned node")
+	if _, err := store.CreateCombination(ctx, accountOne.ID, spare.ID); err != nil {
+		t.Fatalf("spare-node combination error = %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO account_node_combinations(platform, account_id, node_id)
-VALUES ('buff', $1, $2)`, int64(buffAccount.ID), int64(nodeTwo.ID)); err == nil {
-		t.Fatal("database accepted a combination without a matching direction")
+	if _, err := store.CreateCombination(ctx, buffAccount.ID, nodeTwo.ID); err != nil {
+		t.Fatalf("buff combination on steam node error = %v", err)
 	}
 	if _, err := store.CreateCombination(ctx, resource.AccountID(math.MaxInt64), nodeOne.ID); !errors.Is(err, ErrResourceNotFound) {
 		t.Fatalf("missing account combination error = %v", err)
@@ -697,15 +558,6 @@ VALUES ('buff', $1, $2)`, int64(buffAccount.ID), int64(nodeTwo.ID)); err == nil 
 	}
 	if err := store.DeleteNode(ctx, nodeOne.ID); !errors.Is(err, ErrResourceDependency) {
 		t.Fatalf("referenced node delete error = %v", err)
-	}
-	if _, err := store.AssignNodeSide(ctx, nodeOne.ID, nodeOne.AssignmentRevision, "steam", ""); !errors.Is(err, ErrResourceDependency) {
-		t.Fatalf("referenced steam side delete error = %v", err)
-	}
-	if _, err := store.AssignNodeSide(ctx, nodeOne.ID, nodeOne.AssignmentRevision, "steam", market.SideBid); !errors.Is(err, ErrResourceDependency) {
-		t.Fatalf("referenced steam side change error = %v", err)
-	}
-	if _, err := store.AssignNodeGame(ctx, nodeOne.ID, nodeOne.AssignmentRevision, 0); !errors.Is(err, ErrResourceDependency) {
-		t.Fatalf("referenced node game clear error = %v", err)
 	}
 
 	if err := store.DeleteCombination(ctx, primary.ID); err != nil {
@@ -735,19 +587,6 @@ VALUES ('buff', $1, $2)`, int64(buffAccount.ID), int64(nodeTwo.ID)); err == nil 
 	recreatedAccount, err := store.CreateAccount(ctx, "steam", "combination-recreated-account", []byte("synthetic-recreated-account"))
 	if err != nil || recreatedAccount.ID == temporary.ID {
 		t.Fatalf("recreated account = %+v old=%d err=%v", recreatedAccount, temporary.ID, err)
-	}
-
-	exhausted, err := store.CreateNode(ctx, "combination-exhausted-revision", resource.NodeConnectionInput{
-		Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE access_nodes SET assignment_revision = $2 WHERE node_id = $1`, int64(exhausted.ID), int64(math.MaxInt64)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AssignNodeGame(ctx, exhausted.ID, math.MaxInt64, 730); err == nil {
-		t.Fatal("exhausted assignment revision was advanced")
 	}
 }
 
@@ -834,16 +673,8 @@ func testClosedResourceErrors(t *testing.T, dsn string) {
 			_, err := store.MarkNodeUnavailable(ctx, node.ID, node.EgressRevision)
 			return err
 		},
-		"assign node game": func() error {
-			_, err := store.AssignNodeGame(ctx, node.ID, node.AssignmentRevision, 730)
-			return err
-		},
-		"assign node side": func() error {
-			_, err := store.AssignNodeSide(ctx, node.ID, node.AssignmentRevision, "steam", market.SideAsk)
-			return err
-		},
 		"open node": func() error {
-			_, err := store.OpenNodeProxyCredentialAt(ctx, node.ID, node.EgressRevision, node.AssignmentRevision)
+			_, err := store.OpenNodeProxyCredentialAt(ctx, node.ID, node.EgressRevision)
 			return err
 		},
 		"create combination": func() error {
@@ -900,9 +731,6 @@ VALUES ('steam',$1,$2)`, args: []any{"bad\nalias", []byte("synthetic-account-ses
 		{name: "empty session plaintext", sql: `
 INSERT INTO platform_accounts(platform,alias,session_plaintext)
 VALUES ('steam','empty-session',$1)`, args: []any{[]byte{}}},
-		{name: "zero assignment revision", sql: `
-INSERT INTO access_nodes(name,kind,region,egress_mode,assignment_revision)
-VALUES ('bad-assignment-revision','direct','foreign','static',0)`},
 	}
 	for _, test := range statements {
 		t.Run(test.name, func(t *testing.T) {

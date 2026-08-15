@@ -31,7 +31,7 @@ func TestPrepareBatchCopiesAndNormalizesPresentObservation(t *testing.T) {
 		AppID:    730,
 		Platform: "steam",
 		Side:     market.SideAsk,
-		Order:    market.WriteOrder{SwitchVersion: 1, RunSequence: 2, PageSequence: 3},
+		Order:    market.WriteOrder{SwitchVersion: 1, WriteSequence: 3},
 		Attempts: []AttemptWrite{{ProductID: catalog.ProductID(9), Observation: observation}},
 	}, false)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestPrepareBatchRejectsInvalidOrInferredFacts(t *testing.T) {
 		AppID:    730,
 		Platform: "steam",
 		Side:     market.SideAsk,
-		Order:    market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1},
+		Order:    market.WriteOrder{SwitchVersion: 1, WriteSequence: 1},
 		Attempts: []AttemptWrite{{
 			ProductID:   1,
 			Observation: validFailed,
@@ -81,7 +81,7 @@ func TestPrepareBatchRejectsInvalidOrInferredFacts(t *testing.T) {
 		"invalid appid":        func(batch *observationBatch) { batch.AppID = 0 },
 		"invalid platform":     func(batch *observationBatch) { batch.Platform = "Steam" },
 		"invalid side":         func(batch *observationBatch) { batch.Side = market.Side("sell") },
-		"missing order":        func(batch *observationBatch) { batch.Order.PageSequence = 0 },
+		"missing order":        func(batch *observationBatch) { batch.Order.WriteSequence = 0 },
 		"empty batch":          func(batch *observationBatch) { batch.Attempts = nil },
 		"invalid product":      func(batch *observationBatch) { batch.Attempts[0].ProductID = 0 },
 		"mismatched side":      func(batch *observationBatch) { batch.Attempts[0].Observation.Side = market.SideBid },
@@ -113,7 +113,7 @@ func TestPrepareBatchReasonCodeMatchesAttemptStatus(t *testing.T) {
 			AppID:    730,
 			Platform: "steam",
 			Side:     market.SideAsk,
-			Order:    market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1},
+			Order:    market.WriteOrder{SwitchVersion: 1, WriteSequence: 1},
 			Attempts: []AttemptWrite{{
 				ProductID: 1,
 				Observation: market.Observation{
@@ -136,7 +136,7 @@ func TestPrepareBatchRejectsTimeThatNormalizesToZero(t *testing.T) {
 		AppID:    730,
 		Platform: "steam",
 		Side:     market.SideAsk,
-		Order:    market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1},
+		Order:    market.WriteOrder{SwitchVersion: 1, WriteSequence: 1},
 		Attempts: []AttemptWrite{{
 			ProductID: 1,
 			Observation: market.Observation{
@@ -159,7 +159,7 @@ func TestValidateLatestRowRejectsZeroSourceTimeForPresent(t *testing.T) {
 		status:            market.StatusPresent,
 		sourceTime:        &zero,
 		collectedAt:       time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
-		order:             market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1},
+		order:             market.WriteOrder{SwitchVersion: 1, WriteSequence: 1},
 		storageConsistent: true,
 	}
 	if err := validateLatestRow(row); err == nil {

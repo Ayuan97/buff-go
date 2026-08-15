@@ -10,8 +10,6 @@ import (
 	"net/netip"
 	"sync"
 	"time"
-
-	"buff-go/internal/market"
 )
 
 var (
@@ -42,11 +40,9 @@ type CoordinatorRepository interface {
 	RecordAccountSessionCheck(context.Context, AccountID, int64, AccountSessionState, time.Time) (PlatformAccount, error)
 	ReplaceNodeConnection(context.Context, NodeID, int64, NodeConnectionInput) (AccessNode, error)
 	BeginNodeRevalidation(context.Context, NodeID, int64) (AccessNode, error)
-	OpenNodeProxyCredentialAt(context.Context, NodeID, int64, int64) ([]byte, error)
+	OpenNodeProxyCredentialAt(context.Context, NodeID, int64) ([]byte, error)
 	RecordNodeExit(context.Context, NodeID, int64, netip.Addr, time.Time, time.Time) (AccessNode, error)
 	MarkNodeUnavailable(context.Context, NodeID, int64) (AccessNode, error)
-	AssignNodeGame(context.Context, NodeID, int64, int64) (AccessNode, error)
-	AssignNodeSide(context.Context, NodeID, int64, Platform, market.Side) (AccessNode, error)
 }
 
 // ComponentID identifies one runtime cancellation generation. It is valid only
@@ -90,19 +86,18 @@ const (
 
 // LeaseSnapshot freezes the resource generations observed before occupation.
 type LeaseSnapshot struct {
-	CombinationID      CombinationID
-	Platform           Platform
-	AccountID          AccountID
-	NodeID             NodeID
-	NodeKind           NodeKind
-	NodeRegion         NodeRegion
-	EgressMode         EgressMode
-	ExitAddress        netip.Addr
-	ExitVerifiedAt     time.Time
-	ExitValidUntil     time.Time
-	SessionRevision    int64
-	EgressRevision     int64
-	AssignmentRevision int64
+	CombinationID   CombinationID
+	Platform        Platform
+	AccountID       AccountID
+	NodeID          NodeID
+	NodeKind        NodeKind
+	NodeRegion      NodeRegion
+	EgressMode      EgressMode
+	ExitAddress     netip.Addr
+	ExitVerifiedAt  time.Time
+	ExitValidUntil  time.Time
+	SessionRevision int64
+	EgressRevision  int64
 }
 
 // Lease is one exact in-memory occupation. Snapshot is a safe read copy; code
@@ -279,8 +274,6 @@ func (coordinator *Coordinator) AcquireCombination(
 	id CombinationID,
 	target TargetRegion,
 	now time.Time,
-	appID int64,
-	side market.Side,
 ) (Lease, error) {
 	if coordinator == nil {
 		return Lease{}, fmt.Errorf("nil resource coordinator")
@@ -321,7 +314,7 @@ func (coordinator *Coordinator) AcquireCombination(
 	if resources.Combination.ID != id {
 		return Lease{}, ErrCoordinatorIntegrity
 	}
-	if err := resources.ValidateForUse(now, target, appID, side); err != nil {
+	if err := resources.ValidateForUse(now, target); err != nil {
 		if errors.Is(err, ErrAccountSessionUnusable) || errors.Is(err, ErrResourceUnusable) {
 			return Lease{}, err
 		}
@@ -686,7 +679,6 @@ func (coordinator *Coordinator) OpenNodeProxyCredential(ctx context.Context, tok
 		operationContext,
 		snapshot.NodeID,
 		snapshot.EgressRevision,
-		snapshot.AssignmentRevision,
 	)
 	if err != nil {
 		wipeBytes(plaintext)
@@ -762,42 +754,6 @@ func (coordinator *Coordinator) MarkNodeUnavailable(ctx context.Context, token L
 	return node, nil
 }
 
-// AssignNodeGame applies a game CAS while the node is idle. appID 0 clears it.
-func (coordinator *Coordinator) AssignNodeGame(ctx context.Context, id NodeID, expectedRevision int64, appID int64) (AccessNode, error) {
-	if err := validateExpectedRevision(id.Validate(), expectedRevision); err != nil {
-		return AccessNode{}, err
-	}
-	if appID < 0 {
-		return AccessNode{}, fmt.Errorf("appid must be non-negative")
-	}
-	var node AccessNode
-	err := coordinator.withIdle(ctx, "node", func() bool {
-		return coordinator.nodeBusy(id)
-	}, func() error {
-		var err error
-		node, err = coordinator.repository.AssignNodeGame(ctx, id, expectedRevision, appID)
-		return err
-	})
-	return node, err
-}
-
-// AssignNodeSide applies a direction CAS while the node is idle. Empty side
-// deletes that platform row.
-func (coordinator *Coordinator) AssignNodeSide(ctx context.Context, id NodeID, expectedRevision int64, platform Platform, side market.Side) (AccessNode, error) {
-	if err := validateNodeSideInput(id, expectedRevision, platform, side); err != nil {
-		return AccessNode{}, err
-	}
-	var node AccessNode
-	err := coordinator.withIdle(ctx, "node", func() bool {
-		return coordinator.nodeBusy(id)
-	}, func() error {
-		var err error
-		node, err = coordinator.repository.AssignNodeSide(ctx, id, expectedRevision, platform, side)
-		return err
-	})
-	return node, err
-}
-
 func (coordinator *Coordinator) withIdle(ctx context.Context, kind string, occupied func() bool, action func() error) error {
 	if err := coordinator.lockCoord(ctx); err != nil {
 		return err
@@ -838,22 +794,6 @@ func validateExpectedRevision(identityErr error, revision int64) error {
 	}
 	if revision < 1 {
 		return fmt.Errorf("expected revision must be at least 1")
-	}
-	return nil
-}
-
-func validateNodeSideInput(id NodeID, revision int64, platform Platform, side market.Side) error {
-	if err := validateExpectedRevision(id.Validate(), revision); err != nil {
-		return err
-	}
-	if err := platform.Validate(); err != nil {
-		return err
-	}
-	if side == "" {
-		return nil
-	}
-	if side != market.SideBid && side != market.SideAsk {
-		return fmt.Errorf("invalid assignment side %q", side)
 	}
 	return nil
 }
@@ -931,9 +871,7 @@ func (coordinator *Coordinator) updateLeaseNodeSnapshot(token LeaseToken, expect
 		}
 		wantEgressRevision++
 	}
-	if node.ID != previous.NodeID ||
-		node.EgressRevision != wantEgressRevision ||
-		node.AssignmentRevision != previous.AssignmentRevision {
+	if node.ID != previous.NodeID || node.EgressRevision != wantEgressRevision {
 		return ErrCoordinatorIntegrity
 	}
 	coordinator.ownerMu.Lock()
@@ -944,8 +882,7 @@ func (coordinator *Coordinator) updateLeaseNodeSnapshot(token LeaseToken, expect
 	}
 	if record.lease.Kind != expectedKind ||
 		record.lease.Snapshot.NodeID != previous.NodeID ||
-		record.lease.Snapshot.EgressRevision != previous.EgressRevision ||
-		record.lease.Snapshot.AssignmentRevision != previous.AssignmentRevision {
+		record.lease.Snapshot.EgressRevision != previous.EgressRevision {
 		return ErrCoordinatorIntegrity
 	}
 	if _, active := record.lease.authority.current(expectedKind); !active {
@@ -1087,12 +1024,11 @@ func ownsTokenSet(owners map[LeaseToken]struct{}, token LeaseToken) bool {
 
 func nodeLeaseSnapshot(node AccessNode) LeaseSnapshot {
 	snapshot := LeaseSnapshot{
-		NodeID:             node.ID,
-		NodeKind:           node.Kind,
-		NodeRegion:         node.Region,
-		EgressMode:         node.EgressMode,
-		EgressRevision:     node.EgressRevision,
-		AssignmentRevision: node.AssignmentRevision,
+		NodeID:         node.ID,
+		NodeKind:       node.Kind,
+		NodeRegion:     node.Region,
+		EgressMode:     node.EgressMode,
+		EgressRevision: node.EgressRevision,
 	}
 	if node.ExitVerification != nil {
 		snapshot.ExitAddress = node.ExitVerification.Address

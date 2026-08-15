@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
 	"buff-go/internal/storage/postgres"
@@ -26,9 +27,15 @@ type targetResponse struct {
 	Recovery      collection.RecoveryMode `json:"recovery,omitempty"`
 	RecheckAt     *time.Time              `json:"recheck_at,omitempty"`
 	ChangedAt     time.Time               `json:"changed_at"`
-	// 采集顺序决定这一轮先采到哪一头，改它会作废当前批次。
+	// 采集顺序决定补货从哪一头开始，改它会清空该方向队列。
 	SortColumn collection.SortColumn    `json:"sort_column"`
 	SortDir    collection.SortDirection `json:"sort_dir"`
+	// 出售搜索交给 Steam 的人民币分区间。空表示不限。求购没有对应参数。
+	PriceMinCents *int64 `json:"price_min_cents,omitempty"`
+	PriceMaxCents *int64 `json:"price_max_cents,omitempty"`
+	// Rust 出售搜索交给 Steam 的分类多选。空表示不限。求购没有对应参数。
+	SteamCats   []string `json:"steam_cats"`
+	ItemClasses []string `json:"item_classes"`
 }
 
 type targetCreateRequest struct {
@@ -49,78 +56,72 @@ type targetSortRequest struct {
 	Direction        collection.SortDirection `json:"sort_dir"`
 }
 
-type runResponse struct {
-	ID               collection.RunID        `json:"id"`
-	TargetID         *collection.TargetID    `json:"target_id,omitempty"`
-	TaskType         collection.TaskType     `json:"task_type"`
-	Platform         collection.Platform     `json:"platform"`
-	AppID            int64                   `json:"appid"`
-	Side             *market.Side            `json:"side,omitempty"`
-	State            collection.RunState     `json:"state"`
-	Completeness     collection.Completeness `json:"completeness,omitempty"`
-	Reason           collection.RunReason    `json:"reason,omitempty"`
-	Cursor           string                  `json:"cursor,omitempty"`
-	LastPageSequence int64                   `json:"last_page_sequence"`
-	CreatedAt        time.Time               `json:"created_at"`
-	StartedAt        *time.Time              `json:"started_at,omitempty"`
-	FinishedAt       *time.Time              `json:"finished_at,omitempty"`
+type targetPriceRangeRequest struct {
+	ExpectedRevision collection.Revision `json:"expected_revision"`
+	MinCents         *int64              `json:"min_cents"`
+	MaxCents         *int64              `json:"max_cents"`
 }
 
-type pageResponse struct {
-	PageSequence int64     `json:"page_sequence"`
-	CursorBefore string    `json:"cursor_before,omitempty"`
-	CursorAfter  string    `json:"cursor_after,omitempty"`
-	CollectedAt  time.Time `json:"collected_at"`
-	CommittedAt  time.Time `json:"committed_at"`
-	PayloadBytes int64     `json:"payload_bytes"`
-	// 归属在本能力上线之前提交的页上是空的。
-	AccountID    int64  `json:"account_id,omitempty"`
-	AccountAlias string `json:"account_alias,omitempty"`
-	ExitAddress  string `json:"exit_address,omitempty"`
+type targetSteamFacetsRequest struct {
+	ExpectedRevision collection.Revision `json:"expected_revision"`
+	SteamCats        []string            `json:"steam_cats"`
+	ItemClasses      []string            `json:"item_classes"`
 }
 
-type pageAttemptResponse struct {
-	ProductID   int64      `json:"product_id"`
-	AppID       int64      `json:"appid"`
-	Name        string     `json:"name"`
-	Platform    string     `json:"platform"`
-	Side        string     `json:"side"`
-	Status      string     `json:"status"`
-	ReasonCode  string     `json:"reason_code,omitempty"`
-	CollectedAt time.Time  `json:"collected_at"`
-	SourceTime  *time.Time `json:"source_time,omitempty"`
-	PriceCents  *int64     `json:"present_cents,omitempty"`
-	OrderCount  *int64     `json:"present_order_count,omitempty"`
+type workerItemResponse struct {
+	ProductID  int64  `json:"product_id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	PriceCents *int64 `json:"present_cents,omitempty"`
+}
+
+type workerClaimResponse struct {
+	TargetID collection.TargetID  `json:"target_id"`
+	AppID    int64                `json:"appid"`
+	Side     market.Side          `json:"side"`
+	Platform collection.Platform  `json:"platform"`
+	Items    []workerItemResponse `json:"items"`
+}
+
+type workerPageResponse struct {
+	TargetID    collection.TargetID  `json:"target_id"`
+	AppID       int64                `json:"appid"`
+	Side        market.Side          `json:"side"`
+	Platform    collection.Platform  `json:"platform"`
+	CommittedAt time.Time            `json:"committed_at"`
+	Items       []workerItemResponse `json:"items"`
+}
+
+type workerResponse struct {
+	CombinationID int64                `json:"combination_id"`
+	AccountID     int64                `json:"account_id"`
+	AccountAlias  string               `json:"account_alias"`
+	Platform      string               `json:"platform"`
+	NodeID        int64                `json:"node_id"`
+	NodeName      string               `json:"node_name"`
+	ExitAddress   string               `json:"exit_address,omitempty"`
+	Region        string               `json:"region"`
+	SessionState  string               `json:"session_state"`
+	Idle          bool                 `json:"idle"`
+	Claim         *workerClaimResponse `json:"claim,omitempty"`
+	LastPage      *workerPageResponse  `json:"last_page,omitempty"`
 }
 
 func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
-	if strings.HasPrefix(path, "/api/runs/") {
-		h.serveRunPages(w, r, path)
-		return
-	}
-	if path == "/api/runs" {
+	if path == "/api/workers" {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 			return
 		}
-		limit := 50
-		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-			value, err := strconv.Atoi(raw)
-			if err != nil || value < 1 {
-				writeError(w, http.StatusBadRequest, "invalid_limit")
-				return
-			}
-			limit = value
-		}
-		runs, err := h.collection.ListRecentRuns(r.Context(), limit)
+		workers, err := h.collection.ListWorkers(r.Context())
 		if err != nil {
 			writeCollectionError(w, err)
 			return
 		}
-		out := make([]runResponse, 0, len(runs))
-		for _, run := range runs {
-			out = append(out, toRunResponse(run))
+		out := make([]workerResponse, 0, len(workers))
+		for _, worker := range workers {
+			out = append(out, toWorkerResponse(worker))
 		}
 		writeAccountJSON(w, http.StatusOK, out)
 		return
@@ -195,6 +196,34 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		writeAccountJSON(w, http.StatusOK, toTargetResponse(target))
 		return
 	}
+	if len(parts) == 2 && parts[1] == "price-range" && r.Method == http.MethodPost {
+		var input targetPriceRangeRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		bounds := collection.PriceRange{MinCents: input.MinCents, MaxCents: input.MaxCents}
+		target, err := h.collection.SetTargetPriceRange(r.Context(), id, input.ExpectedRevision, bounds)
+		if err != nil {
+			writeCollectionError(w, err)
+			return
+		}
+		writeAccountJSON(w, http.StatusOK, toTargetResponse(target))
+		return
+	}
+	if len(parts) == 2 && parts[1] == "steam-facets" && r.Method == http.MethodPost {
+		var input targetSteamFacetsRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		facets := collection.SteamFacets{Cats: input.SteamCats, Classes: input.ItemClasses}
+		target, err := h.collection.SetTargetSteamFacets(r.Context(), id, input.ExpectedRevision, facets)
+		if err != nil {
+			writeCollectionError(w, err)
+			return
+		}
+		writeAccountJSON(w, http.StatusOK, toTargetResponse(target))
+		return
+	}
 	if len(parts) == 2 && parts[1] == "sort" && r.Method == http.MethodPost {
 		var input targetSortRequest
 		if !decodeJSON(w, r, &input) {
@@ -227,94 +256,49 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotFound, "not_found")
 }
 
-// serveRunPages 处理批次下钻：页列表、单页原始响应、单页写入的行情。全部只读。
-func (h *Handler) serveRunPages(w http.ResponseWriter, r *http.Request, path string) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
+func toWorkerResponse(worker collection.WorkerSnapshot) workerResponse {
+	out := workerResponse{
+		CombinationID: int64(worker.Combination.ID),
+		AccountID:     int64(worker.Combination.AccountID),
+		AccountAlias:  worker.AccountAlias,
+		Platform:      string(worker.Combination.Platform),
+		NodeID:        int64(worker.Combination.NodeID),
+		NodeName:      worker.NodeName,
+		ExitAddress:   worker.ExitAddress,
+		Region:        string(worker.Region),
+		SessionState:  string(worker.SessionState),
+		Idle:          worker.Idle,
 	}
-	parts := strings.Split(strings.TrimPrefix(path, "/api/runs/"), "/")
-	runValue, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || runValue < 1 {
-		writeError(w, http.StatusBadRequest, "invalid_run_id")
-		return
+	if worker.Claim != nil {
+		out.Claim = &workerClaimResponse{
+			TargetID: worker.Claim.TargetID,
+			AppID:    worker.Claim.AppID,
+			Side:     worker.Claim.Side,
+			Platform: worker.Claim.Platform,
+			Items:    toWorkerItemResponses(worker.Claim.Items),
+		}
 	}
-	runID := collection.RunID(runValue)
-	if len(parts) == 2 && parts[1] == "pages" {
-		summaries, err := h.collection.PageSummaries(r.Context(), runID)
-		if err != nil {
-			writeCollectionError(w, err)
-			return
+	if worker.LastPage != nil {
+		out.LastPage = &workerPageResponse{
+			TargetID:    worker.LastPage.TargetID,
+			AppID:       worker.LastPage.AppID,
+			Side:        worker.LastPage.Side,
+			Platform:    worker.LastPage.Platform,
+			CommittedAt: worker.LastPage.CommittedAt,
+			Items:       toWorkerItemResponses(worker.LastPage.Items),
 		}
-		out := make([]pageResponse, 0, len(summaries))
-		for _, summary := range summaries {
-			out = append(out, pageResponse{
-				PageSequence: summary.PageSequence,
-				CursorBefore: summary.CursorBefore,
-				CursorAfter:  summary.CursorAfter,
-				CollectedAt:  summary.CollectedAt,
-				CommittedAt:  summary.CommittedAt,
-				PayloadBytes: summary.PayloadBytes,
-				AccountID:    summary.AccountID,
-				AccountAlias: summary.AccountAlias,
-				ExitAddress:  summary.ExitAddress,
-			})
-		}
-		writeAccountJSON(w, http.StatusOK, out)
-		return
 	}
-	if len(parts) != 4 || parts[1] != "pages" {
-		writeError(w, http.StatusNotFound, "not_found")
-		return
+	return out
+}
+
+func toWorkerItemResponses(items []collection.WorkerItem) []workerItemResponse {
+	out := make([]workerItemResponse, 0, len(items))
+	for _, item := range items {
+		out = append(out, workerItemResponse{
+			ProductID: item.ProductID, Name: item.Name, Status: item.Status, PriceCents: item.PriceCents,
+		})
 	}
-	pageValue, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil || pageValue < 1 {
-		writeError(w, http.StatusBadRequest, "invalid_page_sequence")
-		return
-	}
-	sequence := collection.Sequence(pageValue)
-	switch parts[3] {
-	case "payload":
-		payload, err := h.collection.PagePayload(r.Context(), runID, sequence)
-		if errors.Is(err, postgres.ErrPagePayloadNotFound) {
-			writeError(w, http.StatusNotFound, "page_payload_not_found")
-			return
-		}
-		if err != nil {
-			writeCollectionError(w, err)
-			return
-		}
-		// 原样回传平台响应，控制台只作展示，不再解释内容
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(payload)
-	case "attempts":
-		attempts, err := h.collection.PageAttempts(r.Context(), runID, sequence)
-		if err != nil {
-			writeCollectionError(w, err)
-			return
-		}
-		out := make([]pageAttemptResponse, 0, len(attempts))
-		for _, attempt := range attempts {
-			out = append(out, pageAttemptResponse{
-				ProductID:   attempt.ProductID,
-				AppID:       attempt.AppID,
-				Name:        attempt.Name,
-				Platform:    attempt.Platform,
-				Side:        attempt.Side,
-				Status:      attempt.Status,
-				ReasonCode:  attempt.ReasonCode,
-				CollectedAt: attempt.CollectedAt,
-				SourceTime:  attempt.SourceTime,
-				PriceCents:  attempt.PriceCents,
-				OrderCount:  attempt.OrderCount,
-			})
-		}
-		writeAccountJSON(w, http.StatusOK, out)
-	default:
-		writeError(w, http.StatusNotFound, "not_found")
-	}
+	return out
 }
 
 func toTargetResponse(target collection.Target) targetResponse {
@@ -335,37 +319,13 @@ func toTargetResponse(target collection.Target) targetResponse {
 		ChangedAt:     target.ChangedAt(),
 		SortColumn:    target.Sort().Column,
 		SortDir:       target.Sort().Direction,
+		PriceMinCents: target.PriceRange().MinCents,
+		PriceMaxCents: target.PriceRange().MaxCents,
+		SteamCats:     jsonStrings(target.SteamFacets().Cats),
+		ItemClasses:   jsonStrings(target.SteamFacets().Classes),
 	}
 	if hasRecheck {
 		out.RecheckAt = &recheck
-	}
-	return out
-}
-
-func toRunResponse(run collection.Run) runResponse {
-	out := runResponse{
-		ID:               run.ID(),
-		TaskType:         run.TaskType(),
-		Platform:         run.Platform(),
-		AppID:            run.AppID(),
-		State:            run.State(),
-		Completeness:     run.Completeness(),
-		Reason:           run.Reason(),
-		Cursor:           string(run.CurrentCursor().Bytes()),
-		LastPageSequence: run.LastPageSequence(),
-		CreatedAt:        run.CreatedAt(),
-	}
-	if id, ok := run.TargetID(); ok {
-		out.TargetID = &id
-	}
-	if side, ok := run.Side(); ok {
-		out.Side = &side
-	}
-	if started, ok := run.StartedAt(); ok {
-		out.StartedAt = &started
-	}
-	if finished, ok := run.FinishedAt(); ok {
-		out.FinishedAt = &finished
 	}
 	return out
 }
@@ -406,6 +366,11 @@ type quoteResponse struct {
 	PresentCents       *int64     `json:"present_cents,omitempty"`
 	PresentOrderCount  *int64     `json:"present_order_count,omitempty"`
 	PresentCollectedAt *time.Time `json:"present_collected_at,omitempty"`
+	DropCents          *int64     `json:"drop_cents,omitempty"`
+	HighCents          *int64     `json:"high_cents,omitempty"`
+	DropPctBP          *int64     `json:"drop_pct_bp,omitempty"`
+	DropCount          *int64     `json:"drop_count,omitempty"`
+	LastDropAt         *time.Time `json:"last_drop_at,omitempty"`
 }
 
 func (h *Handler) serveQuotes(w http.ResponseWriter, r *http.Request) {
@@ -422,6 +387,15 @@ func (h *Handler) serveQuotes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		appid = value
+	}
+	productID := int64(0)
+	if raw := strings.TrimSpace(query.Get("product_id")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_product_id")
+			return
+		}
+		productID = value
 	}
 	limit := 60
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
@@ -442,19 +416,24 @@ func (h *Handler) serveQuotes(w http.ResponseWriter, r *http.Request) {
 		offset = value
 	}
 	filter := postgres.MarketQuoteFilter{
-		AppID:    appid,
-		Platform: strings.TrimSpace(query.Get("platform")),
-		Side:     market.Side(strings.TrimSpace(query.Get("side"))),
-		Keyword:  strings.TrimSpace(query.Get("keyword")),
-		ItemType: strings.TrimSpace(query.Get("item_type")),
-		Sort:     postgres.QuoteSort(strings.TrimSpace(query.Get("sort"))),
-		Limit:    limit,
-		Offset:   offset,
+		AppID:     appid,
+		ProductID: productID,
+		Platform:  strings.TrimSpace(query.Get("platform")),
+		Side:      market.Side(strings.TrimSpace(query.Get("side"))),
+		Keyword:   strings.TrimSpace(query.Get("keyword")),
+		ItemType:  strings.TrimSpace(query.Get("item_type")),
+		ItemTypes: queryList(query, "item_types"),
+		SteamCats: queryList(query, "steam_cats"),
+		Sort:       postgres.QuoteSort(strings.TrimSpace(query.Get("sort"))),
+		DropWindow: postgres.DropWindow(strings.TrimSpace(query.Get("drop_window"))),
+		DropsOnly:  droppedOnly(query.Get("dropped")),
+		Limit:      limit,
+		Offset:     offset,
 	}
 	for _, bound := range []struct {
 		name   string
 		target **int64
-	}{{"min_cents", &filter.MinCents}, {"max_cents", &filter.MaxCents}} {
+	}{{"min_cents", &filter.MinCents}, {"max_cents", &filter.MaxCents}, {"min_drop_cents", &filter.MinDropCents}} {
 		raw := strings.TrimSpace(query.Get(bound.name))
 		if raw == "" {
 			continue
@@ -507,6 +486,61 @@ func (h *Handler) serveQuoteFacets(w http.ResponseWriter, r *http.Request) {
 	}{AppIDs: facets.AppIDs, ItemTypes: facets.ItemTypes})
 }
 
+// serveSteamFacets 返回 Rust 市场勾选词表，给配置页和行情筛选用。
+func (h *Handler) serveSteamFacets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("appid"))
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "invalid_appid")
+		return
+	}
+	appid, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || appid < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_appid")
+		return
+	}
+	out := struct {
+		Categories  []catalog.RustCategory  `json:"categories"`
+		ItemClasses []catalog.RustItemClass `json:"item_classes"`
+	}{Categories: []catalog.RustCategory{}, ItemClasses: []catalog.RustItemClass{}}
+	if appid == catalog.AppIDRust {
+		out.Categories = catalog.RustCategories()
+		out.ItemClasses = catalog.RustItemClasses()
+	}
+	writeAccountJSON(w, http.StatusOK, out)
+}
+
+func droppedOnly(raw string) bool {
+	value := strings.TrimSpace(raw)
+	return value == "1" || value == "true"
+}
+
+func queryList(query map[string][]string, key string) []string {
+	raw := query[key]
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, value := range raw {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func jsonStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
 func toQuoteResponse(quote postgres.MarketQuote) quoteResponse {
 	out := quoteResponse{
 		ProductID:          int64(quote.ProductID),
@@ -528,5 +562,10 @@ func toQuoteResponse(quote postgres.MarketQuote) quoteResponse {
 		cents := int64(*quote.PresentCents)
 		out.PresentCents = &cents
 	}
+	out.DropCents = quote.DropCents
+	out.HighCents = quote.HighCents
+	out.DropPctBP = quote.DropPctBP
+	out.DropCount = quote.DropCount
+	out.LastDropAt = quote.LastDropAt
 	return out
 }

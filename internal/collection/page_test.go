@@ -2,6 +2,7 @@ package collection
 
 import (
 	"bytes"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -13,14 +14,25 @@ func pageDigest() [32]byte {
 func pageInput(t *testing.T) PageInput {
 	t.Helper()
 	return PageInput{
-		RunID:         5,
-		PageSequence:  1,
+		TargetID:      5,
+		WriteSeq:      1,
 		CursorBefore:  mustCursor(t, "first"),
 		CursorAfter:   mustCursor(t, "second"),
 		PayloadDigest: pageDigest(),
 		CollectedAt:   targetTime(1),
 		CommittedAt:   targetTime(2),
+		AccountID:     3,
+		ExitAddress:   netip.MustParseAddr("1.1.1.1"),
 	}
+}
+
+func mustCursor(t *testing.T, value string) Cursor {
+	t.Helper()
+	cursor, err := NewCursor([]byte(value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cursor
 }
 
 func TestCursorBoundsAndCopyIsolation(t *testing.T) {
@@ -51,8 +63,8 @@ func TestPageValidationAndCopyIsolation(t *testing.T) {
 		name   string
 		mutate func(*PageInput)
 	}{
-		{"zero run id", func(input *PageInput) { input.RunID = 0 }},
-		{"zero sequence", func(input *PageInput) { input.PageSequence = 0 }},
+		{"zero target id", func(input *PageInput) { input.TargetID = 0 }},
+		{"zero write seq", func(input *PageInput) { input.WriteSeq = 0 }},
 		{"zero digest", func(input *PageInput) { input.PayloadDigest = [32]byte{} }},
 		{"commit before collect", func(input *PageInput) { input.CommittedAt = input.CollectedAt.Add(-time.Microsecond) }},
 		{"non UTC collect", func(input *PageInput) { input.CollectedAt = input.CollectedAt.In(time.FixedZone("offset", 0)) }},
@@ -84,94 +96,13 @@ func TestPageValidationAndCopyIsolation(t *testing.T) {
 	if string(page.CursorAfter().Bytes()) != "second" {
 		t.Fatal("Page.CursorAfter exposed internal cursor bytes")
 	}
+	if page.WriteSeq() != 1 || page.AccountID() != 3 {
+		t.Fatalf("page = write=%d account=%d", page.WriteSeq(), page.AccountID())
+	}
 
 	equalTimes := pageInput(t)
 	equalTimes.CommittedAt = equalTimes.CollectedAt
 	if _, err := NewPage(equalTimes); err != nil {
 		t.Fatalf("NewPage rejected equal collection and commit times: %v", err)
-	}
-}
-
-func TestRunCommitPageRequiresContiguousCausalPage(t *testing.T) {
-	pendingInput := summaryRunInput(t)
-	pendingInput.CurrentCursor = mustCursor(t, "first")
-	pending, err := NewSummaryRun(pendingInput)
-	if err != nil {
-		t.Fatal(err)
-	}
-	running, err := pending.Begin(targetTime(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := NewPage(pageInput(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	advanced, err := running.CommitPage(page)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if advanced.LastPageSequence() != 1 || string(advanced.CurrentCursor().Bytes()) != "second" {
-		t.Fatalf("advanced run last=%d cursor=%q", advanced.LastPageSequence(), advanced.CurrentCursor().Bytes())
-	}
-	if running.LastPageSequence() != 0 || string(running.CurrentCursor().Bytes()) != "first" {
-		t.Fatal("CommitPage mutated its receiver")
-	}
-
-	wrongRunInput := pageInput(t)
-	wrongRunInput.RunID = 2
-	wrongRun, _ := NewPage(wrongRunInput)
-	if _, err := running.CommitPage(wrongRun); err == nil {
-		t.Fatal("CommitPage accepted another run's page")
-	}
-	gapInput := pageInput(t)
-	gapInput.PageSequence = 2
-	gap, _ := NewPage(gapInput)
-	if _, err := running.CommitPage(gap); err == nil {
-		t.Fatal("CommitPage accepted a sequence gap")
-	}
-	wrongCursorInput := pageInput(t)
-	wrongCursorInput.CursorBefore = mustCursor(t, "other")
-	wrongCursor, _ := NewPage(wrongCursorInput)
-	if _, err := running.CommitPage(wrongCursor); err == nil {
-		t.Fatal("CommitPage accepted the wrong cursor_before")
-	}
-
-	lateStart, err := pending.Begin(targetTime(2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := lateStart.CommitPage(page); err == nil {
-		t.Fatal("CommitPage accepted a page collected before run start")
-	}
-	if _, err := pending.CommitPage(page); err == nil {
-		t.Fatal("pending run committed a page")
-	}
-	terminal, err := running.Stop(CompletenessPartial, RunReasonCancelled, targetTime(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := terminal.CommitPage(page); err == nil {
-		t.Fatal("terminal run committed a page")
-	}
-}
-
-func TestRunCurrentCursorIsCopyIsolated(t *testing.T) {
-	raw := []byte("first")
-	cursor, err := NewCursor(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := summaryRunInput(t)
-	input.CurrentCursor = cursor
-	run, err := NewSummaryRun(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw[0] = 'x'
-	copy := run.CurrentCursor().Bytes()
-	copy[0] = 'y'
-	if string(run.CurrentCursor().Bytes()) != "first" {
-		t.Fatal("Run.CurrentCursor exposed mutable cursor bytes")
 	}
 }

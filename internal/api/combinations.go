@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -42,6 +43,14 @@ func (h *Handler) serveCombinations(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			var input combinationCreateRequest
 			if !decodeJSON(w, r, &input) {
+				return
+			}
+			if err := h.ensureCombinationRegionAllowed(r.Context(), input.AccountID, input.NodeID); err != nil {
+				if errors.Is(err, errPlatformRegionMismatch) {
+					writeError(w, http.StatusConflict, "platform_region_mismatch")
+					return
+				}
+				writeCombinationError(w, err)
 				return
 			}
 			combination, err := h.combinations.CreateCombination(r.Context(), input.AccountID, input.NodeID)
@@ -93,6 +102,30 @@ func (h *Handler) serveCombinations(w http.ResponseWriter, r *http.Request) {
 	writeAccountJSON(w, http.StatusOK, struct {
 		Deleted bool `json:"deleted"`
 	}{Deleted: true})
+}
+
+func (h *Handler) ensureCombinationRegionAllowed(ctx context.Context, accountID resource.AccountID, nodeID resource.NodeID) error {
+	if h.accounts == nil || h.nodes == nil {
+		return nil
+	}
+	account, found, err := h.accounts.Account(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return postgres.ErrResourceNotFound
+	}
+	node, found, err := h.nodes.Node(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return postgres.ErrResourceNotFound
+	}
+	if !h.platformAllowsRegion(account.Platform, node.Region) {
+		return errPlatformRegionMismatch
+	}
+	return nil
 }
 
 func toCombinationResponse(combination resource.AccountNodeCombination) combinationResponse {

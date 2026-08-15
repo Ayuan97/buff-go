@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"buff-go/internal/market"
 	"buff-go/internal/resource"
 	"buff-go/internal/storage/postgres"
 )
@@ -31,8 +30,7 @@ func (s *nodeServiceStub) sample() resource.AccessNode {
 	return resource.AccessNode{
 		ID: 7, Name: "home", Kind: resource.NodeKindDirect, Region: region,
 		EgressMode: resource.EgressModeStatic, State: resource.NodeStateAvailable,
-		EgressRevision: 2, AssignmentRevision: 3, AppID: 730,
-		Sides: []resource.NodeSideAssignment{{Platform: "steam", Side: market.SideAsk}},
+		EgressRevision: 2,
 	}
 }
 
@@ -63,9 +61,6 @@ func (s *nodeServiceStub) CreateNode(_ context.Context, name string, _ resource.
 	node.Name = name
 	node.State = resource.NodeStateValidating
 	node.EgressRevision = 1
-	node.AssignmentRevision = 1
-	node.AppID = 0
-	node.Sides = nil
 	return node, nil
 }
 
@@ -92,25 +87,6 @@ func (s *nodeServiceStub) ReplaceNodeConnection(_ context.Context, id resource.N
 }
 
 func (s *nodeServiceStub) RecordNodeExit(_ context.Context, id resource.NodeID, _ int64, _ netip.Addr, _ time.Time) (resource.AccessNode, error) {
-	if s.err != nil {
-		return resource.AccessNode{}, s.err
-	}
-	node := s.sample()
-	node.ID = id
-	return node, nil
-}
-
-func (s *nodeServiceStub) AssignNodeGame(_ context.Context, id resource.NodeID, _ int64, appID int64) (resource.AccessNode, error) {
-	if s.err != nil {
-		return resource.AccessNode{}, s.err
-	}
-	node := s.sample()
-	node.ID = id
-	node.AppID = appID
-	return node, nil
-}
-
-func (s *nodeServiceStub) AssignNodeSide(_ context.Context, id resource.NodeID, _ int64, _ resource.Platform, _ market.Side) (resource.AccessNode, error) {
 	if s.err != nil {
 		return resource.AccessNode{}, s.err
 	}
@@ -152,8 +128,6 @@ func TestNodeRoutes(t *testing.T) {
 		{name: "name", method: http.MethodPost, path: "/api/nodes/7/name", body: `{"name":"office"}`, status: http.StatusOK},
 		{name: "connection", method: http.MethodPost, path: "/api/nodes/7/connection", body: `{"expected_egress_revision":2,"kind":"direct","region":"foreign","egress_mode":"static"}`, status: http.StatusOK},
 		{name: "exit", method: http.MethodPost, path: "/api/nodes/7/exit", body: `{"expected_egress_revision":2,"address":"203.0.113.8","valid_until":"2030-01-01T00:00:00Z"}`, status: http.StatusOK},
-		{name: "assign-game", method: http.MethodPost, path: "/api/nodes/7/assign-game", body: `{"expected_assignment_revision":3,"appid":730}`, status: http.StatusOK},
-		{name: "assign-side", method: http.MethodPost, path: "/api/nodes/7/assign-side", body: `{"expected_assignment_revision":3,"platform":"steam","side":"ask"}`, status: http.StatusOK},
 		{name: "delete", method: http.MethodPost, path: "/api/nodes/7/delete", status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -201,49 +175,13 @@ func TestNodeNotFoundJSON(t *testing.T) {
 	}
 }
 
-func TestAssignSteamSideRejectsDomestic(t *testing.T) {
-	handler := NewHandlerForAuthority(nil, "", ControlServices{
-		Nodes:           &nodeServiceStub{region: resource.NodeRegionDomestic},
-		PlatformRegions: steamRegions(),
-	})
-	cookie, token := issueContext(t, handler)
-	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/assign-side", strings.NewReader(`{"expected_assignment_revision":3,"platform":"steam","side":"ask"}`))
-	request.Host = "localhost"
-	request.Header.Set("Origin", "http://localhost")
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set(CSRFHeaderName, token)
-	request.AddCookie(cookie)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-}
-
-// 国内站平台同样受约束：国外节点划给 BUFF 也必须拒绝，不能因为 BUFF 还没接采集就放行。
-func TestAssignDomesticPlatformRejectsForeignNode(t *testing.T) {
-	handler := NewHandlerForAuthority(nil, "", ControlServices{
-		Nodes:           &nodeServiceStub{region: resource.NodeRegionForeign},
-		PlatformRegions: steamRegions(),
-	})
-	cookie, token := issueContext(t, handler)
-	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/assign-side", strings.NewReader(`{"expected_assignment_revision":3,"platform":"buff","side":"ask"}`))
-	request.Host = "localhost"
-	request.Header.Set("Origin", "http://localhost")
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set(CSRFHeaderName, token)
-	request.AddCookie(cookie)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "platform_region_mismatch") {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-}
-
-// 节点已划给 Steam 时把线路改成国内，必须在写入前拒绝，否则会留下调度器只会跳过的配置。
+// 节点已绑 Steam 账号时把线路改成国内，必须在写入前拒绝。
 func TestReplaceConnectionRejectsRegionConflict(t *testing.T) {
-	service := &nodeServiceStub{}
-	handler := NewHandlerForAuthority(nil, "", ControlServices{Nodes: service, PlatformRegions: steamRegions()})
+	handler := NewHandlerForAuthority(nil, "", ControlServices{
+		Nodes:           &nodeServiceStub{},
+		Combinations:    &combinationServiceStub{},
+		PlatformRegions: steamRegions(),
+	})
 	cookie, token := issueContext(t, handler)
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/nodes/7/connection", strings.NewReader(`{"expected_egress_revision":2,"kind":"proxy","region":"domestic","egress_mode":"static","proxy_credential":"http://user:pass@host:8080"}`))
 	request.Host = "localhost"

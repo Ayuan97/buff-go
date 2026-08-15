@@ -210,7 +210,7 @@ func TestValidPOSTReachesBusinessRoute(t *testing.T) {
 	}))
 	cookie, token := issueContext(t, handler)
 
-	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/accounts", strings.NewReader(`{}`))
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/status", strings.NewReader(`{}`))
 	request.Host = "localhost"
 	request.Header.Set("Origin", "http://localhost")
 	request.Header.Set("Content-Type", "application/json; charset=utf-8")
@@ -320,7 +320,7 @@ func TestHostOriginAndMethodBoundary(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(test.method, "http://localhost/api/status", nil)
+			request := httptest.NewRequest(test.method, "http://localhost/status", nil)
 			request.Host = test.host
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
@@ -345,12 +345,33 @@ func TestGETDoesNotRequireOrCreateControlSession(t *testing.T) {
 	handler := NewHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/status", nil)
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/status", nil)
 	request.Host = "localhost"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || len(response.Result().Cookies()) != 0 {
 		t.Fatalf("status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
+	}
+}
+
+func TestUnknownAPIPathReturnsJSON(t *testing.T) {
+	var calls atomic.Int32
+	handler := NewHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/runs", nil)
+	request.Host = "localhost"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("content-type=%q", response.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(response.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("body=%s", response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatal("unknown /api path reached the SPA handler")
 	}
 }
 
@@ -379,7 +400,7 @@ func TestHandlerCanBindToExactAuthority(t *testing.T) {
 		{host: "localhost:8080", status: http.StatusMisdirectedRequest},
 		{host: "127.0.0.1:8081", status: http.StatusMisdirectedRequest},
 	} {
-		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/status", nil)
+		request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/status", nil)
 		request.Host = test.host
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -407,8 +428,9 @@ func issueContext(t *testing.T, handler *Handler) (*http.Cookie, string) {
 
 func assertSecurityHeaders(t *testing.T, response *httptest.ResponseRecorder) {
 	t.Helper()
-	if !strings.Contains(response.Header().Get("Content-Security-Policy"), "default-src 'self'") {
-		t.Fatalf("missing CSP: %q", response.Header().Get("Content-Security-Policy"))
+	csp := response.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "https://community.steamstatic.com") {
+		t.Fatalf("missing CSP: %q", csp)
 	}
 	if response.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatal("missing nosniff")

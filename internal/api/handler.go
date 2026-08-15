@@ -171,8 +171,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.collection != nil && (r.URL.Path == "/api/targets" || strings.HasPrefix(r.URL.Path, "/api/targets/") ||
-		r.URL.Path == "/api/runs" || strings.HasPrefix(r.URL.Path, "/api/runs/")) {
+		r.URL.Path == "/api/workers") {
 		h.serveCollection(w, r)
+		return
+	}
+	if r.URL.Path == "/api/steam-facets" {
+		h.serveSteamFacets(w, r)
 		return
 	}
 	if h.market != nil && r.URL.Path == "/api/quotes" {
@@ -183,12 +187,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveQuoteFacets(w, r)
 		return
 	}
+	if h.market != nil && r.URL.Path == "/api/price-ticks" {
+		h.servePriceTicks(w, r)
+		return
+	}
 	if h.providers != nil && r.URL.Path == "/api/watermarks" {
 		h.serveWatermarks(w, r)
 		return
 	}
 	if h.providers != nil && (r.URL.Path == "/api/providers" || strings.HasPrefix(r.URL.Path, "/api/providers/")) {
 		h.serveProviders(w, r)
+		return
+	}
+	// 未知 /api 不能落到 SPA，否则前端会把 HTML 当 JSON 解析。
+	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
 	h.next.ServeHTTP(w, r)
@@ -487,7 +500,7 @@ func randomToken(source io.Reader) (string, error) {
 }
 
 func setSecurityHeaders(header http.Header) {
-	header.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'")
+	header.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://community.steamstatic.com; connect-src 'self'; font-src 'self'")
 	header.Set("Referrer-Policy", "no-referrer")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Frame-Options", "DENY")

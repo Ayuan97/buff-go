@@ -15,6 +15,7 @@ import (
 
 	"buff-go/internal/catalog"
 	"buff-go/internal/market"
+	"buff-go/internal/resource"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -84,13 +85,12 @@ SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()`)
 		"access_nodes",
 		"account_node_combinations",
 		"buffgo_storage_migrations",
-		"collection_page_payloads",
-		"collection_pages",
-		"collection_runs",
+		"collection_latest_pages",
 		"collection_targets",
+		"collection_tasks",
 		"market_last_present",
 		"market_latest_attempts",
-		"node_direction_assignments",
+		"market_price_ticks",
 		"platform_accounts",
 		"platform_product_mappings",
 		"proxy_provider_regions",
@@ -198,7 +198,7 @@ SELECT assignment_revision FROM access_nodes WHERE node_id = $1`, existingNodeID
 }
 
 func testCollectionDDLConstraints(t *testing.T, dsn string) {
-	_, db := migratedStore(t, dsn)
+	store, db := migratedStore(t, dsn)
 	ctx := t.Context()
 	createdAt := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	nextCheck := createdAt.Add(time.Hour)
@@ -311,182 +311,102 @@ RETURNING target_id`, createdAt)
 		reject(invalid.name, invalid.query)
 	}
 
-	var productID int64
-	if err := db.QueryRowContext(ctx, `
-INSERT INTO steam_products(appid, name) VALUES (730, 'collection-ddl-product')
-RETURNING product_id`).Scan(&productID); err != nil {
+	reject("negative write_seq", `
+UPDATE collection_targets SET write_seq = -1 WHERE target_id = $1`, summaryTarget)
+	reject("negative refill_total", `
+UPDATE collection_targets SET refill_total = -1 WHERE target_id = $1`, summaryTarget)
+	reject("oversize refill cursor", `
+UPDATE collection_targets SET refill_cursor = $1 WHERE target_id = $2`, make([]byte, 4097), summaryTarget)
+
+	account, err := store.CreateAccount(ctx, "steam", "ddl-queue-account", []byte("ddl-queue-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.CreateNode(ctx, "ddl-queue-node", resource.NodeConnectionInput{
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeStatic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	combination, err := store.CreateCombination(ctx, account.ID, node.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	var summaryRun, detailRun int64
-	if err := db.QueryRowContext(ctx, `
-INSERT INTO collection_runs (
-    target_id, kind, platform, appid, side, switch_version, run_sequence,
-    status, current_cursor, last_page_sequence, created_at, started_at
-) VALUES ($1, 'summary', 'steam', 730, 'ask', 1, 1, 'running', $2, 1, $3, $3)
-RETURNING run_id`, summaryTarget, []byte("next"), createdAt).Scan(&summaryRun); err != nil {
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO collection_tasks (target_id, enqueue_seq, enqueued_at, kind, payload, state)
+VALUES ($1, 1, $2, 'ask_page', '{"start":0,"count":10}', 'queued')`, summaryTarget, createdAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(ctx, `
-INSERT INTO collection_runs (
-    kind, platform, appid, side, product_id, run_sequence,
-    status, current_cursor, created_at
-) VALUES ('detail', 'steam', 730, 'ask', $1, 1, 'pending', $2, $3)
-RETURNING run_id`, productID, emptyCursor, createdAt).Scan(&detailRun); err != nil {
-		t.Fatal(err)
-	}
-	reject("parallel summary appid", `
-INSERT INTO collection_runs (
-    target_id, kind, platform, appid, side, switch_version, run_sequence,
-    status, current_cursor, created_at
-) VALUES ($1, 'summary', 'steam', 252490, 'ask', 1, 2, 'pending', $2, $3)`,
-		summaryTarget, emptyCursor, createdAt)
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO collection_runs (
-    target_id, kind, platform, appid, side, switch_version, run_sequence,
-    status, completeness, current_cursor, last_page_sequence, created_at, started_at, finished_at
-) VALUES ($1, 'summary', 'steam', 252490, 'ask', 1, 1,
-		  'succeeded', 'partial', $2, 1, $3, $3, $3)`, summaryOther, emptyCursor, createdAt); err != nil {
-		t.Fatalf("succeeded partial run: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO collection_runs (
-    kind, platform, appid, side, product_id, run_sequence, status,
-    completeness, reason_code, current_cursor, last_page_sequence, created_at, started_at, finished_at
-) VALUES ('detail', 'buff', 730, 'bid', $1, 1, 'failed',
-          'complete', 'network_error', $2, 1, $3, $3, $3)`, productID, emptyCursor, createdAt); err != nil {
-		t.Fatalf("failed complete run: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO collection_runs (
-    kind, platform, appid, side, product_id, run_sequence, status,
-    completeness, reason_code, current_cursor, created_at, finished_at
-) VALUES ('detail', 'igxe', 730, 'bid', $1, 1, 'stopped',
-          'partial', 'cancelled', $2, $3, $3)`, productID, emptyCursor, createdAt); err != nil {
-		t.Fatalf("pending-to-stopped shape: %v", err)
+INSERT INTO collection_tasks (target_id, enqueue_seq, enqueued_at, kind, payload, state, claimed_by, claimed_at)
+VALUES ($1, 2, $2, 'bid_batch', '{"after_id":0,"limit":10}', 'claimed', $3, $2)`,
+		summaryOther, createdAt, combination.ID); err != nil {
+		t.Fatalf("claimed task: %v", err)
 	}
 
-	reject("catalog run kind", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',730,'ask',1,2,'pending',$2,$3)`, summaryTarget, emptyCursor, createdAt)
-	reject("second active summary run", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'summary','steam',730,'ask',1,3,'pending',$2,$3)`, summaryTarget, emptyCursor, createdAt)
-	reject("second active detail scope run", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','steam',730,'ask',$1,2,'pending',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("catalog direction", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',252490,'ask',1,2,'pending',$2,$3)`, summaryOther, emptyCursor, createdAt)
-	reject("orphan control target", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES (9223372036854775807,'summary','steam',440,'ask',1,23,'pending',$1,$2)`, emptyCursor, createdAt)
-	reject("catalog null switch version", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'catalog','steam',252490,'ask',12,'pending',$2,$3)`, summaryOther, emptyCursor, createdAt)
-	reject("summary without switch version", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'summary','steam',730,'bid',2,'pending',$2,$3)`, summaryProbe, emptyCursor, createdAt)
-	reject("summary null side", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,switch_version,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'summary','steam',730,1,13,'pending',$2,$3)`, summaryProbe, emptyCursor, createdAt)
-	reject("detail with control target", `
-INSERT INTO collection_runs(target_id,kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ($1,'detail','buff',730,'ask',$2,3,'pending',$3,$4)`, summaryProbe, productID, emptyCursor, createdAt)
-	reject("detail null side", `
-INSERT INTO collection_runs(kind,platform,appid,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,$1,14,'pending',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("detail null product", `
-INSERT INTO collection_runs(kind,platform,appid,side,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',15,'pending',$1,$2)`, emptyCursor, createdAt)
-	reject("detail product appid mismatch", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','buff',252490,'ask',$1,4,'pending',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("merged run dimensions", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',$1,5,'failed_partial',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("active completeness", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',$1,6,'pending','partial',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("failed without controlled reason", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,reason_code,current_cursor,created_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,7,'failed','partial','raw upstream body',$2,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("unapproved failure reason", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,reason_code,current_cursor,created_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,17,'failed','partial','invalid_response',$2,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("running without start", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',$1,8,'running',$2,$3)`, productID, emptyCursor, createdAt)
-	reject("terminal without finish", `
-
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,current_cursor,created_at,started_at)
-VALUES ('detail','other',730,'ask',$1,9,'succeeded','complete',$2,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("succeeded without start", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,current_cursor,created_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,19,'succeeded','complete',$2,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("terminal null completeness", `
-
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at,started_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,16,'succeeded',$2,$3,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("pending terminal complete", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,reason_code,current_cursor,created_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,20,'failed','complete','timeout',$2,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("complete without committed page", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,current_cursor,created_at,started_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,23,'succeeded','complete',$2,$3,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("partial success without committed page", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,current_cursor,created_at,started_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,24,'succeeded','partial',$2,$3,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("pending with committed page", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,last_page_sequence,created_at)
-VALUES ('detail','other',730,'ask',$1,21,'pending',$2,1,$3)`, productID, emptyCursor, createdAt)
-	reject("page progress without start", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,completeness,reason_code,current_cursor,last_page_sequence,created_at,finished_at)
-VALUES ('detail','other',730,'ask',$1,22,'failed','partial','timeout',$2,1,$3,$3)`, productID, emptyCursor, createdAt)
-	reject("oversize current cursor", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',$1,10,'pending',$2,$3)`, productID, make([]byte, 4097), createdAt)
-	reject("negative last page", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,last_page_sequence,created_at)
-VALUES ('detail','other',730,'ask',$1,11,'pending',$2,-1,$3)`, productID, emptyCursor, createdAt)
-	reject("infinite run time", `
-INSERT INTO collection_runs(kind,platform,appid,side,product_id,run_sequence,status,current_cursor,created_at)
-VALUES ('detail','other',730,'ask',$1,18,'pending',$2,'infinity')`, productID, emptyCursor)
+	reject("duplicate enqueue seq", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES ($1,1,$2,'ask_page','{}','queued')`, summaryTarget, createdAt)
+	reject("orphan task target", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES (9223372036854775807,1,$1,'ask_page','{}','queued')`, createdAt)
+	reject("invalid task kind", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES ($1,3,$2,'summary','{}','queued')`, summaryTarget, createdAt)
+	reject("invalid task state", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES ($1,4,$2,'ask_page','{}','running')`, summaryTarget, createdAt)
+	reject("queued with claim", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at)
+VALUES ($1,5,$2,'ask_page','{}','queued',$3,$2)`, summaryTarget, createdAt, combination.ID)
+	reject("claimed without worker", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_at)
+VALUES ($1,6,$2,'ask_page','{}','claimed',$2)`, summaryTarget, createdAt)
+	reject("zero enqueue seq", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES ($1,0,$2,'ask_page','{}','queued')`, summaryTarget, createdAt)
+	reject("infinite enqueue time", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
+VALUES ($1,7,'infinity','ask_page','{}','queued')`, summaryTarget)
+	reject("orphan claimed_by", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at)
+VALUES ($1,8,$2,'ask_page','{}','claimed',9223372036854775807,$2)`, summaryTarget, createdAt)
 
 	digest := make([]byte, 32)
 	digest[0] = 1
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO collection_pages (
-    run_id, page_sequence, cursor_before, cursor_after, payload_digest,
+INSERT INTO collection_latest_pages (
+    target_id, write_seq, cursor_before, cursor_after, payload_digest,
     collected_at, committed_at
 ) VALUES ($1, 1, $2, $3, $4, $5, $5)`,
-		summaryRun, emptyCursor, []byte("next"), digest, createdAt); err != nil {
+		summaryTarget, emptyCursor, []byte("next"), digest, createdAt); err != nil {
 		t.Fatal(err)
 	}
-	reject("duplicate page sequence", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$3,$4,$5,$5)`, summaryRun, emptyCursor, []byte("next"), digest, createdAt)
-	reject("orphan page run", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+	reject("duplicate latest page", `
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,2,$2,$2,$3,$4,$4)`, summaryTarget, emptyCursor, digest, createdAt)
+	reject("orphan latest page", `
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
 VALUES (9223372036854775807,1,$1,$1,$2,$3,$3)`, emptyCursor, digest, createdAt)
-	reject("zero page sequence", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,0,$2,$2,$3,$4,$4)`, summaryRun, emptyCursor, digest, createdAt)
+	reject("zero write_seq page", `
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,0,$2,$2,$3,$4,$4)`, summaryProbe, emptyCursor, digest, createdAt)
 	reject("oversize page cursor", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,2,$2,$3,$4,$5,$5)`, summaryRun, make([]byte, 4097), emptyCursor, digest, createdAt)
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,$2,$3,$4,$5,$5)`, summaryProbe, make([]byte, 4097), emptyCursor, digest, createdAt)
 	reject("noncanonical page digest", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,3,$2,$2,$3,$4,$4)`, detailRun, emptyCursor, make([]byte, 31), createdAt)
-	reject("missing page digest", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,6,$2,$2,$3,$4,$4)`, detailRun, emptyCursor, make([]byte, 32), createdAt)
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 31), createdAt)
+	reject("zero page digest", `
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 32), createdAt)
 	reject("page commit before collection", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,4,$2,$2,$3,$4,$5)`, detailRun, emptyCursor, digest, createdAt, createdAt.Add(-time.Second))
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,$2,$2,$3,$4,$5)`, summaryOther, emptyCursor, digest, createdAt, createdAt.Add(-time.Second))
 	reject("infinite page time", `
-INSERT INTO collection_pages(run_id,page_sequence,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,5,$2,$2,$3,'infinity','infinity')`, detailRun, emptyCursor, digest)
+INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,$2,$2,$3,'infinity','infinity')`, summaryOther, emptyCursor, digest)
 }
 
 func testCatalogStorage(t *testing.T, dsn string) {
@@ -596,7 +516,7 @@ func testMarketFacts(t *testing.T, dsn string) {
 	base := time.Date(2026, 8, 11, 12, 0, 0, 123456789, time.UTC)
 	zero := int64(0)
 	present := makePresent(t, market.SideAsk, 0, &zero, nil, nil, base)
-	page := oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1}, present, "")
+	page := oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, present, "")
 	if applied, err := store.saveObservations(ctx, page); err != nil || !applied {
 		t.Fatalf("present commit applied=%v err=%v", applied, err)
 	}
@@ -615,7 +535,7 @@ func testMarketFacts(t *testing.T, dsn string) {
 		t.Fatalf("present times = source:%v collected:%v", last.Observation.SourceTime, last.Observation.CollectedAt)
 	}
 	bid := makePresent(t, market.SideBid, 900, nil, nil, nil, base)
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1}, bid, "")); err != nil {
+	if _, err := store.saveObservations(ctx, oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, bid, "")); err != nil {
 		t.Fatalf("bid commit: %v", err)
 	}
 	bidKey := MarketKey{ProductID: product.ProductID, Platform: "steam", Side: market.SideBid}
@@ -638,7 +558,7 @@ func testMarketFacts(t *testing.T, dsn string) {
 	}
 	for index, state := range statuses {
 		observation := market.Observation{Side: market.SideAsk, Status: state.status, CollectedAt: base.Add(time.Duration(index+1) * time.Minute)}
-		page := oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: int64(index + 2)}, observation, state.reason)
+		page := oneAttemptBatch(product, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: int64(index + 2)}, observation, state.reason)
 		if _, err := store.saveObservations(ctx, page); err != nil {
 			t.Fatalf("commit %s: %v", state.status, err)
 		}
@@ -647,7 +567,7 @@ func testMarketFacts(t *testing.T, dsn string) {
 			t.Fatalf("latest after %s = %+v found=%v err=%v", state.status, latest, found, err)
 		}
 		unchanged, found, err := store.LastPresent(ctx, key)
-		if err != nil || !found || unchanged.Order.PageSequence != 1 {
+		if err != nil || !found || unchanged.Order.WriteSequence != 1 {
 			t.Fatalf("historical price changed after %s: %+v found=%v err=%v", state.status, unchanged, found, err)
 		}
 	}
@@ -657,7 +577,7 @@ func testMarketFacts(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	failed := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base}
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(failedOnly, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1}, failed, "decode.invalid")); err != nil {
+	if _, err := store.saveObservations(ctx, oneAttemptBatch(failedOnly, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, failed, "decode.invalid")); err != nil {
 		t.Fatal(err)
 	}
 	if _, found, err := store.LastPresent(ctx, MarketKey{ProductID: failedOnly.ProductID, Platform: "steam", Side: market.SideAsk}); err != nil || found {
@@ -673,7 +593,7 @@ func testMarketOrdering(t *testing.T, dsn string) {
 	third, _ := store.CreateSteamProduct(ctx, 730, "Third")
 	base := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 	original := makePresent(t, market.SideAsk, 1000, nil, nil, nil, base)
-	originalBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, RunSequence: 2, PageSequence: 1}, original, "")
+	originalBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, original, "")
 	if _, err := store.saveObservations(ctx, originalBatch); err != nil {
 		t.Fatal(err)
 	}
@@ -689,12 +609,12 @@ func testMarketOrdering(t *testing.T, dsn string) {
 		t.Fatalf("equal changed payload error = %v", err)
 	}
 	stale := makePresent(t, market.SideAsk, 9999, nil, nil, nil, base.Add(24*time.Hour))
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 99}, stale, "")); !errors.Is(err, ErrStaleObservation) {
+	if _, err := store.saveObservations(ctx, oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, stale, "")); !errors.Is(err, ErrStaleObservation) {
 		t.Fatalf("stale observation error = %v", err)
 	}
 
 	newerButEarlierTime := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base.Add(-time.Hour)}
-	newerBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, RunSequence: 3, PageSequence: 1}, newerButEarlierTime, "http.timeout")
+	newerBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 3}, newerButEarlierTime, "http.timeout")
 	if _, err := store.saveObservations(ctx, newerBatch); err != nil {
 		t.Fatal(err)
 	}
@@ -720,8 +640,8 @@ func testMarketOrdering(t *testing.T, dsn string) {
 		t.Fatalf("stale batch partially wrote third product found=%v err=%v", found, err)
 	}
 
-	low := oneAttemptBatch(second, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1}, market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base}, "http.low")
-	high := oneAttemptBatch(second, "steam", market.WriteOrder{SwitchVersion: 2, RunSequence: 1, PageSequence: 1}, market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base.Add(-time.Hour)}, "http.high")
+	low := oneAttemptBatch(second, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base}, "http.low")
+	high := oneAttemptBatch(second, "steam", market.WriteOrder{SwitchVersion: 2, WriteSequence: 1}, market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base.Add(-time.Hour)}, "http.high")
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for _, page := range []observationBatch{low, high} {
@@ -757,7 +677,7 @@ func testBatchRollback(t *testing.T, dsn string) {
 		AppID:    730,
 		Platform: "steam",
 		Side:     market.SideAsk,
-		Order:    market.WriteOrder{SwitchVersion: 1, RunSequence: 1, PageSequence: 1},
+		Order:    market.WriteOrder{SwitchVersion: 1, WriteSequence: 1},
 		Attempts: []AttemptWrite{
 			{ProductID: valid.ProductID, Observation: observation},
 			{ProductID: wrongApp.ProductID, Observation: observation},
@@ -812,11 +732,11 @@ CHECK (product_id <> %d OR price_cny_cents <> 12345)`, secondValid.ProductID)); 
 	}
 
 	for _, statement := range []string{
-		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,run_sequence,page_sequence) VALUES (%d,'steam','sell','failed','http.error',NOW(),1,1,1)`, valid.ProductID),
-		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,run_sequence,page_sequence) VALUES (%d,'steam','ask','unknown','',NOW(),1,1,1)`, valid.ProductID),
-		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,run_sequence,page_sequence) VALUES (%d,'steam','ask','failed','raw error body',NOW(),1,1,1)`, valid.ProductID),
-		fmt.Sprintf(`INSERT INTO market_last_present(product_id,platform,side,price_cny_cents,collected_at,switch_version,run_sequence,page_sequence) VALUES (%d,'steam','ask',-1,NOW(),1,1,1)`, valid.ProductID),
-		fmt.Sprintf(`INSERT INTO market_last_present(product_id,platform,side,price_cny_cents,order_count,collected_at,switch_version,run_sequence,page_sequence) VALUES (%d,'steam','ask',1,-1,NOW(),1,1,1)`, valid.ProductID),
+		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,write_seq) VALUES (%d,'steam','sell','failed','http.error',NOW(),1,1)`, valid.ProductID),
+		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,write_seq) VALUES (%d,'steam','ask','unknown','',NOW(),1,1)`, valid.ProductID),
+		fmt.Sprintf(`INSERT INTO market_latest_attempts(product_id,platform,side,status,reason_code,collected_at,switch_version,write_seq) VALUES (%d,'steam','ask','failed','raw error body',NOW(),1,1)`, valid.ProductID),
+		fmt.Sprintf(`INSERT INTO market_last_present(product_id,platform,side,price_cny_cents,collected_at,switch_version,write_seq) VALUES (%d,'steam','ask',-1,NOW(),1,1)`, valid.ProductID),
+		fmt.Sprintf(`INSERT INTO market_last_present(product_id,platform,side,price_cny_cents,order_count,collected_at,switch_version,write_seq) VALUES (%d,'steam','ask',1,-1,NOW(),1,1)`, valid.ProductID),
 	} {
 		if _, err := db.ExecContext(ctx, statement); err == nil {
 			t.Fatalf("invalid market SQL accepted: %s", statement)
@@ -825,8 +745,8 @@ CHECK (product_id <> %d OR price_cny_cents <> 12345)`, secondValid.ProductID)); 
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO market_latest_attempts (
     product_id, platform, side, status, reason_code, source_time, collected_at,
-    switch_version, run_sequence, page_sequence
-) VALUES (%d, 'steam', 'ask', 'present', '', '0001-01-01 00:00:00+00', NOW(), 1, 1, 1)`, valid.ProductID)); err != nil {
+    switch_version, write_seq
+) VALUES (%d, 'steam', 'ask', 'present', '', '0001-01-01 00:00:00+00', NOW(), 1, 1)`, valid.ProductID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.LatestAttempt(ctx, MarketKey{ProductID: valid.ProductID, Platform: "steam", Side: market.SideAsk}); !errors.Is(err, ErrMarketIntegrity) {
@@ -835,40 +755,40 @@ INSERT INTO market_latest_attempts (
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO market_latest_attempts (
     product_id, platform, side, status, reason_code, collected_at,
-    switch_version, run_sequence, page_sequence
-) VALUES (%d, 'steam', 'ask', 'present', '', NOW(), 1, 1, 1)`, orphan.ProductID)); err != nil {
+    switch_version, write_seq
+) VALUES (%d, 'steam', 'ask', 'present', '', NOW(), 1, 1)`, orphan.ProductID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.LatestAttempt(ctx, MarketKey{ProductID: orphan.ProductID, Platform: "steam", Side: market.SideAsk}); !errors.Is(err, ErrMarketIntegrity) {
 		t.Fatalf("present attempt without matching price error = %v", err)
 	}
 	orphanLatestRecovery := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: at.Add(time.Minute)}
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(orphan, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 2, PageSequence: 1}, orphanLatestRecovery, "storage.retry")); !errors.Is(err, ErrMarketIntegrity) {
+	if _, err := store.saveObservations(ctx, oneAttemptBatch(orphan, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, orphanLatestRecovery, "storage.retry")); !errors.Is(err, ErrMarketIntegrity) {
 		t.Fatalf("write over orphan latest error = %v", err)
 	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO market_last_present (
     product_id, platform, side, price_cny_cents, collected_at,
-    switch_version, run_sequence, page_sequence
-) VALUES (%d, 'steam', 'ask', 100, NOW(), 1, 1, 1)`, orphanPrice.ProductID)); err != nil {
+    switch_version, write_seq
+) VALUES (%d, 'steam', 'ask', 100, NOW(), 1, 1)`, orphanPrice.ProductID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.LastPresent(ctx, MarketKey{ProductID: orphanPrice.ProductID, Platform: "steam", Side: market.SideAsk}); !errors.Is(err, ErrMarketIntegrity) {
 		t.Fatalf("price without matching latest error = %v", err)
 	}
 	orphanRecovery := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: at.Add(time.Minute)}
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(orphanPrice, "steam", market.WriteOrder{SwitchVersion: 1, RunSequence: 2, PageSequence: 1}, orphanRecovery, "storage.retry")); !errors.Is(err, ErrMarketIntegrity) {
+	if _, err := store.saveObservations(ctx, oneAttemptBatch(orphanPrice, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, orphanRecovery, "storage.retry")); !errors.Is(err, ErrMarketIntegrity) {
 		t.Fatalf("write over orphan price error = %v", err)
 	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`
 INSERT INTO market_latest_attempts (
     product_id, platform, side, status, reason_code, collected_at,
-    switch_version, run_sequence, page_sequence
-) VALUES (%[1]d, 'steam', 'ask', 'failed', 'http.timeout', NOW(), 1, 1, 1);
+    switch_version, write_seq
+) VALUES (%[1]d, 'steam', 'ask', 'failed', 'http.timeout', NOW(), 1, 1);
 INSERT INTO market_last_present (
     product_id, platform, side, price_cny_cents, collected_at,
-    switch_version, run_sequence, page_sequence
-) VALUES (%[1]d, 'steam', 'ask', 100, NOW(), 1, 1, 2)`, futurePrice.ProductID)); err != nil {
+    switch_version, write_seq
+) VALUES (%[1]d, 'steam', 'ask', 100, NOW(), 1, 2)`, futurePrice.ProductID)); err != nil {
 		t.Fatal(err)
 	}
 	futureKey := MarketKey{ProductID: futurePrice.ProductID, Platform: "steam", Side: market.SideAsk}

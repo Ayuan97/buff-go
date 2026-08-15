@@ -72,14 +72,6 @@ func (c nodeControl) DeleteNode(ctx context.Context, id resource.NodeID) error {
 	return c.coordinator.DeleteNode(ctx, id)
 }
 
-func (c nodeControl) AssignNodeGame(ctx context.Context, id resource.NodeID, expectedRevision int64, appID int64) (resource.AccessNode, error) {
-	return c.coordinator.AssignNodeGame(ctx, id, expectedRevision, appID)
-}
-
-func (c nodeControl) AssignNodeSide(ctx context.Context, id resource.NodeID, expectedRevision int64, platform resource.Platform, side market.Side) (resource.AccessNode, error) {
-	return c.coordinator.AssignNodeSide(ctx, id, expectedRevision, platform, side)
-}
-
 func (c nodeControl) RecordNodeExit(ctx context.Context, id resource.NodeID, expectedEgressRevision int64, address netip.Addr, validUntil time.Time) (resource.AccessNode, error) {
 	component, err := c.coordinator.RegisterComponent()
 	if err != nil {
@@ -150,24 +142,20 @@ func (c collectionControl) SetTargetSortOrder(ctx context.Context, id collection
 	return c.store.SetTargetSortOrder(ctx, id, expected, order)
 }
 
+func (c collectionControl) SetTargetPriceRange(ctx context.Context, id collection.TargetID, expected collection.Revision, bounds collection.PriceRange) (collection.Target, error) {
+	return c.store.SetTargetPriceRange(ctx, id, expected, bounds)
+}
+
+func (c collectionControl) SetTargetSteamFacets(ctx context.Context, id collection.TargetID, expected collection.Revision, facets collection.SteamFacets) (collection.Target, error) {
+	return c.store.SetTargetSteamFacets(ctx, id, expected, facets)
+}
+
 func (c collectionControl) DeleteTarget(ctx context.Context, id collection.TargetID) error {
 	return c.store.DeleteTarget(ctx, id)
 }
 
-func (c collectionControl) ListRecentRuns(ctx context.Context, limit int) ([]collection.Run, error) {
-	return c.store.ListRecentRuns(ctx, limit)
-}
-
-func (c collectionControl) PageSummaries(ctx context.Context, id collection.RunID) ([]postgres.PageSummary, error) {
-	return c.store.PageSummaries(ctx, id)
-}
-
-func (c collectionControl) PagePayload(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]byte, error) {
-	return c.store.PagePayload(ctx, id, sequence)
-}
-
-func (c collectionControl) PageAttempts(ctx context.Context, id collection.RunID, sequence collection.Sequence) ([]postgres.PageAttempt, error) {
-	return c.store.PageAttempts(ctx, id, sequence)
+func (c collectionControl) ListWorkers(ctx context.Context) ([]collection.WorkerSnapshot, error) {
+	return c.store.ListWorkers(ctx)
 }
 
 type marketControl struct {
@@ -180,6 +168,10 @@ func (c marketControl) ListQuotes(ctx context.Context, filter postgres.MarketQuo
 
 func (c marketControl) QuoteFacets(ctx context.Context, appid int64) (postgres.MarketFacets, error) {
 	return c.store.QuoteFacets(ctx, appid)
+}
+
+func (c marketControl) ListPriceTicks(ctx context.Context, filter postgres.PriceTickFilter) ([]postgres.PriceTick, error) {
+	return c.store.ListPriceTicks(ctx, filter)
 }
 
 type providerControl struct {

@@ -80,6 +80,13 @@ type MarketQuote struct {
 	PresentCents       *market.CNYCents
 	PresentOrderCount  *int64
 	PresentCollectedAt *time.Time
+	// DropCents 是窗口内相对最高价少了多少分；现价已是窗口高或没有窗口变价则为空。
+	DropCents *int64
+	HighCents *int64
+	// DropPctBP 是窗口降幅，单位万分之一（1234 = 12.34%）。
+	DropPctBP  *int64
+	DropCount  *int64
+	LastDropAt *time.Time
 }
 
 type attemptSnapshot struct {
@@ -215,6 +222,9 @@ func savePreparedObservationsTx(
 			}
 		}
 	}
+	if err := purgeExpiredPriceTicks(ctx, tx, time.Now().UTC()); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -228,7 +238,7 @@ func (s *Store) LatestAttempt(ctx context.Context, key MarketKey) (LatestAttempt
 	}
 	row, found, err := scanLatest(s.db.QueryRowContext(ctx, `
 SELECT a.status, a.source_time, a.collected_at, a.reason_code,
-       a.switch_version, a.run_sequence, a.page_sequence,
+       a.switch_version, a.write_seq,
        CASE WHEN a.status = 'present' THEN EXISTS (
                SELECT 1
                FROM market_last_present p
@@ -236,8 +246,7 @@ SELECT a.status, a.source_time, a.collected_at, a.reason_code,
                  AND p.platform = a.platform
                  AND p.side = a.side
                  AND p.switch_version = a.switch_version
-                 AND p.run_sequence = a.run_sequence
-                 AND p.page_sequence = a.page_sequence
+                 AND p.write_seq = a.write_seq
                  AND p.source_time IS NOT DISTINCT FROM a.source_time
                  AND p.collected_at = a.collected_at
            ) ELSE NOT EXISTS (
@@ -246,8 +255,8 @@ SELECT a.status, a.source_time, a.collected_at, a.reason_code,
                WHERE p.product_id = a.product_id
                  AND p.platform = a.platform
                  AND p.side = a.side
-                 AND (p.switch_version, p.run_sequence, p.page_sequence) >=
-                     (a.switch_version, a.run_sequence, a.page_sequence)
+                 AND (p.switch_version, p.write_seq) >=
+                     (a.switch_version, a.write_seq)
            )
        END
 FROM market_latest_attempts a
@@ -280,7 +289,7 @@ func (s *Store) LastPresent(ctx context.Context, key MarketKey) (LastPresent, bo
 	}
 	row, found, err := scanPresent(s.db.QueryRowContext(ctx, `
 SELECT p.price_cny_cents, p.order_count, p.item_count, p.source_time, p.collected_at,
-       p.switch_version, p.run_sequence, p.page_sequence,
+       p.switch_version, p.write_seq,
        EXISTS (
            SELECT 1
            FROM market_latest_attempts a
@@ -289,14 +298,14 @@ SELECT p.price_cny_cents, p.order_count, p.item_count, p.source_time, p.collecte
              AND a.side = p.side
              AND (
                  (
-                     (a.switch_version, a.run_sequence, a.page_sequence) =
-                     (p.switch_version, p.run_sequence, p.page_sequence)
+                     (a.switch_version, a.write_seq) =
+                     (p.switch_version, p.write_seq)
                      AND a.status = 'present'
                      AND a.source_time IS NOT DISTINCT FROM p.source_time
                      AND a.collected_at = p.collected_at
                  ) OR (
-                     (a.switch_version, a.run_sequence, a.page_sequence) >
-                     (p.switch_version, p.run_sequence, p.page_sequence)
+                     (a.switch_version, a.write_seq) >
+                     (p.switch_version, p.write_seq)
                      AND a.status <> 'present'
                  )
              )
@@ -418,7 +427,7 @@ func validateReasonCode(status market.ObservationStatus, reason string) error {
 func selectLatestForUpdate(ctx context.Context, tx *sql.Tx, key MarketKey) (latestRow, bool, error) {
 	return scanLatest(tx.QueryRowContext(ctx, `
 SELECT status, source_time, collected_at, reason_code,
-       switch_version, run_sequence, page_sequence, TRUE
+       switch_version, write_seq, TRUE
 FROM market_latest_attempts
 WHERE product_id = $1 AND platform = $2 AND side = $3
 FOR UPDATE`, key.ProductID, key.Platform, key.Side))
@@ -433,8 +442,7 @@ func scanLatest(row *sql.Row) (latestRow, bool, error) {
 		&result.collectedAt,
 		&result.reasonCode,
 		&result.order.SwitchVersion,
-		&result.order.RunSequence,
-		&result.order.PageSequence,
+		&result.order.WriteSequence,
 		&result.storageConsistent,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -451,7 +459,7 @@ func scanLatest(row *sql.Row) (latestRow, bool, error) {
 func selectPresentForUpdate(ctx context.Context, tx *sql.Tx, key MarketKey) (presentRow, bool, error) {
 	return scanPresent(tx.QueryRowContext(ctx, `
 SELECT price_cny_cents, order_count, item_count, source_time, collected_at,
-       switch_version, run_sequence, page_sequence, TRUE
+       switch_version, write_seq, TRUE
 FROM market_last_present
 WHERE product_id = $1 AND platform = $2 AND side = $3
 FOR UPDATE`, key.ProductID, key.Platform, key.Side))
@@ -468,8 +476,7 @@ func scanPresent(row *sql.Row) (presentRow, bool, error) {
 		&sourceTime,
 		&result.collectedAt,
 		&result.order.SwitchVersion,
-		&result.order.RunSequence,
-		&result.order.PageSequence,
+		&result.order.WriteSequence,
 		&result.latestConsistent,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -489,16 +496,15 @@ func upsertLatest(ctx context.Context, tx *sql.Tx, batch observationBatch, snaps
 	_, err := tx.ExecContext(ctx, `
 INSERT INTO market_latest_attempts (
     product_id, platform, side, status, source_time, collected_at, reason_code,
-    switch_version, run_sequence, page_sequence
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    switch_version, write_seq
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (product_id, platform, side) DO UPDATE SET
     status = EXCLUDED.status,
     source_time = EXCLUDED.source_time,
     collected_at = EXCLUDED.collected_at,
     reason_code = EXCLUDED.reason_code,
     switch_version = EXCLUDED.switch_version,
-    run_sequence = EXCLUDED.run_sequence,
-    page_sequence = EXCLUDED.page_sequence`,
+    write_seq = EXCLUDED.write_seq`,
 		snapshot.productID,
 		batch.Platform,
 		batch.Side,
@@ -507,8 +513,7 @@ ON CONFLICT (product_id, platform, side) DO UPDATE SET
 		snapshot.collectedAt,
 		snapshot.reasonCode,
 		batch.Order.SwitchVersion,
-		batch.Order.RunSequence,
-		batch.Order.PageSequence,
+		batch.Order.WriteSequence,
 	)
 	if err != nil {
 		return fmt.Errorf("write latest market attempt: %w", err)
@@ -517,11 +522,26 @@ ON CONFLICT (product_id, platform, side) DO UPDATE SET
 }
 
 func upsertPresent(ctx context.Context, tx *sql.Tx, batch observationBatch, snapshot attemptSnapshot) error {
-	_, err := tx.ExecContext(ctx, `
+	key := MarketKey{ProductID: snapshot.productID, Platform: batch.Platform, Side: batch.Side}
+	stored, exists, err := selectPresentForUpdate(ctx, tx, key)
+	if err != nil {
+		return err
+	}
+	if shouldRecordPriceTick(exists, stored.priceCNYCents, snapshot.present.priceCNYCents) {
+		var prev *int64
+		if exists {
+			cents := int64(stored.priceCNYCents)
+			prev = &cents
+		}
+		if err := insertPriceTick(ctx, tx, key, prev, snapshot.present.priceCNYCents, snapshot.collectedAt, batch.Order); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO market_last_present (
     product_id, platform, side, price_cny_cents, order_count, item_count,
-    source_time, collected_at, switch_version, run_sequence, page_sequence
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    source_time, collected_at, switch_version, write_seq
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (product_id, platform, side) DO UPDATE SET
     price_cny_cents = EXCLUDED.price_cny_cents,
     order_count = EXCLUDED.order_count,
@@ -529,8 +549,7 @@ ON CONFLICT (product_id, platform, side) DO UPDATE SET
     source_time = EXCLUDED.source_time,
     collected_at = EXCLUDED.collected_at,
     switch_version = EXCLUDED.switch_version,
-    run_sequence = EXCLUDED.run_sequence,
-    page_sequence = EXCLUDED.page_sequence`,
+    write_seq = EXCLUDED.write_seq`,
 		snapshot.productID,
 		batch.Platform,
 		batch.Side,
@@ -540,8 +559,7 @@ ON CONFLICT (product_id, platform, side) DO UPDATE SET
 		nullableTime(snapshot.sourceTime),
 		snapshot.collectedAt,
 		batch.Order.SwitchVersion,
-		batch.Order.RunSequence,
-		batch.Order.PageSequence,
+		batch.Order.WriteSequence,
 	)
 	if err != nil {
 		return fmt.Errorf("write last present market value: %w", err)

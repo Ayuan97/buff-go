@@ -1,12 +1,14 @@
 package postgres
 
 import (
-	"bytes"
 	"errors"
+	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
+	"buff-go/internal/resource"
 )
 
 func TestCollectionStoreIntegration(t *testing.T) {
@@ -22,16 +25,19 @@ func TestCollectionStoreIntegration(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set BUFFGO_TEST_DSN to an isolated PostgreSQL database")
 	}
-	t.Run("target and run lifecycle", func(t *testing.T) { testCollectionLifecycle(t, dsn) })
+	t.Run("target and queue lifecycle", func(t *testing.T) { testCollectionLifecycle(t, dsn) })
 	t.Run("target deletion", func(t *testing.T) { testCollectionTargetDeletion(t, dsn) })
-	t.Run("sort order voids batch", func(t *testing.T) { testCollectionSortOrder(t, dsn) })
-	t.Run("active runs and restart recovery", func(t *testing.T) { testCollectionActiveRuns(t, dsn) })
+	t.Run("sort order clears queue", func(t *testing.T) { testCollectionSortOrder(t, dsn) })
+	t.Run("price range clears queue", func(t *testing.T) { testCollectionPriceRange(t, dsn) })
+	t.Run("steam facets clears queue", func(t *testing.T) { testCollectionSteamFacets(t, dsn) })
+	t.Run("stale claims return to queue", func(t *testing.T) { testCollectionStaleClaims(t, dsn) })
+	t.Run("one claim per combination", func(t *testing.T) { testCollectionOneClaimPerCombination(t, dsn) })
 	t.Run("resident instance lock", func(t *testing.T) { testCollectionInstanceLock(t, dsn) })
 	t.Run("scope concurrency", func(t *testing.T) { testCollectionConcurrency(t, dsn) })
 	t.Run("integrity and errors", func(t *testing.T) { testCollectionIntegrityErrors(t, dsn) })
 }
 
-// 删除目标只是撤销手段：跑过的目标一律拒绝，采集历史不因为想让按钮可用而被删。
+// 删除目标只是撤销手段：写过页的目标一律拒绝，采集历史不因为想让按钮可用而被删。
 func testCollectionTargetDeletion(t *testing.T, dsn string) {
 	store, _ := migratedStore(t, dsn)
 	ctx := t.Context()
@@ -50,19 +56,45 @@ func testCollectionTargetDeletion(t *testing.T, dsn string) {
 		t.Fatalf("repeat delete = %v", err)
 	}
 
-	target, err := store.CreateSummaryTarget(ctx, "steam", 252490, market.SideAsk, collection.DesiredEnabled)
+	enabled, err := store.CreateSummaryTarget(ctx, "steam", 252490, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeleteTarget(ctx, target.ID()); !errors.Is(err, ErrTargetNotStopped) {
+	if err := store.DeleteTarget(ctx, enabled.ID()); !errors.Is(err, ErrTargetNotStopped) {
 		t.Fatalf("delete enabled target = %v", err)
 	}
-	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualRunning})
+
+	// 入过队但没写过页：停掉之后仍可删。
+	queued, combination := queueReadyFixture(t, store, "steam", 440, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, queued.ID(), queued.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := store.ClaimTask(ctx, combination.ID, "steam"); err != nil || !ok {
+		t.Fatalf("claim queued target ok=%v err=%v", ok, err)
+	}
+	queued, err = store.SetTargetDesired(ctx, queued.ID(), queued.Revision(), collection.DesiredDisabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil)); err != nil {
+	queued, err = store.TransitionTarget(ctx, queued.ID(), queued.Revision(), queued.SwitchVersion(), TargetTransition{State: collection.ActualStopped})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := store.DeleteTarget(ctx, queued.ID()); err != nil {
+		t.Fatalf("delete unused queued target: %v", err)
+	}
+
+	target, task, _ := queueCommitFixture(t, store, "buff", 730, market.SideAsk)
+	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: collectedAt,
+		Attempts: []AttemptWrite{{
+			ExactName:   "AK-47 | Redline",
+			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt},
+		}},
+	}); err != nil || !applied {
+		t.Fatalf("commit history page applied=%v err=%v", applied, err)
 	}
 	target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredDisabled)
 	if err != nil {
@@ -73,27 +105,40 @@ func testCollectionTargetDeletion(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	if err := store.DeleteTarget(ctx, target.ID()); !errors.Is(err, ErrTargetInUse) {
-		t.Fatalf("delete target with history = %v", err)
+		t.Fatalf("delete target with write_seq = %v", err)
 	}
 }
 
-// 游标是列表偏移量，换顺序必须推进 switch_version 作废当前批次，否则续点会
-// 落到完全不同的商品上。
+// 游标是列表偏移量，换顺序必须推进 switch_version 并清队列，否则补货会
+// 落到完全不同的商品上。已经写下的 write_seq 保留。
 func testCollectionSortOrder(t *testing.T, dsn string) {
 	store, _ := migratedStore(t, dsn)
 	ctx := t.Context()
 
-	target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
-	if err != nil {
-		t.Fatal(err)
-	}
+	target, task, _ := queueCommitFixture(t, store, "steam", 730, market.SideAsk)
 	if target.Sort() != collection.DefaultSortOrder() {
 		t.Fatalf("default sort = %+v", target.Sort())
 	}
-	run, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
-	if err != nil || !created {
-		t.Fatalf("create run created=%v err=%v", created, err)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1),
+		mustCollectionCursor(t, []byte("off")), 99); err != nil {
+		t.Fatal(err)
 	}
+	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: collectedAt,
+		Attempts: []AttemptWrite{{
+			ExactName:   "AK-47 | Redline",
+			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt},
+		}},
+	}); err != nil || !applied {
+		t.Fatalf("commit before sort applied=%v err=%v", applied, err)
+	}
+	target, found, err := store.Target(ctx, target.ID())
+	if err != nil || !found || target.WriteSeq() != 1 || target.RefillTotal() != 99 {
+		t.Fatalf("target before sort = %+v found=%v err=%v", target, found, err)
+	}
+	oldSwitch := target.SwitchVersion()
 
 	quantityDesc := collection.SortOrder{Column: collection.SortColumnQuantity, Direction: collection.SortDescending}
 	changed, err := store.SetTargetSortOrder(ctx, target.ID(), target.Revision(), quantityDesc)
@@ -103,45 +148,32 @@ func testCollectionSortOrder(t *testing.T, dsn string) {
 	if changed.Sort() != quantityDesc {
 		t.Fatalf("sort after change = %+v", changed.Sort())
 	}
-	if changed.SwitchVersion() != target.SwitchVersion()+1 {
-		t.Fatalf("switch version = %d, want %d", changed.SwitchVersion(), target.SwitchVersion()+1)
+	if changed.SwitchVersion() != oldSwitch+1 {
+		t.Fatalf("switch version = %d, want %d", changed.SwitchVersion(), oldSwitch+1)
 	}
 	if changed.Actual() != collection.ActualStarting {
 		t.Fatalf("actual after change = %q", changed.Actual())
 	}
-	// 被作废的批次必须在同一次改动里收尾。只推进开关版本不收尾会卡死：一个方向
-	// 同时只能有一条活动批次，旧的占着位置新的就建不出来。
-	stale, found, err := store.Run(ctx, run.ID())
-	if err != nil || !found {
-		t.Fatalf("read stale run found=%v err=%v", found, err)
+	if changed.WriteSeq() != 1 {
+		t.Fatalf("write_seq after sort = %d, want 1", changed.WriteSeq())
 	}
-	if stale.State() != collection.RunStopped || stale.Reason() != collection.RunReasonSwitchDisabled {
-		t.Fatalf("stale run = %q reason=%q", stale.State(), stale.Reason())
+	if changed.RefillTotal() != 0 || !changed.RefillCursor().Equal(mustCollectionCursor(t, nil)) {
+		t.Fatalf("refill after sort = total=%d cursor=%q", changed.RefillTotal(), changed.RefillCursor().Bytes())
 	}
-	// 收尾之后新一轮必须能建出来，这正是这个 bug 卡住的地方
-	fresh, created, err := store.CreateSummaryRun(ctx, changed.ID(), changed.SwitchVersion(), mustCollectionCursor(t, nil))
-	if err != nil || !created {
-		t.Fatalf("new run after sort change created=%v err=%v", created, err)
+	if depth, err := store.QueueDepth(ctx, changed.ID()); err != nil || depth != 0 {
+		t.Fatalf("queue after sort depth=%d err=%v", depth, err)
 	}
-	if fresh.ID() == run.ID() {
-		t.Fatal("new run must not reuse the voided batch")
-	}
-	// 旧 switch 的批次已被隔离：拿旧 switch 再建运行必须冲突
-	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil)); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("stale switch run = %v", err)
-	}
-	// 旧批次的页提交必须被栅栏拒绝
 	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		RunID: run.ID(), PageSequence: 1, CollectedAt: changed.ChangedAt().Add(time.Second),
+		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch,
+		CollectedAt: collectedAt.Add(time.Second),
 		Attempts: []AttemptWrite{{
-			ExactName:   "AK-47 | Redline",
-			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: changed.ChangedAt().Add(time.Second)},
+			ExactName:   "M4A1-S | Hot Rod",
+			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt.Add(time.Second)},
 		}},
 	}); !errors.Is(err, ErrCollectionFence) {
-		t.Fatalf("stale run page commit = %v", err)
+		t.Fatalf("stale switch page commit = %v", err)
 	}
 
-	// 相同顺序是幂等的，不该白白作废批次
 	same, err := store.SetTargetSortOrder(ctx, changed.ID(), changed.Revision(), quantityDesc)
 	if err != nil || same.Revision() != changed.Revision() || same.SwitchVersion() != changed.SwitchVersion() {
 		t.Fatalf("idempotent sort = %+v err=%v", same, err)
@@ -152,17 +184,92 @@ func testCollectionSortOrder(t *testing.T, dsn string) {
 	}
 }
 
+func testCollectionPriceRange(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+	target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSwitch := target.SwitchVersion()
+	minCents := int64(1000)
+	maxCents := int64(879769)
+	changed, err := store.SetTargetPriceRange(ctx, target.ID(), target.Revision(), collection.PriceRange{
+		MinCents: &minCents, MaxCents: &maxCents,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.PriceRange().MinCents == nil || *changed.PriceRange().MinCents != 1000 {
+		t.Fatalf("price range = %+v", changed.PriceRange())
+	}
+	if changed.SwitchVersion() != oldSwitch+1 {
+		t.Fatalf("switch version = %d, want %d", changed.SwitchVersion(), oldSwitch+1)
+	}
+	same, err := store.SetTargetPriceRange(ctx, changed.ID(), changed.Revision(), collection.PriceRange{
+		MinCents: &minCents, MaxCents: &maxCents,
+	})
+	if err != nil || same.Revision() != changed.Revision() {
+		t.Fatalf("idempotent price range = %+v err=%v", same, err)
+	}
+	badMax := int64(1)
+	if _, err := store.SetTargetPriceRange(ctx, changed.ID(), changed.Revision(), collection.PriceRange{
+		MinCents: &minCents, MaxCents: &badMax,
+	}); !errors.Is(err, ErrCollectionInvalidInput) {
+		t.Fatalf("inverted price range = %v", err)
+	}
+}
+
+func testCollectionSteamFacets(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+	target, err := store.CreateSummaryTarget(ctx, "steam", 252490, market.SideAsk, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSwitch := target.SwitchVersion()
+	changed, err := store.SetTargetSteamFacets(ctx, target.ID(), target.Revision(), collection.SteamFacets{
+		Cats:    []string{"steamcat.armor"},
+		Classes: []string{"hoodie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed.SteamFacets().Cats) != 1 || changed.SteamFacets().Cats[0] != "steamcat.armor" {
+		t.Fatalf("steam facets = %+v", changed.SteamFacets())
+	}
+	if changed.SwitchVersion() != oldSwitch+1 {
+		t.Fatalf("switch version = %d, want %d", changed.SwitchVersion(), oldSwitch+1)
+	}
+	same, err := store.SetTargetSteamFacets(ctx, changed.ID(), changed.Revision(), collection.SteamFacets{
+		Cats:    []string{"steamcat.armor"},
+		Classes: []string{"hoodie"},
+	})
+	if err != nil || same.Revision() != changed.Revision() {
+		t.Fatalf("idempotent steam facets = %+v err=%v", same, err)
+	}
+	cs2, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetTargetSteamFacets(ctx, cs2.ID(), cs2.Revision(), collection.SteamFacets{
+		Cats: []string{"steamcat.armor"},
+	}); !errors.Is(err, ErrCollectionInvalidInput) {
+		t.Fatalf("cs2 steam facets = %v", err)
+	}
+}
+
 func testCollectionLifecycle(t *testing.T, dsn string) {
 	store, db := migratedStore(t, dsn)
 	ctx := t.Context()
-	empty := mustCollectionCursor(t, nil)
 
 	target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.Revision() != 1 || target.SwitchVersion() != 1 || target.Actual() != collection.ActualStarting ||
-		target.ChangedAt().Location() != time.UTC || target.ChangedAt().Nanosecond()%int(time.Microsecond) != 0 {
+		target.WriteSeq() != 0 || target.ChangedAt().Location() != time.UTC ||
+		target.ChangedAt().Nanosecond()%int(time.Microsecond) != 0 {
 		t.Fatalf("new summary target = %+v", target)
 	}
 	same, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
@@ -216,197 +323,170 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 	if err != nil || target.Revision() != 5 || target.SwitchVersion() != 1 {
 		t.Fatalf("running target = %+v err=%v", target, err)
 	}
-	run, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
-	if err != nil || !created || run.State() != collection.RunPending || run.RunSequence() != 1 {
-		t.Fatalf("summary run = %+v created=%v err=%v", run, created, err)
+
+	_, combination := mustQueueCombination(t, store, "steam")
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 10); err != nil {
+		t.Fatal(err)
 	}
 	var cursorIsNull bool
-	if err := db.QueryRowContext(ctx, `SELECT current_cursor IS NULL FROM collection_runs WHERE run_id = $1`, int64(run.ID())).Scan(&cursorIsNull); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT refill_cursor IS NULL FROM collection_targets WHERE target_id = $1`, int64(target.ID())).Scan(&cursorIsNull); err != nil {
 		t.Fatal(err)
 	}
 	if cursorIsNull {
-		t.Fatal("empty cursor was stored as SQL NULL")
+		t.Fatal("empty refill cursor was stored as SQL NULL")
 	}
-	repeated, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, []byte("ignored-on-active")))
-	if err != nil || created || repeated.ID() != run.ID() {
-		t.Fatalf("active run retry = %+v created=%v err=%v", repeated, created, err)
+	task, claimedTarget, ok, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !ok || task.TargetID() != target.ID() || claimedTarget.ID() != target.ID() {
+		t.Fatalf("claim task = %+v ok=%v err=%v", task, ok, err)
 	}
-
-	run, err = store.BeginRun(ctx, run.ID())
-	if err != nil || run.State() != collection.RunRunning {
-		t.Fatalf("begin run = %+v err=%v", run, err)
-	}
-	beginRetry, err := store.BeginRun(ctx, run.ID())
-	if err != nil || beginRetry.ID() != run.ID() {
-		t.Fatalf("begin retry = %+v err=%v", beginRetry, err)
-	}
-	startedAt, _ := run.StartedAt()
-	collectedAt := startedAt.Add(time.Second)
-	committedAt := collectedAt.Add(time.Microsecond)
-	digest := bytes.Repeat([]byte{0x5a}, 32)
-	pageTx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pageTx.ExecContext(ctx, `
-INSERT INTO collection_pages (
-    run_id, page_sequence, cursor_before, cursor_after, payload_digest, collected_at, committed_at
-) VALUES ($1, 1, $2, $3, $4, $5, $6)`,
-		int64(run.ID()), []byte{}, []byte("cursor-1"), digest, collectedAt, committedAt); err != nil {
-		_ = pageTx.Rollback()
-		t.Fatal(err)
-	}
-	if _, err := pageTx.ExecContext(ctx, `
-UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 1 WHERE run_id = $1`,
-		int64(run.ID()), []byte("cursor-1")); err != nil {
-		_ = pageTx.Rollback()
-		t.Fatal(err)
-	}
-	if err := pageTx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	pages, err := store.Pages(ctx, run.ID())
-	if err != nil || len(pages) != 1 || pages[0].PageSequence() != 1 ||
-		!pages[0].CursorAfter().Equal(mustCollectionCursor(t, []byte("cursor-1"))) {
-		t.Fatalf("pages = %+v err=%v", pages, err)
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 1 {
+		t.Fatalf("claimed depth=%d err=%v", depth, err)
 	}
 
-	run, err = store.FinishRun(ctx, run.ID(), collection.RunSucceeded, collection.CompletenessComplete, collection.RunReasonNone)
-	if err != nil || run.State() != collection.RunSucceeded || run.LastPageSequence() != 1 {
-		t.Fatalf("finish success = %+v err=%v", run, err)
+	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+	page, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: collectedAt,
+		Attempts: []AttemptWrite{{
+			ExactName:   "AK-47 | Redline",
+			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt},
+		}},
+	})
+	if err != nil || !applied || page.WriteSeq() != 1 {
+		t.Fatalf("commit page = %+v applied=%v err=%v", page, applied, err)
 	}
-	finishedAt, _ := run.FinishedAt()
-	finishedRetry, err := store.FinishRun(ctx, run.ID(), collection.RunSucceeded, collection.CompletenessComplete, collection.RunReasonNone)
-	if err != nil {
+	target, found, err = store.Target(ctx, target.ID())
+	if err != nil || !found || target.WriteSeq() != 1 {
+		t.Fatalf("target after commit = %+v found=%v err=%v", target, found, err)
+	}
+	assertWorkerSeesPageItems(t, store, combination.ID, target.ID(), 0)
+	if err := store.CompleteTask(ctx, task.ID(), combination.ID); err != nil {
 		t.Fatal(err)
 	}
-	retryFinishedAt, _ := finishedRetry.FinishedAt()
-	if !retryFinishedAt.Equal(finishedAt) {
-		t.Fatal("exact finish retry rewrote finished_at")
-	}
-	if _, err := store.FinishRun(ctx, run.ID(), collection.RunFailed, collection.CompletenessPartial, collection.RunReasonTimeout); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("changed terminal retry error = %v", err)
-	}
-	if _, err := store.BeginRun(ctx, run.ID()); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("terminal begin error = %v", err)
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 0 {
+		t.Fatalf("completed depth=%d err=%v", depth, err)
 	}
 
-	failed, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
-	if err != nil || !created || failed.RunSequence() != 2 {
-		t.Fatalf("second run = %+v created=%v err=%v", failed, created, err)
-	}
-	failed, err = store.FinishRun(ctx, failed.ID(), collection.RunFailed, collection.CompletenessPartial, collection.RunReasonNetworkError)
-	if err != nil || failed.State() != collection.RunFailed {
-		t.Fatalf("pending failure = %+v err=%v", failed, err)
-	}
-
-	old, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
-	if err != nil || !created || old.RunSequence() != 3 {
-		t.Fatalf("old-switch run = %+v created=%v err=%v", old, created, err)
-	}
+	oldSwitch := target.SwitchVersion()
 	target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredDisabled)
-	if err != nil || target.SwitchVersion() != 2 || target.Actual() != collection.ActualStopping {
+	if err != nil || target.SwitchVersion() != 2 || target.Actual() != collection.ActualStopping ||
+		target.WriteSeq() != 1 || target.RefillTotal() != 0 {
 		t.Fatalf("disable target = %+v err=%v", target, err)
 	}
-	if _, err := store.BeginRun(ctx, old.ID()); !errors.Is(err, ErrCollectionTargetDisabled) {
-		t.Fatalf("disabled begin error = %v", err)
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 0 {
+		t.Fatalf("disabled queue depth=%d err=%v", depth, err)
+	}
+	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt.Add(time.Second),
+	}); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("disabled page error = %v", err)
+	}
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("disabled enqueue error = %v", err)
 	}
 	target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualStopped})
 	if err != nil {
 		t.Fatal(err)
 	}
 	target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredEnabled)
-	if err != nil || target.SwitchVersion() != 3 || target.Actual() != collection.ActualStarting {
+	if err != nil || target.SwitchVersion() != 3 || target.Actual() != collection.ActualStarting || target.WriteSeq() != 1 {
 		t.Fatalf("re-enable target = %+v err=%v", target, err)
 	}
-	if _, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("old active switch create error = %v", err)
+	if err := store.EnqueueTasks(ctx, target.ID(), oldSwitch, mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("old switch enqueue error = %v", err)
 	}
-	if _, err := store.BeginRun(ctx, old.ID()); !errors.Is(err, ErrCollectionConflict) {
-		t.Fatalf("old active switch begin error = %v", err)
-	}
-	if _, err := store.FinishRun(ctx, old.ID(), collection.RunStopped, collection.CompletenessPartial, collection.RunReasonSwitchDisabled); err != nil {
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
 		t.Fatal(err)
 	}
-	current, created, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), empty)
-	if err != nil || !created || current.RunSequence() != 4 {
-		t.Fatalf("new-switch run = %+v created=%v err=%v", current, created, err)
-	}
-	if _, err := store.FinishRun(ctx, current.ID(), collection.RunStopped, collection.CompletenessPartial, collection.RunReasonCancelled); err != nil {
-		t.Fatal(err)
-	}
-
-	runs, err := store.RunsForTarget(ctx, target.ID(), 10)
-	if err != nil || len(runs) != 4 || runs[0].RunSequence() != 4 || runs[3].RunSequence() != 1 {
-		t.Fatalf("target runs = %+v err=%v", runs, err)
+	if _, _, ok, err := store.ClaimTask(ctx, combination.ID, "steam"); err != nil || !ok {
+		t.Fatalf("claim after re-enable ok=%v err=%v", ok, err)
 	}
 	if _, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled); err != nil {
 		t.Fatalf("create with current explicit configuration: %v", err)
 	}
 }
 
-// testCollectionActiveRuns 覆盖常驻恢复依赖的活动运行读取与重启结束语义。
-func testCollectionActiveRuns(t *testing.T, dsn string) {
+// testCollectionStaleClaims 覆盖认领超时回队：常驻恢复把过期 claimed 放回 queued。
+func testCollectionStaleClaims(t *testing.T, dsn string) {
 	store, db := migratedStore(t, dsn)
 	ctx := t.Context()
 	defer func() { _ = db.Close() }()
 
-	active, err := store.ActiveRuns(ctx)
-	if err != nil || len(active) != 0 {
-		t.Fatalf("empty active runs = %+v err=%v", active, err)
+	released, err := store.ReleaseStaleClaims(ctx, time.Minute)
+	if err != nil || released != 0 {
+		t.Fatalf("empty stale claims released=%d err=%v", released, err)
 	}
 
-	var empty collection.Cursor
-	askTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
-	if err != nil {
-		t.Fatal(err)
+	askTarget, askTask, askCombo := queueCommitFixture(t, store, "steam", 730, market.SideAsk)
+	bidTarget, _, _ := queueCommitFixture(t, store, "steam", 730, market.SideBid)
+	if depth, err := store.QueueDepth(ctx, askTarget.ID()); err != nil || depth != 1 {
+		t.Fatalf("ask depth=%d err=%v", depth, err)
 	}
-	bidTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideBid, collection.DesiredEnabled)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, _, err := store.CreateSummaryRun(ctx, askTarget.ID(), askTarget.SwitchVersion(), empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	running, _, err := store.CreateSummaryRun(ctx, bidTarget.ID(), bidTarget.SwitchVersion(), empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if running, err = store.BeginRun(ctx, running.ID()); err != nil {
-		t.Fatal(err)
+	if depth, err := store.QueueDepth(ctx, bidTarget.ID()); err != nil || depth != 1 {
+		t.Fatalf("bid depth=%d err=%v", depth, err)
 	}
 
-	active, err = store.ActiveRuns(ctx)
-	if err != nil || len(active) != 2 {
-		t.Fatalf("active runs = %+v err=%v", active, err)
-	}
-	if active[0].ID() != pending.ID() || active[1].ID() != running.ID() {
-		t.Fatalf("active runs must be ordered by identity, got %d and %d", active[0].ID(), active[1].ID())
-	}
-	if active[0].State() != collection.RunPending || active[1].State() != collection.RunRunning {
-		t.Fatalf("active runs must keep their states, got %s and %s", active[0].State(), active[1].State())
+	fresh, err := store.ReleaseStaleClaims(ctx, time.Hour)
+	if err != nil || fresh != 0 {
+		t.Fatalf("fresh claims must stay claimed, released=%d err=%v", fresh, err)
 	}
 
-	// 重启恢复：未开始与进行中的运行都能以 process_restarted 结束。
-	for _, run := range active {
-		finished, err := store.FinishRun(ctx, run.ID(), collection.RunFailed,
-			collection.CompletenessPartial, collection.RunReasonProcessRestarted)
-		if err != nil {
-			t.Fatalf("finish orphaned run %d: %v", run.ID(), err)
-		}
-		if finished.State() != collection.RunFailed || finished.Reason() != collection.RunReasonProcessRestarted {
-			t.Fatalf("orphaned run = %s/%s", finished.State(), finished.Reason())
-		}
+	if _, err := db.ExecContext(ctx, `
+UPDATE collection_tasks SET claimed_at = date_trunc('microseconds', clock_timestamp()) - INTERVAL '1 hour'
+WHERE task_id = $1`, int64(askTask.ID())); err != nil {
+		t.Fatal(err)
 	}
+	released, err = store.ReleaseStaleClaims(ctx, time.Minute)
+	if err != nil || released != 1 {
+		t.Fatalf("stale claim released=%d err=%v", released, err)
+	}
+	if depth, err := store.QueueDepth(ctx, askTarget.ID()); err != nil || depth != 1 {
+		t.Fatalf("requeued depth=%d err=%v", depth, err)
+	}
+	reclaimed, _, ok, err := store.ClaimTask(ctx, askCombo.ID, "steam")
+	if err != nil || !ok || reclaimed.ID() != askTask.ID() || reclaimed.State() != collection.TaskClaimed {
+		t.Fatalf("reclaim after release = %+v ok=%v err=%v", reclaimed, ok, err)
+	}
+	if err := store.RequeueTask(ctx, reclaimed.ID(), askCombo.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := store.ClaimTask(ctx, askCombo.ID, "steam"); err != nil || !ok {
+		t.Fatalf("claim after requeue ok=%v err=%v", ok, err)
+	}
+}
 
-	active, err = store.ActiveRuns(ctx)
-	if err != nil || len(active) != 0 {
-		t.Fatalf("terminal runs must leave the active set, got %+v err=%v", active, err)
+// testCollectionOneClaimPerCombination 覆盖一组合一条认领、启动回队全部认领、删组合撞 claimed_by。
+func testCollectionOneClaimPerCombination(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+
+	target, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 2), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
 	}
-	// 恢复后可以重新建立运行。
-	if _, created, err := store.CreateSummaryRun(ctx, askTarget.ID(), askTarget.SwitchVersion(), empty); err != nil || !created {
-		t.Fatalf("run after recovery created=%v err=%v", created, err)
+	first, _, ok, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !ok {
+		t.Fatalf("first claim ok=%v err=%v", ok, err)
+	}
+	if _, _, ok, err := store.ClaimTask(ctx, combination.ID, "steam"); err != nil || ok {
+		t.Fatalf("busy combination claim ok=%v err=%v", ok, err)
+	}
+	if err := store.DeleteCombination(ctx, combination.ID); !errors.Is(err, ErrResourceDependency) {
+		t.Fatalf("delete claimed combination = %v", err)
+	}
+	released, err := store.ReleaseAllClaims(ctx)
+	if err != nil || released != 1 {
+		t.Fatalf("release all claims released=%d err=%v", released, err)
+	}
+	reclaimed, _, ok, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !ok || reclaimed.ID() != first.ID() {
+		t.Fatalf("reclaim after release all = %+v ok=%v err=%v", reclaimed, ok, err)
+	}
+	if err := store.RequeueTask(ctx, reclaimed.ID(), combination.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteCombination(ctx, combination.ID); err != nil {
+		t.Fatalf("delete idle combination = %v", err)
 	}
 }
 
@@ -480,27 +560,28 @@ func testCollectionInstanceLock(t *testing.T, dsn string) {
 }
 
 func testCollectionConcurrency(t *testing.T, dsn string) {
-	store, db := migratedStore(t, dsn)
+	store, _ := migratedStore(t, dsn)
 	ctx := t.Context()
-	empty := mustCollectionCursor(t, nil)
 
-	summary, err := store.CreateSummaryTarget(ctx, "buff", 730, market.SideAsk, collection.DesiredEnabled)
-	if err != nil {
+	summary, combination := queueReadyFixture(t, store, "buff", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, summary.ID(), summary.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
 		t.Fatal(err)
 	}
-	first, created, err := store.CreateSummaryRun(ctx, summary.ID(), summary.SwitchVersion(), empty)
-	if err != nil || !created {
-		t.Fatalf("first summary run = %+v created=%v err=%v", first, created, err)
+	first, _, ok, err := store.ClaimTask(ctx, combination.ID, "buff")
+	if err != nil || !ok {
+		t.Fatalf("first claim ok=%v err=%v", ok, err)
 	}
-	if repeated, created, err := store.CreateSummaryRun(ctx, summary.ID(), summary.SwitchVersion(), empty); err != nil || created || repeated.ID() != first.ID() {
-		t.Fatalf("active run retry = %+v created=%v err=%v", repeated, created, err)
+	if _, _, ok, err := store.ClaimTask(ctx, combination.ID, "buff"); err != nil || ok {
+		t.Fatalf("empty queue claim ok=%v err=%v", ok, err)
+	}
+	if err := store.RequeueTask(ctx, first.ID(), combination.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	const workers = 8
 	type createResult struct {
 		target  collection.Target
-		run     collection.Run
-		created bool
+		claimed bool
 		err     error
 	}
 	targetResults := make(chan createResult, workers)
@@ -530,41 +611,31 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 		}
 	}
 
-	concurrentTarget, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideBid, collection.DesiredEnabled)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runResults := make(chan createResult, workers)
+	claimResults := make(chan createResult, workers)
 	start = make(chan struct{})
 	for range workers {
 		group.Add(1)
 		go func() {
 			defer group.Done()
 			<-start
-			run, created, err := store.CreateSummaryRun(ctx, concurrentTarget.ID(), concurrentTarget.SwitchVersion(), empty)
-			runResults <- createResult{run: run, created: created, err: err}
+			_, _, claimed, err := store.ClaimTask(ctx, combination.ID, "buff")
+			claimResults <- createResult{claimed: claimed, err: err}
 		}()
 	}
 	close(start)
 	group.Wait()
-	close(runResults)
-	var runID collection.RunID
-	createdCount := 0
-	for result := range runResults {
+	close(claimResults)
+	claimedCount := 0
+	for result := range claimResults {
 		if result.err != nil {
-			t.Fatalf("concurrent run create: %v", result.err)
+			t.Fatalf("concurrent claim: %v", result.err)
 		}
-		if result.created {
-			createdCount++
-		}
-		if runID == 0 {
-			runID = result.run.ID()
-		} else if result.run.ID() != runID {
-			t.Fatalf("concurrent run ids = %d and %d", runID, result.run.ID())
+		if result.claimed {
+			claimedCount++
 		}
 	}
-	if createdCount != 1 {
-		t.Fatalf("created count = %d, want 1", createdCount)
+	if claimedCount != 1 {
+		t.Fatalf("claimed count = %d, want 1", claimedCount)
 	}
 
 	casTarget, err := store.CreateSummaryTarget(ctx, "steam", 570, market.SideAsk, collection.DesiredEnabled)
@@ -615,59 +686,33 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.CreateSummaryRun(ctx, disabled.ID(), disabled.SwitchVersion(), empty); !errors.Is(err, ErrCollectionTargetDisabled) {
-		t.Fatalf("disabled create error = %v", err)
+	if err := store.EnqueueTasks(ctx, disabled.ID(), disabled.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("disabled enqueue error = %v", err)
 	}
 
 	snapshotTarget, err := store.CreateSummaryTarget(ctx, "steam", 10, market.SideAsk, collection.DesiredEnabled)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshotRun, _, err := store.CreateSummaryRun(ctx, snapshotTarget.ID(), snapshotTarget.SwitchVersion(), empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshotRun, err = store.BeginRun(ctx, snapshotRun.ID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	startedAt, _ := snapshotRun.StartedAt()
 	writerErr := make(chan error, 1)
 	readerErr := make(chan error, 1)
 	go func() {
-		before := []byte{}
 		for sequence := 1; sequence <= 24; sequence++ {
-			after := []byte("snapshot-" + strconv.Itoa(sequence))
-			collectedAt := startedAt.Add(time.Duration(sequence) * time.Microsecond)
-			tx, err := db.BeginTx(ctx, nil)
-			if err == nil {
-				_, err = tx.ExecContext(ctx, `
-INSERT INTO collection_pages (
-    run_id, page_sequence, cursor_before, cursor_after, payload_digest, collected_at, committed_at
-) VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-					int64(snapshotRun.ID()), sequence, before, after, bytes.Repeat([]byte{byte(sequence)}, 32), collectedAt)
-			}
-			if err == nil {
-				_, err = tx.ExecContext(ctx, `
-UPDATE collection_runs SET current_cursor = $3, last_page_sequence = $2 WHERE run_id = $1`,
-					int64(snapshotRun.ID()), sequence, after)
-			}
-			if err == nil {
-				err = tx.Commit()
-			} else if tx != nil {
-				_ = tx.Rollback()
-			}
-			if err != nil {
+			cursor := mustCollectionCursor(t, []byte("snapshot-"+strconv.Itoa(sequence)))
+			if err := store.EnqueueTasks(ctx, snapshotTarget.ID(), snapshotTarget.SwitchVersion(), mustAskPageSpecs(t, 1), cursor, int64(sequence)); err != nil {
 				writerErr <- err
 				return
 			}
-			before = after
 		}
 		writerErr <- nil
 	}()
 	go func() {
 		for range 96 {
-			if _, err := store.Pages(ctx, snapshotRun.ID()); err != nil {
+			if _, err := store.QueueDepth(ctx, snapshotTarget.ID()); err != nil {
+				readerErr <- err
+				return
+			}
+			if _, err := store.ListWorkers(ctx); err != nil {
 				readerErr <- err
 				return
 			}
@@ -680,72 +725,24 @@ UPDATE collection_runs SET current_cursor = $3, last_page_sequence = $2 WHERE ru
 	if err := <-readerErr; err != nil {
 		t.Fatalf("snapshot reader: %v", err)
 	}
-	pages, err := store.Pages(ctx, snapshotRun.ID())
-	if err != nil || len(pages) != 24 {
-		t.Fatalf("snapshot pages=%d err=%v", len(pages), err)
+	if depth, err := store.QueueDepth(ctx, snapshotTarget.ID()); err != nil || depth != 24 {
+		t.Fatalf("snapshot depth=%d err=%v", depth, err)
 	}
 }
 
 func testCollectionIntegrityErrors(t *testing.T, dsn string) {
-	t.Run("run target mismatch", func(t *testing.T) {
+	t.Run("task payload mismatch", func(t *testing.T) {
 		store, db := migratedStore(t, dsn)
 		ctx := t.Context()
-		target, err := store.CreateSummaryTarget(ctx, "buff", 730, market.SideBid, collection.DesiredEnabled)
-		if err != nil {
+		target, combination := queueReadyFixture(t, store, "buff", 730, market.SideBid)
+		if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
 			t.Fatal(err)
 		}
-		run, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
-		if err != nil {
+		if _, err := db.ExecContext(ctx, `UPDATE collection_tasks SET payload = '{"bad":true}'::jsonb WHERE target_id = $1`, int64(target.ID())); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.ExecContext(ctx, `UPDATE collection_runs SET platform = 'igxe' WHERE run_id = $1`, int64(run.ID())); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err := store.Run(ctx, run.ID()); !errors.Is(err, ErrCollectionIntegrity) {
-			t.Fatalf("mismatched run read error = %v", err)
-		}
-	})
-
-	t.Run("page gap", func(t *testing.T) {
-		store, db := migratedStore(t, dsn)
-		ctx := t.Context()
-		target, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideAsk, collection.DesiredEnabled)
-		if err != nil {
-			t.Fatal(err)
-		}
-		run, _, err := store.CreateSummaryRun(ctx, target.ID(), target.SwitchVersion(), mustCollectionCursor(t, nil))
-		if err != nil {
-			t.Fatal(err)
-		}
-		run, err = store.BeginRun(ctx, run.ID())
-		if err != nil {
-			t.Fatal(err)
-		}
-		startedAt, _ := run.StartedAt()
-		digest := bytes.Repeat([]byte{0x33}, 32)
-		pageTx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pageTx.ExecContext(ctx, `
-INSERT INTO collection_pages (
-    run_id, page_sequence, cursor_before, cursor_after, payload_digest, collected_at, committed_at
-) VALUES ($1, 2, $2, $3, $4, $5, $5)`,
-			int64(run.ID()), []byte{}, []byte("gap"), digest, startedAt); err != nil {
-			_ = pageTx.Rollback()
-			t.Fatal(err)
-		}
-		if _, err := pageTx.ExecContext(ctx, `
-UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 2 WHERE run_id = $1`,
-			int64(run.ID()), []byte("gap")); err != nil {
-			_ = pageTx.Rollback()
-			t.Fatal(err)
-		}
-		if err := pageTx.Commit(); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Pages(ctx, run.ID()); !errors.Is(err, ErrCollectionIntegrity) {
-			t.Fatalf("page gap error = %v", err)
+		if _, _, _, err := store.ClaimTask(ctx, combination.ID, "buff"); !errors.Is(err, ErrCollectionIntegrity) {
+			t.Fatalf("corrupt task payload error = %v", err)
 		}
 	})
 
@@ -766,6 +763,79 @@ UPDATE collection_runs SET current_cursor = $2, last_page_sequence = 2 WHERE run
 			t.Fatalf("closed storage error = %v", err)
 		}
 	})
+}
+
+var queueFixtureSeq atomic.Uint64
+
+// queueCommitFixture 建好组合、启用目标、入队并认领，提交页必须走这条路径。
+func queueCommitFixture(t *testing.T, store *Store, platform collection.Platform, appID int64, side market.Side) (collection.Target, collection.Task, resource.AccountNodeCombination) {
+	t.Helper()
+	target, combination := queueReadyFixture(t, store, platform, appID, side)
+	if err := store.EnqueueTasks(t.Context(), target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	task, claimed, ok, err := store.ClaimTask(t.Context(), combination.ID, platform)
+	if err != nil || !ok || task.TargetID() != target.ID() {
+		t.Fatalf("ClaimTask() task=%+v ok=%v err=%v", task, ok, err)
+	}
+	return claimed, task, combination
+}
+
+func queueReadyFixture(t *testing.T, store *Store, platform collection.Platform, appID int64, side market.Side) (collection.Target, resource.AccountNodeCombination) {
+	t.Helper()
+	target, err := store.CreateSummaryTarget(t.Context(), platform, appID, side, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, combination := mustQueueCombination(t, store, platform)
+	return target, combination
+}
+
+func mustQueueCombination(t *testing.T, store *Store, platform collection.Platform) (resource.PlatformAccount, resource.AccountNodeCombination) {
+	t.Helper()
+	ctx := t.Context()
+	seq := queueFixtureSeq.Add(1)
+	suffix := fmt.Sprintf("%s-%d", platform, seq)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	account, err := store.CreateAccount(ctx, resource.Platform(platform), "qa-"+suffix, []byte("qs-"+suffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = store.RecordAccountSessionCheck(ctx, account.ID, account.SessionRevision, resource.AccountSessionStateValid, now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	region := resource.NodeRegionForeign
+	if platform == collection.PlatformSteam {
+		region = resource.NodeRegionHongKong
+	}
+	node, err := store.CreateNode(ctx, "qn-"+suffix, resource.NodeConnectionInput{
+		Kind: resource.NodeKindDirect, Region: region, EgressMode: resource.EgressModeStatic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordNodeExit(ctx, node.ID, node.EgressRevision, netip.MustParseAddr("1.1.1.1"), now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	combination, err := store.CreateCombination(ctx, account.ID, node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return account, combination
+}
+
+func mustAskPageSpecs(t *testing.T, n int) []collection.EnqueueSpec {
+	t.Helper()
+	payload, err := collection.EncodeAskPage(0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := make([]collection.EnqueueSpec, n)
+	for i := range specs {
+		specs[i] = collection.EnqueueSpec{Kind: collection.TaskKindAskPage, Payload: payload}
+	}
+	return specs
 }
 
 func mustCollectionCursor(t *testing.T, value []byte) collection.Cursor {

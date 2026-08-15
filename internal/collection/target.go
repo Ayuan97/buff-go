@@ -2,8 +2,10 @@ package collection
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
+	"buff-go/internal/catalog"
 	"buff-go/internal/market"
 )
 
@@ -25,6 +27,11 @@ type SummaryTargetInput struct {
 	RecheckAt     *time.Time
 	ChangedAt     time.Time
 	Sort          SortOrder
+	PriceRange    PriceRange
+	SteamFacets   SteamFacets
+	RefillCursor  Cursor
+	WriteSeq      int64
+	RefillTotal   int64
 }
 
 // SortColumn 是平台列表的排序字段。
@@ -44,8 +51,8 @@ const (
 	SortDescending SortDirection = "desc"
 )
 
-// SortOrder 决定平台按什么顺序返回商品，也就决定了这一轮先采到哪一头。
-// 游标是列表偏移量，所以换了顺序旧游标就失去意义，必须重开一轮。
+// SortOrder 决定平台按什么顺序返回商品，也就决定补货从哪一头开始。
+// 游标是列表偏移量，换顺序必须推进 switch_version 并清空该方向队列。
 type SortOrder struct {
 	Column    SortColumn
 	Direction SortDirection
@@ -54,6 +61,120 @@ type SortOrder struct {
 // DefaultSortOrder 是价格升序，与接入采集时的固定行为一致。
 func DefaultSortOrder() SortOrder {
 	return SortOrder{Column: SortColumnPrice, Direction: SortAscending}
+}
+
+// PriceRange 是出售搜索交给 Steam 的人民币分区间。空表示不限。
+// 求购 orderbook 没有对应参数，存了也不会打出去。
+type PriceRange struct {
+	MinCents *int64
+	MaxCents *int64
+}
+
+// Validate 拒绝负数和上下限颠倒。
+func (bounds PriceRange) Validate() error {
+	if bounds.MinCents != nil && *bounds.MinCents < 0 {
+		return fmt.Errorf("price min cannot be negative")
+	}
+	if bounds.MaxCents != nil && *bounds.MaxCents < 0 {
+		return fmt.Errorf("price max cannot be negative")
+	}
+	if bounds.MinCents != nil && bounds.MaxCents != nil && *bounds.MinCents > *bounds.MaxCents {
+		return fmt.Errorf("price min exceeds max")
+	}
+	return nil
+}
+
+// Equal 比较两个区间，含「没设」和「设了 0」。
+func (bounds PriceRange) Equal(other PriceRange) bool {
+	return sameOptionalInt64(bounds.MinCents, other.MinCents) && sameOptionalInt64(bounds.MaxCents, other.MaxCents)
+}
+
+// SteamFacets 是 Rust 出售搜索交给 Steam 的分类多选。空表示不限。
+// 求购 orderbook 没有对应参数，存了也不会打出去。
+type SteamFacets struct {
+	Cats    []string
+	Classes []string
+}
+
+// Validate 只收词表里的 slug，并去重排序，避免同一组勾选因顺序不同被当成改动。
+func (facets SteamFacets) Validate() error {
+	if len(facets.Cats) > 8 || len(facets.Classes) > 128 {
+		return fmt.Errorf("steam facet selection is too large")
+	}
+	seenCat := make(map[string]struct{}, len(facets.Cats))
+	for _, slug := range facets.Cats {
+		if !catalog.ValidRustCategory(slug) {
+			return fmt.Errorf("unknown steam category %q", slug)
+		}
+		if _, dup := seenCat[slug]; dup {
+			return fmt.Errorf("duplicate steam category %q", slug)
+		}
+		seenCat[slug] = struct{}{}
+	}
+	seenClass := make(map[string]struct{}, len(facets.Classes))
+	for _, slug := range facets.Classes {
+		if !catalog.ValidRustItemClass(slug) {
+			return fmt.Errorf("unknown steam item class %q", slug)
+		}
+		if _, dup := seenClass[slug]; dup {
+			return fmt.Errorf("duplicate steam item class %q", slug)
+		}
+		seenClass[slug] = struct{}{}
+	}
+	return nil
+}
+
+// Normalized 去重后按字典序排好，比较和落库都用这一份。
+func (facets SteamFacets) Normalized() SteamFacets {
+	return SteamFacets{Cats: uniqueSorted(facets.Cats), Classes: uniqueSorted(facets.Classes)}
+}
+
+// Empty 表示不限分类。
+func (facets SteamFacets) Empty() bool {
+	return len(facets.Cats) == 0 && len(facets.Classes) == 0
+}
+
+// Equal 忽略勾选顺序。
+func (facets SteamFacets) Equal(other SteamFacets) bool {
+	left, right := facets.Normalized(), other.Normalized()
+	if len(left.Cats) != len(right.Cats) || len(left.Classes) != len(right.Classes) {
+		return false
+	}
+	for i := range left.Cats {
+		if left.Cats[i] != right.Cats[i] {
+			return false
+		}
+	}
+	for i := range left.Classes {
+		if left.Classes[i] != right.Classes[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueSorted(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, dup := seen[value]; dup {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sameOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 // Validate checks that both parts name a supported platform ordering.
@@ -87,6 +208,11 @@ type Target struct {
 	recheckAt     time.Time
 	changedAt     time.Time
 	sort          SortOrder
+	priceRange    PriceRange
+	steamFacets   SteamFacets
+	refillCursor  Cursor
+	writeSeq      int64
+	refillTotal   int64
 }
 
 // NewSummaryTarget validates a summary target restored from persistence.
@@ -106,6 +232,11 @@ func NewSummaryTarget(input SummaryTargetInput) (Target, error) {
 		recheckAt:     timeValue(input.RecheckAt),
 		changedAt:     input.ChangedAt,
 		sort:          input.Sort,
+		priceRange:    input.PriceRange,
+		steamFacets:   input.SteamFacets.Normalized(),
+		refillCursor:  input.RefillCursor.clone(),
+		writeSeq:      input.WriteSeq,
+		refillTotal:   input.RefillTotal,
 	}
 	// 零值来自本能力上线之前的行与未指定排序的调用方，按接入时的固定顺序补齐
 	if target.sort == (SortOrder{}) {
@@ -145,6 +276,24 @@ func (target Target) Validate() error {
 	}
 	if err := target.sort.Validate(); err != nil {
 		return err
+	}
+	if err := target.priceRange.Validate(); err != nil {
+		return err
+	}
+	if err := target.steamFacets.Validate(); err != nil {
+		return err
+	}
+	if !target.steamFacets.Empty() && target.appID != catalog.AppIDRust {
+		return fmt.Errorf("steam facets are only for rust")
+	}
+	if err := target.refillCursor.Validate(); err != nil {
+		return fmt.Errorf("refill_cursor: %w", err)
+	}
+	if target.writeSeq < 0 {
+		return fmt.Errorf("write_seq cannot be negative")
+	}
+	if target.refillTotal < 0 {
+		return fmt.Errorf("refill_total cannot be negative")
 	}
 	if err := target.desired.Validate(); err != nil {
 		return err
@@ -273,12 +422,13 @@ func (target Target) Enable(at time.Time) (Target, error) {
 	}
 	target.switchVersion = nextSwitch
 	target.desired = DesiredEnabled
+	target.resetRefill()
 	return target.changeActual(ActualStarting, TargetReasonNone, RecoveryNone, time.Time{}, at)
 }
 
-// SetSortOrder changes what the platform returns first. The cursor is a list
-// offset, so the current batch is voided by advancing switch_version and the
-// next cycle restarts from the beginning; already stored market facts are kept.
+// SetSortOrder changes what the platform returns first. The refill cursor is a
+// list offset, so switch_version advances and the queue must be cleared;
+// already stored market facts and write_seq are kept.
 func (target Target) SetSortOrder(order SortOrder, at time.Time) (Target, error) {
 	if err := target.validateChangeTime(at); err != nil {
 		return Target{}, err
@@ -302,6 +452,85 @@ func (target Target) SetSortOrder(order SortOrder, at time.Time) (Target, error)
 	target.revision = nextRev
 	target.switchVersion = nextSwitch
 	target.sort = order
+	target.resetRefill()
+	target.changedAt = at
+	if target.desired == DesiredEnabled {
+		target.actual = ActualStarting
+		target.reason = TargetReasonNone
+		target.recovery = RecoveryNone
+		target.recheckAt = time.Time{}
+	}
+	if err := target.Validate(); err != nil {
+		return Target{}, err
+	}
+	return target, nil
+}
+
+// SetPriceRange 把出售搜索的价格区间交给 Steam。游标是列表偏移量，
+// 换区间必须推进 switch_version 并清空该方向队列。
+func (target Target) SetPriceRange(bounds PriceRange, at time.Time) (Target, error) {
+	if err := target.validateChangeTime(at); err != nil {
+		return Target{}, err
+	}
+	if err := bounds.Validate(); err != nil {
+		return Target{}, err
+	}
+	if target.priceRange.Equal(bounds) {
+		return target, nil
+	}
+	nextSwitch, err := nextRevision(target.switchVersion)
+	if err != nil {
+		return Target{}, fmt.Errorf("switch_version cannot advance")
+	}
+	nextRev, err := nextRevision(target.revision)
+	if err != nil {
+		return Target{}, fmt.Errorf("revision cannot advance")
+	}
+	target.revision = nextRev
+	target.switchVersion = nextSwitch
+	target.priceRange = bounds
+	target.resetRefill()
+	target.changedAt = at
+	if target.desired == DesiredEnabled {
+		target.actual = ActualStarting
+		target.reason = TargetReasonNone
+		target.recovery = RecoveryNone
+		target.recheckAt = time.Time{}
+	}
+	if err := target.Validate(); err != nil {
+		return Target{}, err
+	}
+	return target, nil
+}
+
+// SetSteamFacets 把 Rust 分类多选交给 Steam 搜索。游标是列表偏移量，
+// 换勾选必须推进 switch_version 并清空该方向队列。
+func (target Target) SetSteamFacets(facets SteamFacets, at time.Time) (Target, error) {
+	if err := target.validateChangeTime(at); err != nil {
+		return Target{}, err
+	}
+	facets = facets.Normalized()
+	if err := facets.Validate(); err != nil {
+		return Target{}, err
+	}
+	if !facets.Empty() && target.appID != catalog.AppIDRust {
+		return Target{}, fmt.Errorf("%w: steam facets are only for rust", ErrInvalidInput)
+	}
+	if target.steamFacets.Equal(facets) {
+		return target, nil
+	}
+	nextSwitch, err := nextRevision(target.switchVersion)
+	if err != nil {
+		return Target{}, fmt.Errorf("switch_version cannot advance")
+	}
+	nextRev, err := nextRevision(target.revision)
+	if err != nil {
+		return Target{}, fmt.Errorf("revision cannot advance")
+	}
+	target.revision = nextRev
+	target.switchVersion = nextSwitch
+	target.steamFacets = facets
+	target.resetRefill()
 	target.changedAt = at
 	if target.desired == DesiredEnabled {
 		target.actual = ActualStarting
@@ -329,7 +558,13 @@ func (target Target) Disable(at time.Time) (Target, error) {
 	}
 	target.switchVersion = nextSwitch
 	target.desired = DesiredDisabled
+	target.resetRefill()
 	return target.changeActual(ActualStopping, TargetReasonNone, RecoveryNone, time.Time{}, at)
+}
+
+func (target *Target) resetRefill() {
+	target.refillCursor = Cursor{}
+	target.refillTotal = 0
 }
 
 // MarkWaiting records a scheduled automatic recheck.
@@ -527,6 +762,12 @@ func (target Target) SwitchVersion() Revision { return target.switchVersion }
 // Sort returns the platform ordering this target collects with.
 func (target Target) Sort() SortOrder { return target.sort }
 
+// PriceRange 返回出售搜索交给 Steam 的价格区间。
+func (target Target) PriceRange() PriceRange { return target.priceRange }
+
+// SteamFacets 返回 Rust 出售搜索交给 Steam 的分类多选。
+func (target Target) SteamFacets() SteamFacets { return target.steamFacets }
+
 // Reason returns the controlled target reason.
 func (target Target) Reason() TargetReason { return target.reason }
 
@@ -540,3 +781,12 @@ func (target Target) RecheckAt() (time.Time, bool) {
 
 // ChangedAt returns the time of the latest target state change.
 func (target Target) ChangedAt() time.Time { return target.changedAt }
+
+// RefillCursor returns the planner's next-append position.
+func (target Target) RefillCursor() Cursor { return target.refillCursor.clone() }
+
+// WriteSeq returns how many pages this target has successfully committed.
+func (target Target) WriteSeq() int64 { return target.writeSeq }
+
+// RefillTotal returns the last known list size used to wrap ask refill.
+func (target Target) RefillTotal() int64 { return target.refillTotal }

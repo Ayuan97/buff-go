@@ -262,7 +262,7 @@ func RequestFromLease(lease resource.Lease, class EndpointClass) (Request, error
 	if err := snapshot.EgressMode.Validate(); err != nil {
 		return Request{}, err
 	}
-	if snapshot.SessionRevision < 1 || snapshot.EgressRevision < 1 || snapshot.AssignmentRevision < 1 {
+	if snapshot.SessionRevision < 1 || snapshot.EgressRevision < 1 {
 		return Request{}, fmt.Errorf("lease resource revisions must be at least 1")
 	}
 	request := Request{

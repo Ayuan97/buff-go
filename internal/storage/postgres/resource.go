@@ -8,14 +8,12 @@ import (
 	"net/netip"
 	"time"
 
-	"buff-go/internal/market"
 	"buff-go/internal/resource"
 )
 
 var (
 	ErrResourceNotFound           = errors.New("resource not found")
 	ErrResourceRevisionConflict   = errors.New("resource revision conflict")
-	ErrNodeAssignmentConflict     = errors.New("node direction assignment conflicts")
 	ErrNodeNameConflict           = errors.New("access node name already exists")
 	ErrAccountConflict            = errors.New("account alias already exists")
 	ErrProviderConflict           = errors.New("provider name already exists")
@@ -30,7 +28,7 @@ account_id, platform, alias, session_state, session_revision, last_checked_at`
 
 const nodeReadColumns = `
 node_id, name, kind, region, egress_mode, state, egress_revision,
-assignment_revision, appid, (proxy_plaintext IS NOT NULL), sticky_session_valid_until,
+(proxy_plaintext IS NOT NULL), sticky_session_valid_until,
 exit_verified_revision, host(exit_address), exit_verified_at, exit_valid_until`
 
 type rowScanner interface {
@@ -255,7 +253,7 @@ func (s *Store) CreateNode(ctx context.Context, name string, input resource.Node
 		return resource.AccessNode{}, err
 	}
 	proxyPlaintext := nodeProxyPlaintext(prepared)
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
 INSERT INTO access_nodes (
     node_id, name, kind, region, egress_mode, proxy_plaintext, sticky_session_valid_until
 ) OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -277,7 +275,7 @@ func (s *Store) Node(ctx context.Context, id resource.NodeID) (resource.AccessNo
 	if err := id.Validate(); err != nil {
 		return resource.AccessNode{}, false, err
 	}
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
+	node, err := scanNode(s.db.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
 FROM access_nodes WHERE node_id = $1`, int64(id)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, false, nil
@@ -310,13 +308,10 @@ FROM access_nodes ORDER BY node_id`)
 	if err := rows.Err(); err != nil {
 		return nil, ErrResourceStorage
 	}
-	if err := attachAllNodeSides(ctx, s.db, nodes); err != nil {
-		return nil, err
-	}
 	return nodes, nil
 }
 
-// RenameNode changes the display name. Connection, assignment and exit evidence
+// RenameNode changes the display name. Connection and exit evidence
 // are untouched, so no revision advances.
 func (s *Store) RenameNode(ctx context.Context, id resource.NodeID, name string) (resource.AccessNode, error) {
 	if err := s.validate(); err != nil {
@@ -340,7 +335,7 @@ func (s *Store) RenameNode(ctx context.Context, id resource.NodeID, name string)
 	if err := renamed.Validate(); err != nil {
 		return resource.AccessNode{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
 	}
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
 UPDATE access_nodes SET name = $2 WHERE node_id = $1
 RETURNING `+nodeReadColumns, int64(id), name))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -371,7 +366,7 @@ func (s *Store) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, e
 		return resource.AccessNode{}, err
 	}
 	proxyPlaintext := nodeProxyPlaintext(prepared)
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET kind = $3, region = $4, egress_mode = $5, proxy_plaintext = $6,
     sticky_session_valid_until = $7, state = 'validating',
@@ -399,7 +394,7 @@ func (s *Store) BeginNodeRevalidation(ctx context.Context, id resource.NodeID, e
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET state = 'validating', egress_revision = egress_revision + 1,
     exit_address = NULL, exit_verified_revision = NULL, exit_verified_at = NULL, exit_valid_until = NULL
@@ -435,7 +430,7 @@ func (s *Store) RecordNodeExit(ctx context.Context, id resource.NodeID, expected
 	if err := verification.Validate(); err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, `
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET state = 'available', exit_address = $3, exit_verified_revision = $2,
     exit_verified_at = $4, exit_valid_until = $5
@@ -461,213 +456,17 @@ WHERE node_id = $1 AND egress_revision = $2 AND state IN ('validating', 'unavail
 RETURNING `+nodeReadColumns)
 }
 
-// AssignNodeGame sets or clears the node's game using assignment revision CAS.
-// appID 0 clears the game. Direction rows or combinations block the change.
-func (s *Store) AssignNodeGame(ctx context.Context, id resource.NodeID, expectedRevision int64, appID int64) (resource.AccessNode, error) {
-	if err := s.validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if appID < 0 {
-		return resource.AccessNode{}, fmt.Errorf("appid must be non-negative")
-	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	node, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
-FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceNotFound
-	}
-	if err != nil {
-		return resource.AccessNode{}, mapResourceReadError(err)
-	}
-	if err := attachNodeSides(ctx, tx, &node); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if node.AssignmentRevision != expectedRevision {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-	if node.AppID == appID {
-		if err := tx.Commit(); err != nil {
-			return resource.AccessNode{}, ErrResourceStorage
-		}
-		return node, nil
-	}
-
-	var hasDirection bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (SELECT 1 FROM node_direction_assignments WHERE node_id = $1)`, int64(id)).Scan(&hasDirection); err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	var hasCombination bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (SELECT 1 FROM account_node_combinations WHERE node_id = $1)`, int64(id)).Scan(&hasCombination); err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	if hasDirection || hasCombination {
-		return resource.AccessNode{}, ErrResourceDependency
-	}
-
-	var storedAppID any
-	if appID > 0 {
-		storedAppID = appID
-	}
-	node, err = scanCompleteNode(ctx, tx, tx.QueryRowContext(ctx, `
-UPDATE access_nodes
-SET appid = $3, assignment_revision = $4
-WHERE node_id = $1 AND assignment_revision = $2
-RETURNING `+nodeReadColumns, int64(id), expectedRevision, storedAppID, nextRevision))
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-	if err != nil {
-		return resource.AccessNode{}, mapAssignmentWriteError(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	return node, nil
-}
-
-// AssignNodeSide sets or deletes one platform direction using assignment revision CAS.
-// Empty side deletes that platform row. Combinations on that platform block the change.
-func (s *Store) AssignNodeSide(
-	ctx context.Context,
-	id resource.NodeID,
-	expectedRevision int64,
-	platform resource.Platform,
-	side market.Side,
-) (resource.AccessNode, error) {
-	if err := s.validate(); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := platform.Validate(); err != nil {
-		return resource.AccessNode{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
-	}
-	if side != "" && side != market.SideBid && side != market.SideAsk {
-		return resource.AccessNode{}, fmt.Errorf("%w: invalid assignment side %q", ErrInvalidResource, side)
-	}
-	nextRevision, err := nextResourceRevision(expectedRevision)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	node, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeReadColumns+`
-FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceNotFound
-	}
-	if err != nil {
-		return resource.AccessNode{}, mapResourceReadError(err)
-	}
-	if err := attachNodeSides(ctx, tx, &node); err != nil {
-		return resource.AccessNode{}, err
-	}
-	if node.AssignmentRevision != expectedRevision {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-
-	current, assigned := node.SideFor(platform)
-	switch {
-	case side == "":
-		if !assigned {
-			return resource.AccessNode{}, ErrNodeAssignmentConflict
-		}
-		var hasCombination bool
-		if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM account_node_combinations WHERE node_id = $1 AND platform = $2
-)`, int64(id), string(platform)).Scan(&hasCombination); err != nil {
-			return resource.AccessNode{}, ErrResourceStorage
-		}
-		if hasCombination {
-			return resource.AccessNode{}, ErrResourceDependency
-		}
-		if _, err := tx.ExecContext(ctx, `
-DELETE FROM node_direction_assignments WHERE node_id = $1 AND platform = $2`, int64(id), string(platform)); err != nil {
-			return resource.AccessNode{}, mapAssignmentWriteError(err)
-		}
-	case assigned && current == side:
-		if err := tx.Commit(); err != nil {
-			return resource.AccessNode{}, ErrResourceStorage
-		}
-		return node, nil
-	default:
-		if node.AppID < 1 {
-			return resource.AccessNode{}, ErrNodeAssignmentConflict
-		}
-		if assigned {
-			var hasCombination bool
-			if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM account_node_combinations WHERE node_id = $1 AND platform = $2
-)`, int64(id), string(platform)).Scan(&hasCombination); err != nil {
-				return resource.AccessNode{}, ErrResourceStorage
-			}
-			if hasCombination {
-				return resource.AccessNode{}, ErrResourceDependency
-			}
-			if _, err := tx.ExecContext(ctx, `
-UPDATE node_direction_assignments SET side = $3
-WHERE node_id = $1 AND platform = $2`, int64(id), string(platform), string(side)); err != nil {
-				return resource.AccessNode{}, mapAssignmentWriteError(err)
-			}
-		} else if _, err := tx.ExecContext(ctx, `
-INSERT INTO node_direction_assignments (node_id, platform, side)
-VALUES ($1, $2, $3)`, int64(id), string(platform), string(side)); err != nil {
-			return resource.AccessNode{}, mapAssignmentWriteError(err)
-		}
-	}
-
-	node, err = scanCompleteNode(ctx, tx, tx.QueryRowContext(ctx, `
-UPDATE access_nodes
-SET assignment_revision = $3
-WHERE node_id = $1 AND assignment_revision = $2
-RETURNING `+nodeReadColumns, int64(id), expectedRevision, nextRevision))
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.AccessNode{}, ErrResourceRevisionConflict
-	}
-	if err != nil {
-		return resource.AccessNode{}, mapAssignmentWriteError(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return resource.AccessNode{}, ErrResourceStorage
-	}
-	return node, nil
-}
-
-// OpenNodeProxyCredentialAt returns plaintext proxy material for the observed revisions.
+// OpenNodeProxyCredentialAt returns plaintext proxy material for the observed egress revision.
 func (s *Store) OpenNodeProxyCredentialAt(
 	ctx context.Context,
 	id resource.NodeID,
-	expectedEgressRevision, expectedAssignmentRevision int64,
+	expectedEgressRevision int64,
 ) ([]byte, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
 	if err := validateIdentityRevision(id.Validate(), expectedEgressRevision); err != nil {
 		return nil, err
-	}
-	if expectedAssignmentRevision < 1 {
-		return nil, fmt.Errorf("expected assignment revision must be at least 1")
 	}
 	var plaintext []byte
 	var scanned nodeScanData
@@ -684,7 +483,7 @@ FROM access_nodes WHERE node_id = $1`, int64(id)).Scan(destinations...)
 	if validationErr != nil || node.ID != id {
 		return nil, ErrResourceIntegrity
 	}
-	if node.EgressRevision != expectedEgressRevision || node.AssignmentRevision != expectedAssignmentRevision {
+	if node.EgressRevision != expectedEgressRevision {
 		return nil, ErrResourceRevisionConflict
 	}
 	if node.Kind != resource.NodeKindProxy {
@@ -703,7 +502,7 @@ func (s *Store) updateNodeRevision(ctx context.Context, id resource.NodeID, expe
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
-	node, err := scanCompleteNode(ctx, s.db, s.db.QueryRowContext(ctx, statement, int64(id), expectedRevision))
+	node, err := scanNode(s.db.QueryRowContext(ctx, statement, int64(id), expectedRevision))
 	if errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceRevisionConflict
 	}
@@ -735,7 +534,6 @@ func prepareNodeConnection(name string, input resource.NodeConnectionInput) (res
 		EgressMode:              input.EgressMode,
 		State:                   resource.NodeStateValidating,
 		EgressRevision:          1,
-		AssignmentRevision:      1,
 		HasProxyCredential:      len(input.ProxyCredential) > 0,
 		StickySessionValidUntil: cloneTime(input.StickySessionValidUntil),
 	}
@@ -761,13 +559,6 @@ func validateIdentityRevision(identityErr error, revision int64) error {
 		return fmt.Errorf("expected revision must be at least 1")
 	}
 	return nil
-}
-
-func nextResourceRevision(current int64) (int64, error) {
-	if current == int64(^uint64(0)>>1) {
-		return 0, fmt.Errorf("resource revision is exhausted")
-	}
-	return current + 1, nil
 }
 
 func (s *Store) nextIdentity(ctx context.Context, table, column string) (int64, error) {
@@ -837,7 +628,6 @@ func scanAccount(row rowScanner) (resource.PlatformAccount, error) {
 type nodeScanData struct {
 	node                   resource.AccessNode
 	id                     int64
-	appid                  sql.NullInt64
 	sticky                 sql.NullTime
 	verifiedRevision       sql.NullInt64
 	address                sql.NullString
@@ -848,16 +638,13 @@ func (data *nodeScanData) destinations() []any {
 	return []any{
 		&data.id, &data.node.Name, &data.node.Kind, &data.node.Region,
 		&data.node.EgressMode, &data.node.State, &data.node.EgressRevision,
-		&data.node.AssignmentRevision, &data.appid, &data.node.HasProxyCredential, &data.sticky,
+		&data.node.HasProxyCredential, &data.sticky,
 		&data.verifiedRevision, &data.address, &data.verifiedAt, &data.validUntil,
 	}
 }
 
 func (data *nodeScanData) result() (resource.AccessNode, error) {
 	data.node.ID = resource.NodeID(data.id)
-	if data.appid.Valid {
-		data.node.AppID = data.appid.Int64
-	}
 	if data.sticky.Valid {
 		data.node.StickySessionValidUntil = cloneTime(&data.sticky.Time)
 	}
@@ -888,101 +675,4 @@ func scanNode(row rowScanner) (resource.AccessNode, error) {
 		return resource.AccessNode{}, err
 	}
 	return data.result()
-}
-
-type sideQuerier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
-func scanCompleteNode(ctx context.Context, querier sideQuerier, row rowScanner) (resource.AccessNode, error) {
-	node, err := scanNode(row)
-	if err != nil {
-		return resource.AccessNode{}, err
-	}
-	if err := attachNodeSides(ctx, querier, &node); err != nil {
-		return resource.AccessNode{}, err
-	}
-	return node, nil
-}
-
-func attachNodeSides(ctx context.Context, querier sideQuerier, node *resource.AccessNode) error {
-	sides, err := listNodeSides(ctx, querier, node.ID)
-	if err != nil {
-		return err
-	}
-	node.Sides = sides
-	if err := node.Validate(); err != nil {
-		return ErrResourceIntegrity
-	}
-	return nil
-}
-
-func attachAllNodeSides(ctx context.Context, querier sideQuerier, nodes []resource.AccessNode) error {
-	byNode, err := listAllNodeSides(ctx, querier)
-	if err != nil {
-		return err
-	}
-	for index := range nodes {
-		nodes[index].Sides = byNode[nodes[index].ID]
-		if err := nodes[index].Validate(); err != nil {
-			return ErrResourceIntegrity
-		}
-	}
-	return nil
-}
-
-func listNodeSides(ctx context.Context, querier sideQuerier, id resource.NodeID) ([]resource.NodeSideAssignment, error) {
-	rows, err := querier.QueryContext(ctx, `
-SELECT platform, side
-FROM node_direction_assignments
-WHERE node_id = $1
-ORDER BY platform`, int64(id))
-	if err != nil {
-		return nil, ErrResourceStorage
-	}
-	defer rows.Close()
-	return scanNodeSideRows(rows)
-}
-
-func listAllNodeSides(ctx context.Context, querier sideQuerier) (map[resource.NodeID][]resource.NodeSideAssignment, error) {
-	rows, err := querier.QueryContext(ctx, `
-SELECT node_id, platform, side
-FROM node_direction_assignments
-ORDER BY node_id, platform`)
-	if err != nil {
-		return nil, ErrResourceStorage
-	}
-	defer rows.Close()
-	byNode := make(map[resource.NodeID][]resource.NodeSideAssignment)
-	for rows.Next() {
-		var nodeID int64
-		var assignment resource.NodeSideAssignment
-		if err := rows.Scan(&nodeID, &assignment.Platform, &assignment.Side); err != nil {
-			return nil, ErrResourceStorage
-		}
-		id := resource.NodeID(nodeID)
-		byNode[id] = append(byNode[id], assignment)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, ErrResourceStorage
-	}
-	return byNode, nil
-}
-
-func scanNodeSideRows(rows *sql.Rows) ([]resource.NodeSideAssignment, error) {
-	sides := make([]resource.NodeSideAssignment, 0)
-	for rows.Next() {
-		var assignment resource.NodeSideAssignment
-		if err := rows.Scan(&assignment.Platform, &assignment.Side); err != nil {
-			return nil, ErrResourceStorage
-		}
-		sides = append(sides, assignment)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, ErrResourceStorage
-	}
-	if len(sides) == 0 {
-		return nil, nil
-	}
-	return sides, nil
 }

@@ -718,8 +718,6 @@ func testCombinationLeaseWithCoordinator(
 		Node: resource.AccessNode{
 			ID: nodeID, Name: "node", Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic,
 			EgressMode: resource.EgressModeStatic, State: resource.NodeStateAvailable, EgressRevision: 4,
-			AssignmentRevision: 2, AppID: 730,
-			Sides: []resource.NodeSideAssignment{{Platform: platform, Side: "ask"}},
 			ExitVerification: &resource.ExitVerification{
 				VerifiedRevision: 4, Address: exitAddress,
 				VerifiedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Hour),
@@ -734,7 +732,7 @@ func testCombinationLeaseWithCoordinator(
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.AcquireCombination(context.Background(), component, combinationID, resource.TargetRegionDomestic, now, 730, "ask")
+	lease, err := coordinator.AcquireCombination(context.Background(), component, combinationID, resource.TargetRegionDomestic, now)
 	if err != nil {
 		t.Fatal(err)
 	}
