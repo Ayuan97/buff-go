@@ -70,6 +70,37 @@ func TestNodeRegionAllows(t *testing.T) {
 	}
 }
 
+func TestTargetRegionForPlatform(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		platform Platform
+		want     TargetRegion
+		known    bool
+	}{
+		{platform: "steam", want: TargetRegionForeign, known: true},
+		{platform: "buff", want: TargetRegionDomestic, known: true},
+		{platform: "igxe", want: TargetRegionDomestic, known: true},
+		{platform: "custom", known: false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.platform), func(t *testing.T) {
+			got, known := TargetRegionForPlatform(tt.platform)
+			if got != tt.want || known != tt.known {
+				t.Fatalf("TargetRegionForPlatform(%q) = %q, %v; want %q, %v", tt.platform, got, known, tt.want, tt.known)
+			}
+		})
+	}
+}
+
+func TestPlatformTargetRegionsReturnsCopy(t *testing.T) {
+	regions := PlatformTargetRegions()
+	regions["steam"] = TargetRegionDomestic
+	if target, known := TargetRegionForPlatform("steam"); !known || target != TargetRegionForeign {
+		t.Fatalf("mutated exported regions changed platform rule: %q, %v", target, known)
+	}
+}
+
 func TestResourceEnumsRejectLegacyAndEmptyValues(t *testing.T) {
 	t.Parallel()
 

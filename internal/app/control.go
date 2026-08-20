@@ -162,15 +162,15 @@ type marketControl struct {
 	store *postgres.Store
 }
 
-func (c marketControl) ListQuotes(ctx context.Context, filter postgres.MarketQuoteFilter) (postgres.MarketQuoteResult, error) {
+func (c marketControl) ListQuotes(ctx context.Context, filter market.QuoteFilter) (market.QuoteResult, error) {
 	return c.store.ListMarketQuotes(ctx, filter)
 }
 
-func (c marketControl) QuoteFacets(ctx context.Context, appid int64) (postgres.MarketFacets, error) {
+func (c marketControl) QuoteFacets(ctx context.Context, appid int64) (market.QuoteFacets, error) {
 	return c.store.QuoteFacets(ctx, appid)
 }
 
-func (c marketControl) ListPriceTicks(ctx context.Context, filter postgres.PriceTickFilter) ([]postgres.PriceTick, error) {
+func (c marketControl) ListPriceTicks(ctx context.Context, filter market.PriceTickFilter) ([]market.PriceTick, error) {
 	return c.store.ListPriceTicks(ctx, filter)
 }
 

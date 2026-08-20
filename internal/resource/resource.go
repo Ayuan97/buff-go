@@ -56,6 +56,28 @@ func (platform Platform) Validate() error {
 	return nil
 }
 
+var platformTargetRegions = map[Platform]TargetRegion{
+	"steam": TargetRegionForeign,
+	"buff":  TargetRegionDomestic,
+	"igxe":  TargetRegionDomestic,
+}
+
+// TargetRegionForPlatform returns the site region required by a known platform.
+// Unknown platforms intentionally have no regional restriction.
+func TargetRegionForPlatform(platform Platform) (TargetRegion, bool) {
+	target, known := platformTargetRegions[platform]
+	return target, known
+}
+
+// PlatformTargetRegions returns a copy of the known platform site regions.
+func PlatformTargetRegions() map[Platform]TargetRegion {
+	regions := make(map[Platform]TargetRegion, len(platformTargetRegions))
+	for platform, target := range platformTargetRegions {
+		regions[platform] = target
+	}
+	return regions
+}
+
 // AccountSessionState describes the last check of the current session revision.
 type AccountSessionState string
 

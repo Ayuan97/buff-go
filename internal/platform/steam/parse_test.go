@@ -133,6 +133,17 @@ func TestSearchEmptyPage(t *testing.T) {
 	}
 }
 
+func TestSearchPageRequiresTotalCount(t *testing.T) {
+	for _, body := range []string{
+		`{"success":true,"start":0,"pagesize":10,"results":[]}`,
+		`{"success":true,"start":0,"pagesize":10,"total_count":null,"results":[]}`,
+	} {
+		if _, err := parseSearchRender([]byte(body)); err == nil {
+			t.Fatalf("body=%s: expected error", body)
+		}
+	}
+}
+
 func TestParseCNYCentsPointTwoOne(t *testing.T) {
 	got, err := parseYuanCents("¥ 0.21")
 	if err != nil || got != 21 {

@@ -114,6 +114,17 @@ WHERE schemaname = current_schema()
 	if !strings.Contains(productIndex, "(appid, product_id)") {
 		t.Fatalf("product list index = %q", productIndex)
 	}
+	var priceTickIndex string
+	if err := db.QueryRowContext(t.Context(), `
+SELECT indexdef
+FROM pg_indexes
+WHERE schemaname = current_schema()
+  AND indexname = 'market_price_ticks_platform_side_time_idx'`).Scan(&priceTickIndex); err != nil {
+		t.Fatalf("read price tick platform-side index: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(priceTickIndex), "(platform, side, collected_at desc, tick_id desc)") {
+		t.Fatalf("price tick platform-side index = %q", priceTickIndex)
+	}
 
 	if _, err := db.ExecContext(t.Context(), `
 UPDATE buffgo_storage_migrations
@@ -339,8 +350,8 @@ VALUES ($1, 1, $2, 'ask_page', '{"start":0,"count":10}', 'queued')`, summaryTarg
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO collection_tasks (target_id, enqueue_seq, enqueued_at, kind, payload, state, claimed_by, claimed_at)
-VALUES ($1, 2, $2, 'bid_batch', '{"after_id":0,"limit":10}', 'claimed', $3, $2)`,
+INSERT INTO collection_tasks (target_id, enqueue_seq, enqueued_at, kind, payload, state, claimed_by, claimed_at, claim_generation)
+VALUES ($1, 2, $2, 'bid_batch', '{"after_id":0,"limit":10}', 'claimed', $3, $2, 1)`,
 		summaryOther, createdAt, combination.ID); err != nil {
 		t.Fatalf("claimed task: %v", err)
 	}
@@ -358,11 +369,11 @@ VALUES ($1,3,$2,'summary','{}','queued')`, summaryTarget, createdAt)
 INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
 VALUES ($1,4,$2,'ask_page','{}','running')`, summaryTarget, createdAt)
 	reject("queued with claim", `
-INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at)
-VALUES ($1,5,$2,'ask_page','{}','queued',$3,$2)`, summaryTarget, createdAt, combination.ID)
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at,claim_generation)
+VALUES ($1,5,$2,'ask_page','{}','queued',$3,$2,1)`, summaryTarget, createdAt, combination.ID)
 	reject("claimed without worker", `
-INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_at)
-VALUES ($1,6,$2,'ask_page','{}','claimed',$2)`, summaryTarget, createdAt)
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_at,claim_generation)
+VALUES ($1,6,$2,'ask_page','{}','claimed',$2,1)`, summaryTarget, createdAt)
 	reject("zero enqueue seq", `
 INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
 VALUES ($1,0,$2,'ask_page','{}','queued')`, summaryTarget, createdAt)
@@ -370,8 +381,14 @@ VALUES ($1,0,$2,'ask_page','{}','queued')`, summaryTarget, createdAt)
 INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state)
 VALUES ($1,7,'infinity','ask_page','{}','queued')`, summaryTarget)
 	reject("orphan claimed_by", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at,claim_generation)
+VALUES ($1,8,$2,'ask_page','{}','claimed',9223372036854775807,$2,1)`, summaryTarget, createdAt)
+	reject("claimed without generation", `
 INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claimed_by,claimed_at)
-VALUES ($1,8,$2,'ask_page','{}','claimed',9223372036854775807,$2)`, summaryTarget, createdAt)
+VALUES ($1,9,$2,'ask_page','{}','claimed',$3,$2)`, summaryTarget, createdAt, combination.ID)
+	reject("negative claim generation", `
+INSERT INTO collection_tasks(target_id,enqueue_seq,enqueued_at,kind,payload,state,claim_generation)
+VALUES ($1,10,$2,'ask_page','{}','queued',-1)`, summaryTarget, createdAt)
 
 	digest := make([]byte, 32)
 	digest[0] = 1

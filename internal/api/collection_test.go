@@ -151,19 +151,19 @@ func (s *collectionServiceStub) ListWorkers(context.Context) ([]collection.Worke
 
 type marketServiceStub struct {
 	err    error
-	filter postgres.MarketQuoteFilter
-	ticks  postgres.PriceTickFilter
+	filter market.QuoteFilter
+	ticks  market.PriceTickFilter
 }
 
-func (s *marketServiceStub) ListQuotes(_ context.Context, filter postgres.MarketQuoteFilter) (postgres.MarketQuoteResult, error) {
+func (s *marketServiceStub) ListQuotes(_ context.Context, filter market.QuoteFilter) (market.QuoteResult, error) {
 	if s.err != nil {
-		return postgres.MarketQuoteResult{}, s.err
+		return market.QuoteResult{}, s.err
 	}
 	s.filter = filter
 	cents := market.CNYCents(21)
-	return postgres.MarketQuoteResult{
+	return market.QuoteResult{
 		Total: 1,
-		Quotes: []postgres.MarketQuote{{
+		Quotes: []market.Quote{{
 			ProductID: 1, AppID: 730, Name: "Sealed Graffiti | Tilt (Desert Amber)",
 			Media: catalog.ProductMedia{
 				IconPath: "6TMcQ7eX6E0EZl2byXi7vaVKyDk", ItemType: "Base Grade Container", NameColor: "a7ec2e",
@@ -174,20 +174,20 @@ func (s *marketServiceStub) ListQuotes(_ context.Context, filter postgres.Market
 	}, nil
 }
 
-func (s *marketServiceStub) QuoteFacets(context.Context, int64) (postgres.MarketFacets, error) {
+func (s *marketServiceStub) QuoteFacets(context.Context, int64) (market.QuoteFacets, error) {
 	if s.err != nil {
-		return postgres.MarketFacets{}, s.err
+		return market.QuoteFacets{}, s.err
 	}
-	return postgres.MarketFacets{AppIDs: []int64{730}, ItemTypes: []string{"Base Grade Container"}}, nil
+	return market.QuoteFacets{AppIDs: []int64{730}, ItemTypes: []string{"Base Grade Container"}}, nil
 }
 
-func (s *marketServiceStub) ListPriceTicks(_ context.Context, filter postgres.PriceTickFilter) ([]postgres.PriceTick, error) {
+func (s *marketServiceStub) ListPriceTicks(_ context.Context, filter market.PriceTickFilter) ([]market.PriceTick, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	s.ticks = filter
 	prev := int64(20)
-	return []postgres.PriceTick{{
+	return []market.PriceTick{{
 		TickID: 1, ProductID: 1, AppID: 730, Name: "Sealed Graffiti | Tilt (Desert Amber)",
 		Platform: "steam", Side: market.SideAsk, PrevCents: &prev, PriceCents: 21,
 		CollectedAt: time.Date(2026, 8, 15, 4, 0, 0, 0, time.UTC),
@@ -309,8 +309,8 @@ func TestQuoteFiltersReachStorage(t *testing.T) {
 		got.Keyword != "Tilt" || got.ItemType != "Base Grade Container" ||
 		len(got.ItemTypes) != 2 || got.ItemTypes[0] != "Hoodie" || got.ItemTypes[1] != "AK47u" ||
 		len(got.SteamCats) != 1 || got.SteamCats[0] != "steamcat.clothing" ||
-		!got.DropsOnly || got.DropWindow != postgres.DropWindow7d ||
-		got.Sort != postgres.QuoteSortDropPctDesc || got.Limit != 24 || got.Offset != 48 {
+		!got.DropsOnly || got.DropWindow != market.DropWindow7d ||
+		got.Sort != market.QuoteSortDropPctDesc || got.Limit != 24 || got.Offset != 48 {
 		t.Fatalf("filter = %+v", got)
 	}
 	if got.MinCents == nil || *got.MinCents != 10 || got.MaxCents == nil || *got.MaxCents != 5000 {
@@ -333,6 +333,25 @@ func TestQuoteFiltersReachStorage(t *testing.T) {
 	if payload.Total != 1 || len(payload.Quotes) != 1 || payload.Quotes[0].IconPath == "" ||
 		payload.Quotes[0].ItemType == "" || payload.Quotes[0].NameColor == "" {
 		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestMarketStorageUnavailable(t *testing.T) {
+	for _, path := range []string{
+		"/api/quotes",
+		"/api/quote-facets",
+		"/api/price-ticks",
+	} {
+		t.Run(path, func(t *testing.T) {
+			handler := NewHandlerForAuthority(nil, "", ControlServices{Market: &marketServiceStub{err: market.ErrStorage}})
+			request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)
+			request.Host = "localhost"
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "market_storage_unavailable") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

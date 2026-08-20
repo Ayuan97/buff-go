@@ -40,15 +40,49 @@ func (s *Store) CreateCombination(ctx context.Context, accountID resource.Accoun
 		return resource.AccountNodeCombination{}, err
 	}
 
-	combination, err := scanCombination(s.db.QueryRowContext(ctx, `
-INSERT INTO account_node_combinations (platform, account_id, node_id)
-SELECT account.platform, account.account_id, node.node_id
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return resource.AccountNodeCombination{}, ErrResourceStorage
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var platform resource.Platform
+	var region resource.NodeRegion
+	err = tx.QueryRowContext(ctx, `
+SELECT account.platform, node.region
 FROM platform_accounts account
 JOIN access_nodes node ON node.node_id = $2
 WHERE account.account_id = $1
+FOR UPDATE OF account, node`, int64(accountID), int64(nodeID)).Scan(&platform, &region)
+	if errors.Is(err, sql.ErrNoRows) {
+		var accountExists, nodeExists bool
+		if err := tx.QueryRowContext(ctx, `
+SELECT
+    EXISTS (SELECT 1 FROM platform_accounts WHERE account_id = $1),
+    EXISTS (SELECT 1 FROM access_nodes WHERE node_id = $2)`, int64(accountID), int64(nodeID)).Scan(&accountExists, &nodeExists); err != nil {
+			return resource.AccountNodeCombination{}, ErrResourceStorage
+		}
+		if !accountExists || !nodeExists {
+			return resource.AccountNodeCombination{}, ErrResourceNotFound
+		}
+		return resource.AccountNodeCombination{}, ErrCombinationIncompatible
+	}
+	if err != nil {
+		return resource.AccountNodeCombination{}, ErrResourceStorage
+	}
+	if target, known := resource.TargetRegionForPlatform(platform); known && !region.Allows(target) {
+		return resource.AccountNodeCombination{}, ErrCombinationIncompatible
+	}
+
+	combination, err := scanCombination(tx.QueryRowContext(ctx, `
+INSERT INTO account_node_combinations (platform, account_id, node_id)
+VALUES ($1, $2, $3)
 ON CONFLICT (account_id, node_id) DO NOTHING
-RETURNING `+combinationReadColumns, int64(accountID), int64(nodeID)))
+RETURNING `+combinationReadColumns, string(platform), int64(accountID), int64(nodeID)))
 	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return resource.AccountNodeCombination{}, ErrResourceStorage
+		}
 		return combination, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -58,11 +92,14 @@ RETURNING `+combinationReadColumns, int64(accountID), int64(nodeID)))
 		return resource.AccountNodeCombination{}, mapCombinationWriteError(err)
 	}
 
-	combination, err = scanCombination(s.db.QueryRowContext(ctx, `
+	combination, err = scanCombination(tx.QueryRowContext(ctx, `
 SELECT `+combinationReadColumns+`
 FROM account_node_combinations
 WHERE account_id = $1 AND node_id = $2`, int64(accountID), int64(nodeID)))
 	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return resource.AccountNodeCombination{}, ErrResourceStorage
+		}
 		return combination, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -72,16 +109,6 @@ WHERE account_id = $1 AND node_id = $2`, int64(accountID), int64(nodeID)))
 		return resource.AccountNodeCombination{}, ErrResourceStorage
 	}
 
-	var accountExists, nodeExists bool
-	if err := s.db.QueryRowContext(ctx, `
-SELECT
-    EXISTS (SELECT 1 FROM platform_accounts WHERE account_id = $1),
-    EXISTS (SELECT 1 FROM access_nodes WHERE node_id = $2)`, int64(accountID), int64(nodeID)).Scan(&accountExists, &nodeExists); err != nil {
-		return resource.AccountNodeCombination{}, ErrResourceStorage
-	}
-	if !accountExists || !nodeExists {
-		return resource.AccountNodeCombination{}, ErrResourceNotFound
-	}
 	return resource.AccountNodeCombination{}, ErrCombinationIncompatible
 }
 
@@ -145,40 +172,47 @@ func (s *Store) CombinationResources(ctx context.Context, id resource.Combinatio
 		return resource.CombinationResources{}, false, err
 	}
 
+	resources, err := scanCombinationResources(s.db.QueryRowContext(ctx, `
+SELECT `+combinationResourceReadColumns+`
+FROM account_node_combinations c
+JOIN platform_accounts a ON a.account_id = c.account_id AND a.platform = c.platform
+JOIN access_nodes n ON n.node_id = c.node_id
+WHERE c.combination_id = $1`, int64(id)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.CombinationResources{}, false, nil
+	}
+	if err != nil {
+		return resource.CombinationResources{}, false, mapResourceReadError(err)
+	}
+	return resources, true, nil
+}
+
+func scanCombinationResources(row rowScanner) (resource.CombinationResources, error) {
 	var combinationData combinationScanData
 	var accountData accountScanData
 	var nodeData nodeScanData
 	destinations := append(combinationData.destinations(), accountData.destinations()...)
 	destinations = append(destinations, nodeData.destinations()...)
-	err := s.db.QueryRowContext(ctx, `
-SELECT `+combinationResourceReadColumns+`
-FROM account_node_combinations c
-JOIN platform_accounts a ON a.account_id = c.account_id AND a.platform = c.platform
-JOIN access_nodes n ON n.node_id = c.node_id
-WHERE c.combination_id = $1`, int64(id)).Scan(destinations...)
-	if errors.Is(err, sql.ErrNoRows) {
-		return resource.CombinationResources{}, false, nil
-	}
-	if err != nil {
-		return resource.CombinationResources{}, false, ErrResourceStorage
+	if err := row.Scan(destinations...); err != nil {
+		return resource.CombinationResources{}, err
 	}
 	combination, err := combinationData.result()
 	if err != nil {
-		return resource.CombinationResources{}, false, ErrResourceIntegrity
+		return resource.CombinationResources{}, ErrResourceIntegrity
 	}
 	account, err := accountData.result()
 	if err != nil {
-		return resource.CombinationResources{}, false, ErrResourceIntegrity
+		return resource.CombinationResources{}, ErrResourceIntegrity
 	}
 	node, err := nodeData.result()
 	if err != nil {
-		return resource.CombinationResources{}, false, ErrResourceIntegrity
+		return resource.CombinationResources{}, ErrResourceIntegrity
 	}
 	resources := resource.CombinationResources{Combination: combination, Account: account, Node: node}
 	if err := resources.Validate(); err != nil {
-		return resource.CombinationResources{}, false, ErrResourceIntegrity
+		return resource.CombinationResources{}, ErrResourceIntegrity
 	}
-	return resources, true, nil
+	return resources, nil
 }
 
 // DeleteCombination removes one explicit pairing.

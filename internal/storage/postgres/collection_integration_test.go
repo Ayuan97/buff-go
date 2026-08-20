@@ -32,9 +32,99 @@ func TestCollectionStoreIntegration(t *testing.T) {
 	t.Run("steam facets clears queue", func(t *testing.T) { testCollectionSteamFacets(t, dsn) })
 	t.Run("stale claims return to queue", func(t *testing.T) { testCollectionStaleClaims(t, dsn) })
 	t.Run("one claim per combination", func(t *testing.T) { testCollectionOneClaimPerCombination(t, dsn) })
+	t.Run("claim generation fences stale worker", func(t *testing.T) { testCollectionClaimGeneration(t, dsn) })
+	t.Run("claim filters eligible targets", func(t *testing.T) { testCollectionEligibleTargets(t, dsn) })
+	t.Run("planner refill snapshot is fenced", func(t *testing.T) { testCollectionRefillFence(t, dsn) })
+	t.Run("claim respects recheck", func(t *testing.T) { testCollectionClaimRespectsRecheck(t, dsn) })
+	t.Run("claim rechecks target state", func(t *testing.T) { testCollectionClaimRechecksTargetState(t, dsn) })
 	t.Run("resident instance lock", func(t *testing.T) { testCollectionInstanceLock(t, dsn) })
 	t.Run("scope concurrency", func(t *testing.T) { testCollectionConcurrency(t, dsn) })
 	t.Run("integrity and errors", func(t *testing.T) { testCollectionIntegrityErrors(t, dsn) })
+}
+
+func testCollectionClaimRechecksTargetState(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	target, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = transition.Rollback() }()
+	if _, err := transition.ExecContext(ctx, `
+UPDATE collection_targets
+SET actual_state = 'waiting', reason_code = 'transient_failure', recovery_mode = 'automatic',
+    next_check_at = date_trunc('microseconds', clock_timestamp()) + INTERVAL '1 hour',
+    revision = revision + 1,
+    changed_at = GREATEST(changed_at + INTERVAL '1 microsecond', date_trunc('microseconds', clock_timestamp()))
+WHERE target_id = $1`, int64(target.ID())); err != nil {
+		t.Fatal(err)
+	}
+
+	type claimResult struct {
+		found bool
+		err   error
+	}
+	result := make(chan claimResult, 1)
+	go func() {
+		_, _, found, err := store.ClaimTask(ctx, combination.ID, target.Platform())
+		result <- claimResult{found: found, err: err}
+	}()
+	waiting := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_stat_activity
+    WHERE datname = current_database()
+      AND wait_event_type = 'Lock'
+      AND query LIKE '%collection_targets%'
+)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !waiting {
+		t.Fatal("claim did not wait for the target state lock")
+	}
+	if err := transition.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	got := <-result
+	if got.err != nil || got.found {
+		t.Fatalf("claim after target wait found=%v err=%v", got.found, got.err)
+	}
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 1 {
+		t.Fatalf("queue depth=%d err=%v", depth, err)
+	}
+}
+
+func testCollectionClaimRespectsRecheck(t *testing.T, dsn string) {
+	store, _ := migratedStore(t, dsn)
+	ctx := t.Context()
+	target, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	recheckAt := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
+	target, err := store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{
+		State: collection.ActualWaiting, Reason: collection.TargetReasonTransientFailure, RecheckAt: &recheckAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := store.ClaimTask(ctx, combination.ID, target.Platform()); err != nil || found {
+		t.Fatalf("waiting target claim found=%v err=%v", found, err)
+	}
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 1 {
+		t.Fatalf("waiting target queue depth=%d err=%v", depth, err)
+	}
 }
 
 // 删除目标只是撤销手段：写过页的目标一律拒绝，采集历史不因为想让按钮可用而被删。
@@ -87,7 +177,7 @@ func testCollectionTargetDeletion(t *testing.T, dsn string) {
 	target, task, _ := queueCommitFixture(t, store, "buff", 730, market.SideAsk)
 	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 		CollectedAt: collectedAt,
 		Attempts: []AttemptWrite{{
 			ExactName:   "AK-47 | Redline",
@@ -125,8 +215,8 @@ func testCollectionSortOrder(t *testing.T, dsn string) {
 	}
 	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
-		CollectedAt: collectedAt,
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: collectedAt, AskTotal: 99,
 		Attempts: []AttemptWrite{{
 			ExactName:   "AK-47 | Redline",
 			Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt},
@@ -164,7 +254,7 @@ func testCollectionSortOrder(t *testing.T, dsn string) {
 		t.Fatalf("queue after sort depth=%d err=%v", depth, err)
 	}
 	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch,
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: oldSwitch,
 		CollectedAt: collectedAt.Add(time.Second),
 		Attempts: []AttemptWrite{{
 			ExactName:   "M4A1-S | Hot Rod",
@@ -345,7 +435,7 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 
 	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 	page, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 		CollectedAt: collectedAt,
 		Attempts: []AttemptWrite{{
 			ExactName:   "AK-47 | Redline",
@@ -360,7 +450,7 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 		t.Fatalf("target after commit = %+v found=%v err=%v", target, found, err)
 	}
 	assertWorkerSeesPageItems(t, store, combination.ID, target.ID(), 0)
-	if err := store.CompleteTask(ctx, task.ID(), combination.ID); err != nil {
+	if err := store.CompleteTask(ctx, task.ID(), combination.ID, task.ClaimGeneration()); err != nil {
 		t.Fatal(err)
 	}
 	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 0 {
@@ -377,7 +467,7 @@ func testCollectionLifecycle(t *testing.T, dsn string) {
 		t.Fatalf("disabled queue depth=%d err=%v", depth, err)
 	}
 	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt.Add(time.Second),
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt.Add(time.Second),
 	}); !errors.Is(err, ErrCollectionFence) {
 		t.Fatalf("disabled page error = %v", err)
 	}
@@ -436,6 +526,9 @@ UPDATE collection_tasks SET claimed_at = date_trunc('microseconds', clock_timest
 WHERE task_id = $1`, int64(askTask.ID())); err != nil {
 		t.Fatal(err)
 	}
+	if released, err := store.ReleaseStaleClaimsExcept(ctx, time.Minute, []collection.TaskID{askTask.ID()}); err != nil || released != 0 {
+		t.Fatalf("active stale claim released=%d err=%v", released, err)
+	}
 	released, err = store.ReleaseStaleClaims(ctx, time.Minute)
 	if err != nil || released != 1 {
 		t.Fatalf("stale claim released=%d err=%v", released, err)
@@ -447,11 +540,128 @@ WHERE task_id = $1`, int64(askTask.ID())); err != nil {
 	if err != nil || !ok || reclaimed.ID() != askTask.ID() || reclaimed.State() != collection.TaskClaimed {
 		t.Fatalf("reclaim after release = %+v ok=%v err=%v", reclaimed, ok, err)
 	}
-	if err := store.RequeueTask(ctx, reclaimed.ID(), askCombo.ID); err != nil {
+	if err := store.RequeueTask(ctx, reclaimed.ID(), askCombo.ID, reclaimed.ClaimGeneration()); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, ok, err := store.ClaimTask(ctx, askCombo.ID, "steam"); err != nil || !ok {
 		t.Fatalf("claim after requeue ok=%v err=%v", ok, err)
+	}
+}
+
+func testCollectionClaimGeneration(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	defer func() { _ = db.Close() }()
+
+	target, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	first, _, found, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !found || first.ClaimGeneration() != 1 {
+		t.Fatalf("first claim=%+v found=%v err=%v", first, found, err)
+	}
+	firstClaimedAt, _ := first.ClaimedAt()
+	if released, err := store.ReleaseAllClaims(ctx); err != nil || released != 1 {
+		t.Fatalf("release claims=%d err=%v", released, err)
+	}
+	second, _, found, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !found || second.ID() != first.ID() || second.ClaimGeneration() != 2 {
+		t.Fatalf("second claim=%+v found=%v err=%v", second, found, err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE collection_tasks SET claimed_at = $2 WHERE task_id = $1`, int64(second.ID()), firstClaimedAt); err != nil {
+		t.Fatal(err)
+	}
+	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: first.ID(), CombinationID: combination.ID,
+		ClaimGeneration: first.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(), CollectedAt: collectedAt,
+	}); !errors.Is(err, ErrCollectionFence) {
+		t.Fatalf("stale commit error=%v", err)
+	}
+	if err := store.CompleteTask(ctx, first.ID(), combination.ID, first.ClaimGeneration()); !errors.Is(err, ErrCollectionConflict) {
+		t.Fatalf("stale complete error=%v", err)
+	}
+	if err := store.RequeueTask(ctx, first.ID(), combination.ID, first.ClaimGeneration()); err != nil {
+		t.Fatalf("stale requeue error=%v", err)
+	}
+	var state string
+	var generation int64
+	if err := db.QueryRowContext(ctx, `SELECT state, claim_generation FROM collection_tasks WHERE task_id = $1`, int64(second.ID())).Scan(&state, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if state != "claimed" || generation != second.ClaimGeneration() {
+		t.Fatalf("successor claim state=%s generation=%d", state, generation)
+	}
+	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: second.ID(), CombinationID: combination.ID,
+		ClaimGeneration: second.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(), CollectedAt: collectedAt,
+	}); err != nil || !applied {
+		t.Fatalf("successor commit applied=%v err=%v", applied, err)
+	}
+	if err := store.CompleteTask(ctx, second.ID(), combination.ID, second.ClaimGeneration()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testCollectionEligibleTargets(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	defer func() { _ = db.Close() }()
+
+	ask, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	bid, err := store.CreateSummaryTarget(ctx, "steam", 730, market.SideBid, collection.DesiredEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []collection.Target{ask, bid} {
+		if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, _, found, err := store.ClaimTaskForTargets(ctx, combination.ID, "steam", nil)
+	if err != nil || !found {
+		t.Fatalf("nil eligible claim=%+v found=%v err=%v", first, found, err)
+	}
+	if err := store.RequeueTask(ctx, first.ID(), combination.ID, first.ClaimGeneration()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := store.ClaimTaskForTargets(ctx, combination.ID, "steam", []collection.TargetID{}); err != nil || found {
+		t.Fatalf("empty eligible found=%v err=%v", found, err)
+	}
+	filtered, claimedTarget, found, err := store.ClaimTaskForTargets(ctx, combination.ID, "steam", []collection.TargetID{bid.ID()})
+	if err != nil || !found || claimedTarget.ID() != bid.ID() || filtered.TargetID() != bid.ID() {
+		t.Fatalf("filtered claim=%+v target=%+v found=%v err=%v", filtered, claimedTarget, found, err)
+	}
+}
+
+func testCollectionRefillFence(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	defer func() { _ = db.Close() }()
+
+	target, task, combination := queueCommitFixture(t, store, "steam", 730, market.SideAsk)
+	stale := target
+	collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+	if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: combination.ID,
+		ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: collectedAt, AskTotal: 200,
+	}); err != nil || !applied {
+		t.Fatalf("worker commit applied=%v err=%v", applied, err)
+	}
+	if err := store.CompleteTask(ctx, task.ID(), combination.ID, task.ClaimGeneration()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueTasksFenced(ctx, stale, mustAskPageSpecs(t, 1), mustCollectionCursor(t, []byte("stale")), 0); !errors.Is(err, ErrCollectionConflict) {
+		t.Fatalf("stale planner error=%v", err)
+	}
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 0 {
+		t.Fatalf("stale planner depth=%d err=%v", depth, err)
+	}
+	current, found, err := store.Target(ctx, target.ID())
+	if err != nil || !found || current.WriteSeq() != 1 || current.RefillTotal() != 200 {
+		t.Fatalf("current target=%+v found=%v err=%v", current, found, err)
 	}
 }
 
@@ -482,7 +692,7 @@ func testCollectionOneClaimPerCombination(t *testing.T, dsn string) {
 	if err != nil || !ok || reclaimed.ID() != first.ID() {
 		t.Fatalf("reclaim after release all = %+v ok=%v err=%v", reclaimed, ok, err)
 	}
-	if err := store.RequeueTask(ctx, reclaimed.ID(), combination.ID); err != nil {
+	if err := store.RequeueTask(ctx, reclaimed.ID(), combination.ID, reclaimed.ClaimGeneration()); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DeleteCombination(ctx, combination.ID); err != nil {
@@ -574,7 +784,7 @@ func testCollectionConcurrency(t *testing.T, dsn string) {
 	if _, _, ok, err := store.ClaimTask(ctx, combination.ID, "buff"); err != nil || ok {
 		t.Fatalf("empty queue claim ok=%v err=%v", ok, err)
 	}
-	if err := store.RequeueTask(ctx, first.ID(), combination.ID); err != nil {
+	if err := store.RequeueTask(ctx, first.ID(), combination.ID, first.ClaimGeneration()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -781,6 +991,15 @@ func queueCommitFixture(t *testing.T, store *Store, platform collection.Platform
 	return claimed, task, combination
 }
 
+func claimedCombination(t *testing.T, task collection.Task) resource.CombinationID {
+	t.Helper()
+	combinationID, ok := task.ClaimedBy()
+	if !ok {
+		t.Fatal("fixture task is not claimed")
+	}
+	return combinationID
+}
+
 func queueReadyFixture(t *testing.T, store *Store, platform collection.Platform, appID int64, side market.Side) (collection.Target, resource.AccountNodeCombination) {
 	t.Helper()
 	target, err := store.CreateSummaryTarget(t.Context(), platform, appID, side, collection.DesiredEnabled)
@@ -805,12 +1024,8 @@ func mustQueueCombination(t *testing.T, store *Store, platform collection.Platfo
 	if err != nil {
 		t.Fatal(err)
 	}
-	region := resource.NodeRegionForeign
-	if platform == collection.PlatformSteam {
-		region = resource.NodeRegionHongKong
-	}
 	node, err := store.CreateNode(ctx, "qn-"+suffix, resource.NodeConnectionInput{
-		Kind: resource.NodeKindDirect, Region: region, EgressMode: resource.EgressModeStatic,
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeStatic,
 	})
 	if err != nil {
 		t.Fatal(err)

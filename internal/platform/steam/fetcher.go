@@ -21,7 +21,7 @@ import (
 
 const (
 	defaultPageSize = 10
-	defaultBidBatch = 10
+	defaultBidBatch = collection.BidBatchSize
 	maxBodyBytes    = 1 << 20
 	searchPath      = "/market/search/render/"
 	orderbookPath   = "/market/orderbook"
@@ -79,8 +79,8 @@ func NewFetcher(opt Options) (*Fetcher, error) {
 	if bidBatch == 0 {
 		bidBatch = defaultBidBatch
 	}
-	if bidBatch < 1 {
-		return nil, fmt.Errorf("bid batch must be positive")
+	if bidBatch != collection.BidBatchSize {
+		return nil, fmt.Errorf("bid batch must contain one product")
 	}
 	baseURL := strings.TrimRight(opt.BaseURL, "/")
 	if baseURL == "" {
@@ -115,6 +115,12 @@ func (f *Fetcher) FetchPage(ctx context.Context, request collection.PageFetch) (
 	}
 	if request.AppID < 1 {
 		return collection.FetchedPage{}, fmt.Errorf("appid must be positive")
+	}
+	if request.AdmitRequest == nil {
+		return collection.FetchedPage{}, fmt.Errorf("request admitter is required")
+	}
+	if request.RequestStarted == nil {
+		return collection.FetchedPage{}, fmt.Errorf("request start recorder is required")
 	}
 	cookie, proxy, err := f.opener.Open(ctx, request.Lease)
 	if err != nil {
@@ -155,7 +161,10 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	query.Set("norender", "1")
 	applySearchPriceRange(query, request.PriceRange)
 	applySearchSteamFacets(query, request.AppID, request.SteamFacets)
-	body, err := f.get(ctx, client, cookie, request.Lease, searchPath+"?"+query.Encode(), false)
+	body, err := f.get(
+		ctx, client, cookie, request.Lease, request.AdmitRequest, request.RequestStarted,
+		searchPath+"?"+query.Encode(), false,
+	)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
@@ -165,11 +174,15 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	}
 	for _, item := range parsed.Results {
 		if isDollarPrice(item.SellPriceText) || isDollarPrice(item.SalePriceText) {
-			_ = f.recordSession(ctx, request.Lease, false)
+			if err := f.recordSession(ctx, request.Lease, false); err != nil {
+				return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
+			}
 			return collection.FetchedPage{}, collection.ErrFetchSessionInvalid
 		}
 	}
-	_ = f.recordSession(ctx, request.Lease, true)
+	if err := f.recordSession(ctx, request.Lease, true); err != nil {
+		return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
+	}
 	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(parsed.Results))
 	for _, item := range parsed.Results {
@@ -197,21 +210,28 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(products))
 	for _, product := range products {
-		body, err := f.get(ctx, client, cookie, request.Lease, orderbookQuery(product.AppID, product.Name), false)
+		body, err := f.get(
+			ctx, client, cookie, request.Lease, request.AdmitRequest, request.RequestStarted,
+			orderbookQuery(product.AppID, product.Name), false,
+		)
 		if err != nil {
 			return collection.FetchedPage{}, err
 		}
 		attempt, err := orderbookAttempt(product, market.SideBid, body, collectedAt)
 		if err != nil {
 			if errors.Is(err, errForeignCurrency) {
-				_ = f.recordSession(ctx, request.Lease, false)
+				if recordErr := f.recordSession(ctx, request.Lease, false); recordErr != nil {
+					return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", recordErr)
+				}
 				return collection.FetchedPage{}, collection.ErrFetchSessionInvalid
 			}
 			return collection.FetchedPage{}, err
 		}
 		attempts = append(attempts, attempt)
 	}
-	_ = f.recordSession(ctx, request.Lease, true)
+	if err := f.recordSession(ctx, request.Lease, true); err != nil {
+		return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
+	}
 	return collection.FetchedPage{Attempts: attempts}, nil
 }
 
@@ -365,13 +385,27 @@ func setBrowserHeaders(req *http.Request) {
 	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
 }
 
-func (f *Fetcher) get(ctx context.Context, client *http.Client, cookie string, lease resource.Lease, pathQuery string, recordValid bool) ([]byte, error) {
+func (f *Fetcher) get(
+	ctx context.Context,
+	client *http.Client,
+	cookie string,
+	lease resource.Lease,
+	admit func(context.Context) (ratelimit.Admission, error),
+	requestStarted func(),
+	pathQuery string,
+	recordValid bool,
+) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+pathQuery, nil)
 	if err != nil {
 		return nil, err
 	}
 	setBrowserHeaders(req)
 	req.Header.Set("Cookie", cookie)
+	admission, err := admit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	requestStarted()
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -380,28 +414,32 @@ func (f *Fetcher) get(ctx context.Context, client *http.Client, cookie string, l
 		return nil, fmt.Errorf("%w: %v", collection.ErrFetchNetwork, err)
 	}
 	defer resp.Body.Close()
+	if loc := resp.Header.Get("Location"); resp.StatusCode >= 300 && resp.StatusCode < 400 && looksLikeLogin(loc) {
+		if err := f.recordSession(ctx, lease, false); err != nil {
+			return nil, fmt.Errorf("record steam session: %w", err)
+		}
+		return nil, collection.ErrFetchSessionInvalid
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, &collection.RateLimitSignal{
+			Admission: admission,
+			Scopes:    []ratelimit.Scope{ratelimit.ScopeAccountIP},
+			Reason:    ratelimit.ReasonHTTP429,
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("steam http %d", resp.StatusCode)
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", collection.ErrFetchNetwork, err)
 	}
-	if loc := resp.Header.Get("Location"); resp.StatusCode >= 300 && resp.StatusCode < 400 && looksLikeLogin(loc) {
-		_ = f.recordSession(ctx, lease, false)
-		return nil, collection.ErrFetchSessionInvalid
-	}
-	switch resp.StatusCode {
-	case http.StatusOK:
-		if recordValid {
-			_ = f.recordSession(ctx, lease, true)
+	if recordValid {
+		if err := f.recordSession(ctx, lease, true); err != nil {
+			return nil, fmt.Errorf("record steam session: %w", err)
 		}
-		return body, nil
-	case http.StatusTooManyRequests:
-		return nil, &collection.RateLimitSignal{
-			Scopes: []ratelimit.Scope{ratelimit.ScopeInterface},
-			Reason: ratelimit.ReasonHTTP429,
-		}
-	default:
-		return nil, fmt.Errorf("steam http %d", resp.StatusCode)
 	}
+	return body, nil
 }
 
 func (f *Fetcher) recordSession(ctx context.Context, lease resource.Lease, valid bool) error {

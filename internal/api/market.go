@@ -7,9 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"buff-go/internal/collection"
 	"buff-go/internal/market"
-	"buff-go/internal/storage/postgres"
 )
 
 type priceTickResponse struct {
@@ -53,7 +51,7 @@ func (h *Handler) servePriceTicks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_side")
 		return
 	}
-	filter := postgres.PriceTickFilter{
+	filter := market.PriceTickFilter{
 		ProductID: productID,
 		Platform:  strings.TrimSpace(query.Get("platform")),
 		Side:      side,
@@ -61,8 +59,8 @@ func (h *Handler) servePriceTicks(w http.ResponseWriter, r *http.Request) {
 	}
 	ticks, err := h.market.ListPriceTicks(r.Context(), filter)
 	if err != nil {
-		if errors.Is(err, collection.ErrStorage) {
-			writeError(w, http.StatusServiceUnavailable, "collection_storage_unavailable")
+		if errors.Is(err, market.ErrStorage) {
+			writeError(w, http.StatusServiceUnavailable, "market_storage_unavailable")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "invalid_price_ticks")

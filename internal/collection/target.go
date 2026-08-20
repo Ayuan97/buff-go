@@ -430,6 +430,9 @@ func (target Target) Enable(at time.Time) (Target, error) {
 // list offset, so switch_version advances and the queue must be cleared;
 // already stored market facts and write_seq are kept.
 func (target Target) SetSortOrder(order SortOrder, at time.Time) (Target, error) {
+	if target.side != market.SideAsk {
+		return Target{}, fmt.Errorf("%w: sort order only applies to ask targets", ErrInvalidInput)
+	}
 	if err := target.validateChangeTime(at); err != nil {
 		return Target{}, err
 	}
@@ -469,6 +472,9 @@ func (target Target) SetSortOrder(order SortOrder, at time.Time) (Target, error)
 // SetPriceRange 把出售搜索的价格区间交给 Steam。游标是列表偏移量，
 // 换区间必须推进 switch_version 并清空该方向队列。
 func (target Target) SetPriceRange(bounds PriceRange, at time.Time) (Target, error) {
+	if target.side != market.SideAsk {
+		return Target{}, fmt.Errorf("%w: price range only applies to ask targets", ErrInvalidInput)
+	}
 	if err := target.validateChangeTime(at); err != nil {
 		return Target{}, err
 	}
@@ -506,6 +512,9 @@ func (target Target) SetPriceRange(bounds PriceRange, at time.Time) (Target, err
 // SetSteamFacets 把 Rust 分类多选交给 Steam 搜索。游标是列表偏移量，
 // 换勾选必须推进 switch_version 并清空该方向队列。
 func (target Target) SetSteamFacets(facets SteamFacets, at time.Time) (Target, error) {
+	if target.side != market.SideAsk {
+		return Target{}, fmt.Errorf("%w: steam facets only apply to ask targets", ErrInvalidInput)
+	}
 	if err := target.validateChangeTime(at); err != nil {
 		return Target{}, err
 	}

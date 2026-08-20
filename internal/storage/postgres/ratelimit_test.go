@@ -20,13 +20,24 @@ func TestHasRequiredRateLimitPolicies(t *testing.T) {
 	if hasRequiredRateLimitPolicies([]ratelimit.Policy{platform}) {
 		t.Fatal("platform budget without interface profile was accepted")
 	}
-	if !hasRequiredRateLimitPolicies([]ratelimit.Policy{platform, profile}) {
-		t.Fatal("cooldown-only interface profile should satisfy exact profile evidence")
+	if hasRequiredRateLimitPolicies([]ratelimit.Policy{platform, profile}) {
+		t.Fatal("platform budget and interface profile were accepted without an exact account-IP rate")
 	}
 	platform.Spec.Kind = ratelimit.KindCooldownOnly
 	platform.Spec.MinInterval = 0
 	if hasRequiredRateLimitPolicies([]ratelimit.Policy{platform, profile}) {
 		t.Fatal("cooldown-only platform rule was treated as total rate budget")
+	}
+	accountIP := testRateLimitPolicy(3, ratelimit.PolicySpec{
+		Platform: "steam", RuleKey: "summary_account_ip", Scope: ratelimit.ScopeAccountIP,
+		EndpointClass: "summary", Kind: ratelimit.KindMinInterval, MinInterval: time.Second,
+	})
+	if !hasRequiredRateLimitPolicies([]ratelimit.Policy{accountIP}) {
+		t.Fatal("endpoint account-IP rate should provide both pacing and exact endpoint evidence")
+	}
+	accountIP.Spec.EndpointClass = ""
+	if hasRequiredRateLimitPolicies([]ratelimit.Policy{accountIP}) {
+		t.Fatal("generic account-IP rate without endpoint evidence was accepted")
 	}
 }
 

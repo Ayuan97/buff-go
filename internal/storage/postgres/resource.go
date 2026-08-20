@@ -355,8 +355,14 @@ func (s *Store) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, e
 	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
 		return resource.AccessNode{}, err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var name string
-	if err := s.db.QueryRowContext(ctx, `SELECT name FROM access_nodes WHERE node_id = $1`, int64(id)).Scan(&name); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT name FROM access_nodes WHERE node_id = $1 FOR UPDATE`, int64(id)).Scan(&name); errors.Is(err, sql.ErrNoRows) {
 		return resource.AccessNode{}, ErrResourceNotFound
 	} else if err != nil {
 		return resource.AccessNode{}, ErrResourceStorage
@@ -366,7 +372,28 @@ func (s *Store) ReplaceNodeConnection(ctx context.Context, id resource.NodeID, e
 		return resource.AccessNode{}, err
 	}
 	proxyPlaintext := nodeProxyPlaintext(prepared)
-	node, err := scanNode(s.db.QueryRowContext(ctx, `
+	platformRows, err := tx.QueryContext(ctx, `
+SELECT DISTINCT platform
+FROM account_node_combinations
+WHERE node_id = $1`, int64(id))
+	if err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+	defer platformRows.Close()
+	for platformRows.Next() {
+		var platform resource.Platform
+		if err := platformRows.Scan(&platform); err != nil {
+			return resource.AccessNode{}, ErrResourceStorage
+		}
+		if target, known := resource.TargetRegionForPlatform(platform); known && !prepared.Region.Allows(target) {
+			return resource.AccessNode{}, ErrCombinationIncompatible
+		}
+	}
+	if err := platformRows.Err(); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
+	}
+
+	node, err := scanNode(tx.QueryRowContext(ctx, `
 UPDATE access_nodes
 SET kind = $3, region = $4, egress_mode = $5, proxy_plaintext = $6,
     sticky_session_valid_until = $7, state = 'validating',
@@ -382,6 +409,9 @@ RETURNING `+nodeReadColumns,
 	}
 	if err != nil {
 		return resource.AccessNode{}, fmt.Errorf("replace node connection: %w", ErrResourceStorage)
+	}
+	if err := tx.Commit(); err != nil {
+		return resource.AccessNode{}, ErrResourceStorage
 	}
 	return node, nil
 }

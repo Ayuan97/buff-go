@@ -95,7 +95,7 @@ function save() {
       </div>
       <div class="modal-body">
         <p class="note">
-          这里只改显示和勾选。交给 Steam 的仍是原来的英文参数，不影响搜索。
+          勾选内容会作为 Steam 搜索参数提交；页面显示中文，实际发送英文参数。
         </p>
         <p v-if="target.side === 'bid'" class="note warn">求购没有这些搜索参数，存了也不会打出去。</p>
         <p class="note warn">保存后该方向未完成任务会丢掉，补货从头开始。已经存下来的行情不会丢。</p>

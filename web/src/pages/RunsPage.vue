@@ -24,14 +24,10 @@ const busy = computed(() => (workers.value ?? []).filter((w) => !w.idle))
 const idle = computed(() => (workers.value ?? []).filter((w) => w.idle))
 
 function pageItems(worker: Worker): WorkerItem[] {
-  if (worker.claim?.items.length) return worker.claim.items
   return worker.last_page?.items ?? []
 }
 
 function pageMeta(worker: Worker): { appid: number; side: 'bid' | 'ask'; platform: string; at?: string } | null {
-  if (worker.claim) {
-    return { appid: worker.claim.appid, side: worker.claim.side, platform: worker.claim.platform }
-  }
   if (worker.last_page) {
     return {
       appid: worker.last_page.appid,

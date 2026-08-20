@@ -2,6 +2,7 @@ package collection
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -21,32 +22,38 @@ func scheduleNow() time.Time {
 }
 
 type fakeScheduleStore struct {
-	mu               sync.Mutex
-	targets          map[TargetID]Target
-	tasks            map[TaskID]Task
-	pages            map[TargetID]Page
-	combinations     []resource.AccountNodeCombination
-	resources        map[resource.CombinationID]resource.CombinationResources
-	products         []catalog.SteamProduct
-	nextTargetID     int64
-	nextTaskID       int64
-	enqueueSeq       map[TargetID]int64
-	failListErr      error
-	failTargetsErr   error
-	failTargetsCalls int
-	targetsCalls     int
-	failReleaseErr   error
-	failClearErr     error
-	conflictTargets  map[TargetID]bool
+	mu                 sync.Mutex
+	targets            map[TargetID]Target
+	tasks              map[TaskID]Task
+	pages              map[TargetID]Page
+	combinations       []resource.AccountNodeCombination
+	resources          map[resource.CombinationID]resource.CombinationResources
+	resourceListCalls  map[Platform]int
+	products           []catalog.SteamProduct
+	nextTargetID       int64
+	nextTaskID         int64
+	enqueueSeq         map[TargetID]int64
+	failListErr        error
+	failTargetsErr     error
+	failTargetsCalls   int
+	targetsCalls       int
+	failReleaseErr     error
+	failClearErr       error
+	failTransitionErr  error
+	failRequeueErr     error
+	requeueHasDeadline bool
+	requeueContextErr  error
+	conflictTargets    map[TargetID]bool
 }
 
 func newFakeScheduleStore() *fakeScheduleStore {
 	return &fakeScheduleStore{
-		targets:    make(map[TargetID]Target),
-		tasks:      make(map[TaskID]Task),
-		pages:      make(map[TargetID]Page),
-		resources:  make(map[resource.CombinationID]resource.CombinationResources),
-		enqueueSeq: make(map[TargetID]int64),
+		targets:           make(map[TargetID]Target),
+		tasks:             make(map[TaskID]Task),
+		pages:             make(map[TargetID]Page),
+		resources:         make(map[resource.CombinationID]resource.CombinationResources),
+		resourceListCalls: make(map[Platform]int),
+		enqueueSeq:        make(map[TargetID]int64),
 	}
 }
 
@@ -180,6 +187,9 @@ func (store *fakeScheduleStore) Targets(ctx context.Context) ([]Target, error) {
 func (store *fakeScheduleStore) TransitionTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision, transition TargetTransition) (Target, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.failTransitionErr != nil {
+		return Target{}, store.failTransitionErr
+	}
 	target, ok := store.targets[id]
 	if !ok {
 		return Target{}, ErrNotFound
@@ -231,6 +241,14 @@ func (store *fakeScheduleStore) QueueDepth(ctx context.Context, id TargetID) (in
 }
 
 func (store *fakeScheduleStore) EnqueueTasks(ctx context.Context, id TargetID, expectedSwitch Revision, specs []EnqueueSpec, cursor Cursor, total int64) error {
+	return store.enqueueTasks(id, expectedSwitch, nil, specs, cursor, total)
+}
+
+func (store *fakeScheduleStore) EnqueueTasksFenced(ctx context.Context, expected Target, specs []EnqueueSpec, cursor Cursor, total int64) error {
+	return store.enqueueTasks(expected.ID(), expected.SwitchVersion(), &expected, specs, cursor, total)
+}
+
+func (store *fakeScheduleStore) enqueueTasks(id TargetID, expectedSwitch Revision, expected *Target, specs []EnqueueSpec, cursor Cursor, total int64) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	target, ok := store.targets[id]
@@ -239,6 +257,14 @@ func (store *fakeScheduleStore) EnqueueTasks(ctx context.Context, id TargetID, e
 	}
 	if target.Desired() != DesiredEnabled || target.SwitchVersion() != expectedSwitch {
 		return ErrFence
+	}
+	if expected != nil {
+		side, _ := target.Side()
+		if target.RefillTotal() != expected.RefillTotal() ||
+			!target.RefillCursor().Equal(expected.RefillCursor()) ||
+			(side == market.SideAsk && target.RefillTotal() == 0 && target.WriteSeq() != expected.WriteSeq()) {
+			return ErrConflict
+		}
 	}
 	now := scheduleNow()
 	for _, spec := range specs {
@@ -276,8 +302,20 @@ func (store *fakeScheduleStore) ClearTargetQueue(ctx context.Context, id TargetI
 }
 
 func (store *fakeScheduleStore) ClaimTask(ctx context.Context, combinationID resource.CombinationID, platform Platform) (Task, Target, bool, error) {
+	return store.claimTask(combinationID, platform, nil)
+}
+
+func (store *fakeScheduleStore) ClaimTaskForTargets(ctx context.Context, combinationID resource.CombinationID, platform Platform, eligibleTargets []TargetID) (Task, Target, bool, error) {
+	return store.claimTask(combinationID, platform, eligibleTargets)
+}
+
+func (store *fakeScheduleStore) claimTask(combinationID resource.CombinationID, platform Platform, eligibleTargets []TargetID) (Task, Target, bool, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	eligible := make(map[TargetID]struct{}, len(eligibleTargets))
+	for _, id := range eligibleTargets {
+		eligible[id] = struct{}{}
+	}
 	for _, task := range store.tasks {
 		if owner, ok := task.ClaimedBy(); ok && task.State() == TaskClaimed && owner == combinationID {
 			return Task{}, Target{}, false, nil
@@ -289,8 +327,14 @@ func (store *fakeScheduleStore) ClaimTask(ctx context.Context, combinationID res
 		if task.State() != TaskQueued {
 			continue
 		}
+		if eligibleTargets != nil {
+			if _, found := eligible[task.TargetID()]; !found {
+				continue
+			}
+		}
 		target, ok := store.targets[task.TargetID()]
-		if !ok || target.Desired() != DesiredEnabled || target.Platform() != platform {
+		if !ok || target.Desired() != DesiredEnabled || target.Platform() != platform ||
+			(target.Actual() != ActualStarting && target.Actual() != ActualRunning) {
 			continue
 		}
 		if !found || task.EnqueuedAt().Before(chosen.EnqueuedAt()) ||
@@ -306,7 +350,8 @@ func (store *fakeScheduleStore) ClaimTask(ctx context.Context, combinationID res
 	next, err := NewTask(TaskInput{
 		ID: chosen.ID(), TargetID: chosen.TargetID(), EnqueueSeq: chosen.EnqueueSeq(),
 		Kind: chosen.Kind(), Payload: chosen.Payload(), State: TaskClaimed,
-		ClaimedBy: &claimed, ClaimedAt: &now, EnqueuedAt: chosen.EnqueuedAt(),
+		ClaimedBy: &claimed, ClaimedAt: &now, ClaimGeneration: chosen.ClaimGeneration() + 1,
+		EnqueuedAt: chosen.EnqueuedAt(),
 	})
 	if err != nil {
 		return Task{}, Target{}, false, err
@@ -316,6 +361,18 @@ func (store *fakeScheduleStore) ClaimTask(ctx context.Context, combinationID res
 }
 
 func (store *fakeScheduleStore) ReleaseStaleClaims(ctx context.Context, olderThan time.Duration) (int, error) {
+	return store.releaseStaleClaims(olderThan, nil)
+}
+
+func (store *fakeScheduleStore) ReleaseStaleClaimsExcept(ctx context.Context, olderThan time.Duration, activeTasks []TaskID) (int, error) {
+	active := make(map[TaskID]struct{}, len(activeTasks))
+	for _, id := range activeTasks {
+		active[id] = struct{}{}
+	}
+	return store.releaseStaleClaims(olderThan, active)
+}
+
+func (store *fakeScheduleStore) releaseStaleClaims(olderThan time.Duration, active map[TaskID]struct{}) (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.failReleaseErr != nil {
@@ -324,13 +381,17 @@ func (store *fakeScheduleStore) ReleaseStaleClaims(ctx context.Context, olderTha
 	cutoff := scheduleNow().Add(-olderThan)
 	released := 0
 	for id, task := range store.tasks {
+		if _, found := active[id]; found {
+			continue
+		}
 		claimedAt, ok := task.ClaimedAt()
 		if task.State() != TaskClaimed || !ok || !claimedAt.Before(cutoff) {
 			continue
 		}
 		next, err := NewTask(TaskInput{
 			ID: task.ID(), TargetID: task.TargetID(), EnqueueSeq: task.EnqueueSeq(),
-			Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued, EnqueuedAt: task.EnqueuedAt(),
+			Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued,
+			ClaimGeneration: task.ClaimGeneration(), EnqueuedAt: task.EnqueuedAt(),
 		})
 		if err != nil {
 			return 0, err
@@ -354,7 +415,8 @@ func (store *fakeScheduleStore) ReleaseAllClaims(ctx context.Context) (int, erro
 		}
 		next, err := NewTask(TaskInput{
 			ID: task.ID(), TargetID: task.TargetID(), EnqueueSeq: task.EnqueueSeq(),
-			Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued, EnqueuedAt: task.EnqueuedAt(),
+			Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued,
+			ClaimGeneration: task.ClaimGeneration(), EnqueuedAt: task.EnqueuedAt(),
 		})
 		if err != nil {
 			return 0, err
@@ -365,7 +427,7 @@ func (store *fakeScheduleStore) ReleaseAllClaims(ctx context.Context) (int, erro
 	return released, nil
 }
 
-func (store *fakeScheduleStore) CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error {
+func (store *fakeScheduleStore) CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID, claimGeneration int64) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	task, ok := store.tasks[id]
@@ -373,27 +435,33 @@ func (store *fakeScheduleStore) CompleteTask(ctx context.Context, id TaskID, com
 		return ErrConflict
 	}
 	claimedBy, claimed := task.ClaimedBy()
-	if task.State() != TaskClaimed || !claimed || claimedBy != combinationID {
+	if task.State() != TaskClaimed || !claimed || claimedBy != combinationID || task.ClaimGeneration() != claimGeneration {
 		return ErrConflict
 	}
 	delete(store.tasks, id)
 	return nil
 }
 
-func (store *fakeScheduleStore) RequeueTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error {
+func (store *fakeScheduleStore) RequeueTask(ctx context.Context, id TaskID, combinationID resource.CombinationID, claimGeneration int64) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	_, store.requeueHasDeadline = ctx.Deadline()
+	store.requeueContextErr = ctx.Err()
+	if store.failRequeueErr != nil {
+		return store.failRequeueErr
+	}
 	task, ok := store.tasks[id]
 	if !ok {
 		return nil
 	}
 	claimedBy, claimed := task.ClaimedBy()
-	if task.State() != TaskClaimed || !claimed || claimedBy != combinationID {
+	if task.State() != TaskClaimed || !claimed || claimedBy != combinationID || task.ClaimGeneration() != claimGeneration {
 		return nil
 	}
 	next, err := NewTask(TaskInput{
 		ID: task.ID(), TargetID: task.TargetID(), EnqueueSeq: task.EnqueueSeq(),
-		Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued, EnqueuedAt: task.EnqueuedAt(),
+		Kind: task.Kind(), Payload: task.Payload(), State: TaskQueued,
+		ClaimGeneration: task.ClaimGeneration(), EnqueuedAt: task.EnqueuedAt(),
 	})
 	if err != nil {
 		return err
@@ -416,7 +484,8 @@ func (store *fakeScheduleStore) seedClaimedTask(t *testing.T, targetID TargetID,
 	task, err := NewTask(TaskInput{
 		ID: TaskID(store.nextTaskID), TargetID: targetID, EnqueueSeq: store.enqueueSeq[targetID],
 		Kind: TaskKindAskPage, Payload: payload, State: TaskClaimed,
-		ClaimedBy: &claimed, ClaimedAt: &claimedAt, EnqueuedAt: claimedAt.Add(-time.Second),
+		ClaimedBy: &claimed, ClaimedAt: &claimedAt, ClaimGeneration: 1,
+		EnqueuedAt: claimedAt.Add(-time.Second),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -430,6 +499,10 @@ func (store *fakeScheduleStore) CommitSummaryPage(ctx context.Context, input Sum
 	defer store.mu.Unlock()
 	task, ok := store.tasks[input.TaskID]
 	if !ok || task.State() != TaskClaimed || task.TargetID() != input.TargetID {
+		return Page{}, false, ErrFence
+	}
+	owner, claimed := task.ClaimedBy()
+	if !claimed || owner != input.CombinationID || task.ClaimGeneration() != input.ClaimGeneration {
 		return Page{}, false, ErrFence
 	}
 	target, ok := store.targets[input.TargetID]
@@ -447,16 +520,48 @@ func (store *fakeScheduleStore) CommitSummaryPage(ctx context.Context, input Sum
 		return Page{}, false, err
 	}
 	total := target.RefillTotal()
-	if input.AskTotal > 0 {
+	cursor := target.RefillCursor()
+	side, _ := target.Side()
+	if side == market.SideAsk {
 		total = input.AskTotal
+		if total == 0 {
+			cursor, err = EncodeAskRefill(0)
+			if err != nil {
+				return Page{}, false, err
+			}
+			for taskID, queued := range store.tasks {
+				if queued.TargetID() == input.TargetID && taskID != input.TaskID && queued.State() == TaskQueued {
+					delete(store.tasks, taskID)
+				}
+			}
+		}
 	}
-	next, err := rebuildTarget(target, target.RefillCursor(), writeSeq, total)
+	next, err := rebuildTarget(target, cursor, writeSeq, total)
 	if err != nil {
 		return Page{}, false, err
 	}
 	store.targets[input.TargetID] = next
 	store.pages[input.TargetID] = page
 	return page, true, nil
+}
+
+func (store *fakeScheduleStore) ListCombinationResourcesFor(ctx context.Context, platform Platform) ([]resource.CombinationResources, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.resourceListCalls[platform]++
+	if store.failListErr != nil {
+		return nil, store.failListErr
+	}
+	filtered := make([]resource.CombinationResources, 0)
+	for _, combination := range store.combinations {
+		if combination.Platform != resource.Platform(platform) {
+			continue
+		}
+		if resources, found := store.resources[combination.ID]; found {
+			filtered = append(filtered, resources)
+		}
+	}
+	return filtered, nil
 }
 
 func (store *fakeScheduleStore) ListCombinationsFor(ctx context.Context, platform Platform) ([]resource.AccountNodeCombination, error) {
@@ -602,12 +707,39 @@ type feedbackRecord struct {
 	cooldown time.Duration
 }
 
+type pacingRecord struct {
+	lane    requestLane
+	workers int
+}
+
+type fakeRequestPacer struct {
+	mu      sync.Mutex
+	records []pacingRecord
+}
+
+func (pacer *fakeRequestPacer) Wait(
+	_ context.Context,
+	lane requestLane,
+	_ workerRateKey,
+	_ time.Duration,
+	workers int,
+) error {
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	pacer.records = append(pacer.records, pacingRecord{lane: lane, workers: workers})
+	return nil
+}
+
+func (pacer *fakeRequestPacer) SetReadyAt(workerRateKey, time.Time) {}
+
 type fakeAdmitter struct {
-	mu        sync.Mutex
-	signer    *ratelimit.Signer
-	requests  []admitRecord
-	feedbacks []feedbackRecord
-	script    func(index int, request ratelimit.Request) (ratelimit.Decision, error)
+	mu                  sync.Mutex
+	signer              *ratelimit.Signer
+	requests            []admitRecord
+	feedbacks           []feedbackRecord
+	feedbackHasDeadline bool
+	feedbackContextErr  error
+	script              func(index int, request ratelimit.Request) (ratelimit.Decision, error)
 }
 
 func newFakeAdmitter(t *testing.T) *fakeAdmitter {
@@ -620,29 +752,19 @@ func newFakeAdmitter(t *testing.T) *fakeAdmitter {
 }
 
 func (admitter *fakeAdmitter) allow(request ratelimit.Request) (ratelimit.Decision, error) {
-	platformPolicy := ratelimit.Policy{
+	accountIPPolicy := ratelimit.Policy{
 		ID: 1, Revision: 1, Enabled: true, ReadyAt: scheduleNow().Add(-time.Hour),
 		Spec: ratelimit.PolicySpec{
-			Platform: request.Platform(), RuleKey: "platform-total", Scope: ratelimit.ScopePlatform,
-			Kind: ratelimit.KindMinInterval, MinInterval: time.Microsecond, DefaultCooldown: time.Minute,
+			Platform: request.Platform(), RuleKey: "endpoint-account-exit", Scope: ratelimit.ScopeAccountIP,
+			EndpointClass: request.EndpointClass(), Kind: ratelimit.KindMinInterval,
+			MinInterval: time.Microsecond, DefaultCooldown: time.Minute,
 		},
 	}
-	interfacePolicy := ratelimit.Policy{
-		ID: 2, Revision: 1, Enabled: true, ReadyAt: scheduleNow().Add(-time.Hour),
-		Spec: ratelimit.PolicySpec{
-			Platform: request.Platform(), RuleKey: "interface-exact", Scope: ratelimit.ScopeInterface,
-			EndpointClass: request.EndpointClass(), Kind: ratelimit.KindCooldownOnly, DefaultCooldown: time.Minute,
-		},
+	rule, err := ratelimit.AppliedRuleFromPolicy(accountIPPolicy)
+	if err != nil {
+		return ratelimit.Decision{}, err
 	}
-	rules := make([]ratelimit.AppliedRule, 0, 2)
-	for _, policy := range []ratelimit.Policy{platformPolicy, interfacePolicy} {
-		rule, err := ratelimit.AppliedRuleFromPolicy(policy)
-		if err != nil {
-			return ratelimit.Decision{}, err
-		}
-		rules = append(rules, rule)
-	}
-	admission, err := admitter.signer.Issue(request, rules, scheduleNow())
+	admission, err := admitter.signer.Issue(request, []ratelimit.AppliedRule{rule}, scheduleNow())
 	if err != nil {
 		return ratelimit.Decision{}, err
 	}
@@ -668,6 +790,8 @@ func (admitter *fakeAdmitter) AdmitRateLimit(ctx context.Context, request rateli
 func (admitter *fakeAdmitter) ApplyRateLimitFeedback(ctx context.Context, admission ratelimit.Admission, scopes []ratelimit.Scope, reason ratelimit.ReasonCode, cooldown time.Duration) error {
 	admitter.mu.Lock()
 	defer admitter.mu.Unlock()
+	_, admitter.feedbackHasDeadline = ctx.Deadline()
+	admitter.feedbackContextErr = ctx.Err()
 	admitter.feedbacks = append(admitter.feedbacks, feedbackRecord{scopes: scopes, reason: reason, cooldown: cooldown})
 	return nil
 }
@@ -684,9 +808,15 @@ type fakeFetcher struct {
 	inFlight    int
 	maxInFlight int
 	hook        func(request PageFetch) error
+	result      *FetchedPage
 }
 
 func (fetcher *fakeFetcher) FetchPage(ctx context.Context, request PageFetch) (FetchedPage, error) {
+	admission, err := request.AdmitRequest(ctx)
+	if err != nil {
+		return FetchedPage{}, err
+	}
+	request.RequestStarted()
 	fetcher.mu.Lock()
 	fetcher.inFlight++
 	if fetcher.inFlight > fetcher.maxInFlight {
@@ -704,10 +834,21 @@ func (fetcher *fakeFetcher) FetchPage(ctx context.Context, request PageFetch) (F
 	}()
 	if hook != nil {
 		if err := hook(request); err != nil {
+			var signal *RateLimitSignal
+			if errors.As(err, &signal) {
+				signal.Admission = admission
+			}
 			return FetchedPage{}, err
 		}
 	}
-	return FetchedPage{Payload: []byte(`{}`), TotalCount: 200}, nil
+	if fetcher.result != nil {
+		return *fetcher.result, nil
+	}
+	total := int64(200)
+	if request.Side == market.SideBid {
+		total = 0
+	}
+	return FetchedPage{Payload: []byte(`{}`), TotalCount: total}, nil
 }
 
 type scheduleHarness struct {
@@ -820,6 +961,64 @@ func TestScheduleAskWrapsWithoutDedup(t *testing.T) {
 	}
 }
 
+func TestScheduleAskZeroTotalKeepsProbingFirstPage(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.result = &FetchedPage{Payload: []byte(`{"success":true,"total_count":0}`), TotalCount: 0}
+
+	for range 2 {
+		if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if depth, err := harness.store.QueueDepth(context.Background(), target.ID()); err != nil || depth != 0 {
+			t.Fatalf("zero-result queue depth = %d err=%v", depth, err)
+		}
+	}
+	if len(harness.fetcher.calls) != 2 {
+		t.Fatalf("fetch calls = %d", len(harness.fetcher.calls))
+	}
+	for _, call := range harness.fetcher.calls {
+		var page AskPagePayload
+		err := json.Unmarshal([]byte(call.payload), &page)
+		if err != nil || page.Start != 0 {
+			t.Fatalf("zero-result probe = %+v err=%v", page, err)
+		}
+	}
+	stored := harness.store.target(target.ID())
+	if stored.RefillTotal() != 0 || stored.WriteSeq() != 2 {
+		t.Fatalf("zero-result target total=%d write_seq=%d", stored.RefillTotal(), stored.WriteSeq())
+	}
+}
+
+func TestScheduleAskZeroTotalDoesNotDuplicatePendingProbe(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	cursor, err := EncodeAskRefill(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.store.mu.Lock()
+	harness.store.targets[target.ID()], err = rebuildTarget(target, cursor, 1, 0)
+	harness.store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.store.seedClaimedTask(t, target.ID(), 1, scheduleNow())
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 || report.Targets[0].Enqueued != 0 {
+		t.Fatalf("targets = %+v", report.Targets)
+	}
+	if depth, err := harness.store.QueueDepth(context.Background(), target.ID()); err != nil || depth != 1 {
+		t.Fatalf("zero-result probe depth=%d err=%v", depth, err)
+	}
+}
+
 func TestScheduleNoRefillWithoutHealthyWorker(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
@@ -876,6 +1075,41 @@ func TestScheduleSessionInvalidRequeuesTask(t *testing.T) {
 	}
 }
 
+func TestScheduleNetworkFailureDoesNotPauseTarget(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.hook = func(request PageFetch) error {
+		if request.Lease.Snapshot.CombinationID == 1 {
+			return ErrFetchNetwork
+		}
+		return nil
+	}
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := 0
+	for _, worker := range report.Workers {
+		if worker.Committed {
+			committed++
+		}
+	}
+	if committed != 1 {
+		t.Fatalf("workers=%+v", report.Workers)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
+	requests := len(harness.admitter.requests)
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.admitter.requests) <= requests {
+		t.Fatalf("running target did not continue: admissions=%d fetches=%d", len(harness.admitter.requests), len(harness.fetcher.calls))
+	}
+}
+
 func TestScheduleConcurrencyBoundedByWorkers(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
@@ -906,6 +1140,376 @@ func TestScheduleConcurrencyBoundedByWorkers(t *testing.T) {
 	report := <-done
 	if len(report.Workers) != 2 {
 		t.Fatalf("workers = %+v", report.Workers)
+	}
+}
+
+func TestSmoothRequestPacerSpreadsAndIsolatesLanes(t *testing.T) {
+	pacer := newSmoothRequestPacer()
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	ask := requestLane{platform: PlatformSteam, endpoint: "market_summary"}
+	want := []time.Time{now, now.Add(100 * time.Millisecond), now.Add(200 * time.Millisecond)}
+	for index := range want {
+		got := pacer.reserve(ask, now, 300*time.Millisecond, 3)
+		if !got.Equal(want[index]) {
+			t.Fatalf("ask slot[%d]=%s want=%s", index, got, want[index])
+		}
+	}
+	for _, lane := range []requestLane{
+		{platform: PlatformSteam, endpoint: "market_orderbook"},
+		{platform: "buff", endpoint: "market_summary"},
+	} {
+		got := pacer.reserve(lane, now, 300*time.Millisecond, 3)
+		if !got.Equal(now) {
+			t.Fatalf("independent lane slot=%s want=%s", got, now)
+		}
+	}
+}
+
+func TestSmoothRequestPacerDoesNotReserveLaneBeforeIdentityIsReady(t *testing.T) {
+	pacer := newSmoothRequestPacer()
+	lane := requestLane{platform: PlatformSteam, endpoint: "market_summary"}
+	blocked := workerRateKey{
+		accountID: 1, exitAddress: netip.MustParseAddr("2.2.2.1"), lane: lane,
+	}
+	ready := workerRateKey{
+		accountID: 2, exitAddress: netip.MustParseAddr("2.2.2.2"), lane: lane,
+	}
+	pacer.SetReadyAt(blocked, time.Now().Add(time.Hour))
+	blockedCtx, cancelBlocked := context.WithCancel(context.Background())
+	blockedDone := make(chan error, 1)
+	go func() {
+		blockedDone <- pacer.Wait(blockedCtx, lane, blocked, 100*time.Millisecond, 2)
+	}()
+	select {
+	case err := <-blockedDone:
+		t.Fatalf("blocked identity returned early: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelReady()
+	if err := pacer.Wait(readyCtx, lane, ready, 100*time.Millisecond, 2); err != nil {
+		t.Fatalf("ready identity could not fill the open lane slot: %v", err)
+	}
+	cancelBlocked()
+	if err := <-blockedDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked identity error=%v", err)
+	}
+}
+
+func TestMaximumIndependentCombinationsUsesFullMatching(t *testing.T) {
+	accountX := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	accountY := combinationResources(2, "steam", netip.MustParseAddr("2.2.2.2"))
+	accountY.Account = accountX.Account
+	accountY.Combination.AccountID = accountX.Account.ID
+	otherX := combinationResources(3, "steam", netip.MustParseAddr("2.2.2.3"))
+	otherX.Node = accountX.Node
+	otherX.Combination.NodeID = accountX.Node.ID
+
+	selected := maximumIndependentCombinations([]resource.CombinationResources{accountX, accountY, otherX})
+	if len(selected) != 2 {
+		t.Fatalf("selected=%+v", selected)
+	}
+	accounts := make(map[resource.AccountID]struct{}, 2)
+	nodes := make(map[resource.NodeID]struct{}, 2)
+	for _, combination := range selected {
+		accounts[combination.AccountID] = struct{}{}
+		nodes[combination.NodeID] = struct{}{}
+	}
+	if len(accounts) != 2 || len(nodes) != 2 {
+		t.Fatalf("matching did not maximize independent resources: %+v", selected)
+	}
+}
+
+func TestMaximumIndependentCombinationsSeparatesNodeByPlatform(t *testing.T) {
+	steam := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	buff := combinationResources(2, "buff", netip.MustParseAddr("2.2.2.1"))
+	buff.Node = steam.Node
+	buff.Combination.NodeID = steam.Node.ID
+
+	selected := maximumIndependentCombinations([]resource.CombinationResources{steam, buff})
+	if len(selected) != 2 {
+		t.Fatalf("same node on independent platforms was serialized: %+v", selected)
+	}
+}
+
+func TestMaximumIndependentCombinationsIgnoresFullyCooledCombination(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	accountX := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	accountY := combinationResources(2, "steam", netip.MustParseAddr("2.2.2.2"))
+	accountZ := combinationResources(3, "steam", netip.MustParseAddr("2.2.2.3"))
+	xOnY := combinationResources(4, "steam", netip.MustParseAddr("2.2.2.2"))
+	xOnY.Account = accountX.Account
+	xOnY.Combination.AccountID = accountX.Account.ID
+	xOnY.Node = accountY.Node
+	xOnY.Combination.NodeID = accountY.Node.ID
+	yOnX := combinationResources(5, "steam", netip.MustParseAddr("2.2.2.1"))
+	yOnX.Account = accountY.Account
+	yOnX.Combination.AccountID = accountY.Account.ID
+	yOnX.Node = accountX.Node
+	yOnX.Combination.NodeID = accountX.Node.ID
+
+	blocked := map[workerRateKey]struct{}{{
+		accountID:   accountX.Account.ID,
+		exitAddress: accountX.Node.ExitVerification.Address,
+		lane:        harness.scheduler.requestLane(target),
+	}: {}}
+	candidates := []resource.CombinationResources{accountX, accountY, accountZ, xOnY, yOnX}
+	eligible := candidates[:0]
+	for _, candidate := range candidates {
+		if harness.scheduler.hasRunnableLane(candidate, []Target{target}, blocked, scheduleNow()) {
+			eligible = append(eligible, candidate)
+		}
+	}
+	selected := maximumIndependentCombinations(eligible)
+	if len(selected) != 3 {
+		t.Fatalf("cooled combination reduced matching capacity: %+v", selected)
+	}
+	for _, combination := range selected {
+		if combination.ID == accountX.Combination.ID {
+			t.Fatalf("fully cooled combination was selected: %+v", selected)
+		}
+	}
+}
+
+func TestRunnableLaneDoesNotPreFilterStickyProxyByCachedExit(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	proxy := combinationResources(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	validUntil := scheduleNow().Add(2 * time.Hour)
+	proxy.Node.Kind = resource.NodeKindProxy
+	proxy.Node.EgressMode = resource.EgressModeSticky
+	proxy.Node.HasProxyCredential = true
+	proxy.Node.StickySessionValidUntil = &validUntil
+	blocked := map[workerRateKey]struct{}{{
+		accountID:   proxy.Account.ID,
+		exitAddress: proxy.Node.ExitVerification.Address,
+		lane:        harness.scheduler.requestLane(target),
+	}: {}}
+	if !harness.scheduler.hasRunnableLane(proxy, []Target{target}, blocked, scheduleNow()) {
+		t.Fatal("sticky proxy was excluded before its authoritative exit could be refreshed")
+	}
+}
+
+func TestSchedulePacingCountsOnlyWorkersWithTasks(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		profile := config.Profiles[PlatformSteam]
+		profile.RequestInterval = 300 * time.Millisecond
+		config.Profiles[PlatformSteam] = profile
+	})
+	for id := int64(1); id <= 3; id++ {
+		harness.addCombination(id, "steam", netip.MustParseAddr(fmt.Sprintf("2.2.2.%d", id)))
+	}
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	payload, err := EncodeAskPage(0, AskPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.store.EnqueueTasks(t.Context(), target.ID(), target.SwitchVersion(), []EnqueueSpec{
+		{Kind: TaskKindAskPage, Payload: payload},
+		{Kind: TaskKindAskPage, Payload: payload},
+	}, Cursor{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	pacer := &fakeRequestPacer{}
+	harness.scheduler.pacer = pacer
+	component, err := harness.coordinator.RegisterComponent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = harness.coordinator.CancelComponent(context.Background(), component) }()
+	workers, err := harness.scheduler.dispatchWorkers(
+		t.Context(), component, []Target{target},
+		newCycleCombinationResources(harness.store, harness.store),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed := 0
+	for _, worker := range workers {
+		if worker.Committed {
+			committed++
+		}
+	}
+	if committed != 2 {
+		t.Fatalf("committed=%d workers=%+v", committed, workers)
+	}
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	if len(pacer.records) != 2 {
+		t.Fatalf("pacing records=%+v", pacer.records)
+	}
+	for _, record := range pacer.records {
+		if record.workers != 2 || record.lane != (requestLane{platform: PlatformSteam, endpoint: "market_summary"}) {
+			t.Fatalf("pacing record=%+v", record)
+		}
+	}
+}
+
+func TestSchedulePacingCountsPlatformWorkersAcrossEndpoints(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		profile := config.Profiles[PlatformSteam]
+		profile.BidEndpoint = "market_orderbook"
+		profile.RequestInterval = 300 * time.Millisecond
+		config.Profiles[PlatformSteam] = profile
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.2"))
+	ask := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	bid := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideBid, DesiredEnabled)
+	askPayload, err := EncodeAskPage(0, AskPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bidPayload, err := EncodeBidBatch(0, BidBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.store.EnqueueTasks(t.Context(), ask.ID(), ask.SwitchVersion(), []EnqueueSpec{
+		{Kind: TaskKindAskPage, Payload: askPayload},
+	}, Cursor{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.store.EnqueueTasks(t.Context(), bid.ID(), bid.SwitchVersion(), []EnqueueSpec{
+		{Kind: TaskKindBidBatch, Payload: bidPayload},
+	}, Cursor{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	pacer := &fakeRequestPacer{}
+	harness.scheduler.pacer = pacer
+	component, err := harness.coordinator.RegisterComponent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = harness.coordinator.CancelComponent(context.Background(), component) }()
+	if _, err := harness.scheduler.dispatchWorkers(
+		t.Context(), component, []Target{ask, bid},
+		newCycleCombinationResources(harness.store, harness.store),
+	); err != nil {
+		t.Fatal(err)
+	}
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	if len(pacer.records) != 2 {
+		t.Fatalf("pacing records=%+v", pacer.records)
+	}
+	lanes := make(map[requestLane]struct{}, 2)
+	for _, record := range pacer.records {
+		if record.workers != 2 {
+			t.Fatalf("pacing record=%+v", record)
+		}
+		lanes[record.lane] = struct{}{}
+	}
+	if len(lanes) != 2 {
+		t.Fatalf("endpoint lanes=%+v", pacer.records)
+	}
+}
+
+func TestSchedulePacingExcludesConflictingCombinations(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*resource.CombinationResources, resource.CombinationResources)
+	}{
+		{name: "shared account", mutate: func(current *resource.CombinationResources, first resource.CombinationResources) {
+			current.Combination.AccountID = first.Account.ID
+			current.Account = first.Account
+		}},
+		{name: "shared node", mutate: func(current *resource.CombinationResources, first resource.CombinationResources) {
+			current.Combination.NodeID = first.Node.ID
+			current.Node = first.Node
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+				profile := config.Profiles[PlatformSteam]
+				profile.RequestInterval = 300 * time.Millisecond
+				config.Profiles[PlatformSteam] = profile
+			})
+			harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.1"))
+			harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.2"))
+			harness.store.mu.Lock()
+			first := harness.store.resources[1]
+			harness.store.mu.Unlock()
+			harness.mutateCombination(2, func(current *resource.CombinationResources) {
+				test.mutate(current, first)
+			})
+			target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+			payload, err := EncodeAskPage(0, AskPageSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := harness.store.EnqueueTasks(t.Context(), target.ID(), target.SwitchVersion(), []EnqueueSpec{
+				{Kind: TaskKindAskPage, Payload: payload},
+				{Kind: TaskKindAskPage, Payload: payload},
+			}, Cursor{}, 0); err != nil {
+				t.Fatal(err)
+			}
+			pacer := &fakeRequestPacer{}
+			harness.scheduler.pacer = pacer
+			component, err := harness.coordinator.RegisterComponent()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = harness.coordinator.CancelComponent(context.Background(), component) }()
+			workers, err := harness.scheduler.dispatchWorkers(
+				t.Context(), component, []Target{target},
+				newCycleCombinationResources(harness.store, harness.store),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			committed := 0
+			for _, worker := range workers {
+				if worker.Committed {
+					committed++
+				}
+			}
+			if committed != 1 {
+				t.Fatalf("committed=%d workers=%+v", committed, workers)
+			}
+			pacer.mu.Lock()
+			defer pacer.mu.Unlock()
+			if len(pacer.records) != 1 || pacer.records[0].workers != 1 {
+				t.Fatalf("pacing records=%+v", pacer.records)
+			}
+		})
+	}
+}
+
+func TestScheduleLoadsCombinationResourcesOncePerPlatform(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.store.addSummaryTarget(t, PlatformSteam, 252490, market.SideAsk, DesiredEnabled)
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	harness.store.mu.Lock()
+	calls := harness.store.resourceListCalls[PlatformSteam]
+	harness.store.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("combination resource list calls = %d, want 1", calls)
+	}
+}
+
+func TestScheduleQueueDepthScalesPastBaseWatermark(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	const workers = QueueWatermark + 20
+	for id := int64(1); id <= workers; id++ {
+		harness.addCombination(id, "steam", netip.AddrFrom4([4]byte{2, 2, byte(id / 250), byte(id%250 + 1)}))
+	}
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	report, _, _, err := harness.scheduler.planCycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 || report.Targets[0].Enqueued != workers {
+		t.Fatalf("planned targets=%+v", report.Targets)
+	}
+	if depth, err := harness.store.QueueDepth(t.Context(), target.ID()); err != nil || depth != workers {
+		t.Fatalf("queue depth=%d err=%v", depth, err)
 	}
 }
 
@@ -955,18 +1559,227 @@ func TestScheduleRejectsInvalidSession(t *testing.T) {
 func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
-	harness.fetcher.hook = func(PageFetch) error {
-		return &RateLimitSignal{Scopes: []ratelimit.Scope{ratelimit.ScopePlatform}, Reason: ratelimit.ReasonHTTP429, Cooldown: time.Minute}
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.hook = func(request PageFetch) error {
+		if request.Lease.Snapshot.CombinationID == 1 {
+			return &RateLimitSignal{Scopes: []ratelimit.Scope{ratelimit.ScopeAccountIP}, Reason: ratelimit.ReasonHTTP429, Cooldown: time.Minute}
+		}
+		return nil
 	}
-	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(harness.admitter.feedbacks) != 1 {
 		t.Fatalf("feedbacks = %+v", harness.admitter.feedbacks)
 	}
-	if harness.store.queuedCount() != QueueWatermark {
-		t.Fatalf("queued = %d", harness.store.queuedCount())
+	committed := 0
+	for _, worker := range report.Workers {
+		if worker.Committed {
+			committed++
+		}
+	}
+	if committed != 1 {
+		t.Fatalf("workers=%+v", report.Workers)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
+}
+
+func TestScheduleRateLimitDefersWorkerWithoutBlockingTarget(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	retryAt := scheduleNow().Add(time.Hour)
+	blocker, err := ratelimit.NewBlocker(1, ratelimit.ScopePlatform, ratelimit.BlockReasonBudget, retryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := ratelimit.Block([]ratelimit.Blocker{blocker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.admitter.script = func(int, ratelimit.Request) (ratelimit.Decision, error) {
+		return blocked, nil
+	}
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.fetcher.calls) != 0 || harness.store.queuedCount() != QueueWatermark {
+		t.Fatalf("blocked fetches=%d queued=%d", len(harness.fetcher.calls), harness.store.queuedCount())
+	}
+	stored := harness.store.target(target.ID())
+	requireTargetState(t, stored, ActualRunning, TargetReasonNone)
+	requests := len(harness.admitter.requests)
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.admitter.requests) <= requests {
+		t.Fatal("running target did not let the worker recheck its exact cooldown")
+	}
+}
+
+func TestScheduleExactCooldownDoesNotWaitInsideCycle(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	retryAt := scheduleNow().Add(500 * time.Millisecond)
+	blocker, err := ratelimit.NewBlocker(1, ratelimit.ScopeAccountIP, ratelimit.BlockReasonCooldown, retryAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := ratelimit.Block([]ratelimit.Blocker{blocker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.admitter.script = func(int, ratelimit.Request) (ratelimit.Decision, error) {
+		return blocked, nil
+	}
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.admitter.requests) != 1 {
+		t.Fatalf("cooldown admission attempts=%d", len(harness.admitter.requests))
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
+}
+
+func TestScheduleSharedWarmupDoesNotSynchronizeWorkers(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	blocker, err := ratelimit.NewBlocker(
+		1, ratelimit.ScopeAccountIP, ratelimit.BlockReasonWarmup, scheduleNow().Add(500*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := ratelimit.Block([]ratelimit.Blocker{blocker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.admitter.script = func(int, ratelimit.Request) (ratelimit.Decision, error) {
+		return blocked, nil
+	}
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(harness.admitter.requests) != 2 || len(harness.fetcher.calls) != 0 {
+		t.Fatalf("warmup admissions=%d fetches=%d", len(harness.admitter.requests), len(harness.fetcher.calls))
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
+}
+
+func TestScheduleAdmissionRetryReentersPacing(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		profile := config.Profiles[PlatformSteam]
+		profile.RequestInterval = 300 * time.Millisecond
+		config.Profiles[PlatformSteam] = profile
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	pacer := &fakeRequestPacer{}
+	harness.scheduler.pacer = pacer
+	harness.admitter.script = func(index int, request ratelimit.Request) (ratelimit.Decision, error) {
+		if index > 0 {
+			return harness.admitter.allow(request)
+		}
+		blocker, err := ratelimit.NewBlocker(
+			1, ratelimit.ScopeAccountIP, ratelimit.BlockReasonBudget, scheduleNow().Add(time.Millisecond),
+		)
+		if err != nil {
+			return ratelimit.Decision{}, err
+		}
+		return ratelimit.Block([]ratelimit.Blocker{blocker})
+	}
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !report.Workers[0].Committed || len(harness.admitter.requests) != 2 {
+		t.Fatalf("workers=%+v admissions=%d", report.Workers, len(harness.admitter.requests))
+	}
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	if len(pacer.records) != 2 {
+		t.Fatalf("pacing records=%+v", pacer.records)
+	}
+}
+
+func TestScheduleRateLimitPastRetryUsesBoundedPolling(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		config.PageTimeout = 250 * time.Millisecond
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	blocker, err := ratelimit.NewBlocker(1, ratelimit.ScopePlatform, ratelimit.BlockReasonBudget, scheduleNow().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := ratelimit.Block([]ratelimit.Blocker{blocker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.admitter.script = func(int, ratelimit.Request) (ratelimit.Decision, error) {
+		return blocked, nil
+	}
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(harness.admitter.requests); got < 2 || got > 4 {
+		t.Fatalf("admission polls = %d", got)
+	}
+}
+
+func TestScheduleReportsNetworkAndRequeueFailures(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	requeueErr := errors.New("task requeue failed")
+	harness.fetcher.hook = func(PageFetch) error {
+		harness.store.mu.Lock()
+		harness.store.failRequeueErr = requeueErr
+		harness.store.mu.Unlock()
+		return ErrFetchNetwork
+	}
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !errors.Is(report.Workers[0].Err, ErrFetchNetwork) || !errors.Is(report.Workers[0].Err, requeueErr) {
+		t.Fatalf("workers = %+v", report.Workers)
+	}
+}
+
+func TestScheduleCleanupContextIsDetachedButBounded(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := harness.scheduler.requeueTask(ctx, Task{id: 1, claimGeneration: 1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.scheduler.applyRateLimitFeedback(ctx, ratelimit.Admission{}, nil, ratelimit.ReasonHTTP429, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	harness.store.mu.Lock()
+	requeueHasDeadline := harness.store.requeueHasDeadline
+	requeueContextErr := harness.store.requeueContextErr
+	harness.store.mu.Unlock()
+	harness.admitter.mu.Lock()
+	feedbackHasDeadline := harness.admitter.feedbackHasDeadline
+	feedbackContextErr := harness.admitter.feedbackContextErr
+	harness.admitter.mu.Unlock()
+	if !requeueHasDeadline || requeueContextErr != nil {
+		t.Fatalf("requeue context deadline=%v err=%v", requeueHasDeadline, requeueContextErr)
+	}
+	if !feedbackHasDeadline || feedbackContextErr != nil {
+		t.Fatalf("feedback context deadline=%v err=%v", feedbackHasDeadline, feedbackContextErr)
 	}
 }
 
@@ -1031,5 +1844,19 @@ func TestNewSchedulerValidation(t *testing.T) {
 	broken.Profiles = map[Platform]PlatformProfile{"steam": {TargetRegion: "mars"}}
 	if _, err := NewScheduler(store, store, coordinator, admitter, fetcher, broken); err == nil {
 		t.Fatal("invalid profile region must be rejected")
+	}
+	broken = valid
+	broken.Profiles = map[Platform]PlatformProfile{"steam": {
+		TargetRegion: resource.TargetRegionDomestic, RequestInterval: time.Nanosecond,
+	}}
+	if _, err := NewScheduler(store, store, coordinator, admitter, fetcher, broken); err == nil {
+		t.Fatal("sub-microsecond request interval must be rejected")
+	}
+	broken = valid
+	broken.Profiles = map[Platform]PlatformProfile{"steam": {
+		TargetRegion: resource.TargetRegionDomestic, RequestInterval: time.Second,
+	}}
+	if _, err := NewScheduler(store, store, coordinator, admitter, fetcher, broken); err == nil {
+		t.Fatal("request interval equal to page and claim timeout must be rejected")
 	}
 }

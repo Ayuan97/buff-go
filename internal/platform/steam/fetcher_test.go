@@ -14,8 +14,13 @@ import (
 	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
+	"buff-go/internal/ratelimit"
 	"buff-go/internal/resource"
 )
+
+func admitTestRequest(context.Context) (ratelimit.Admission, error) {
+	return ratelimit.Admission{}, nil
+}
 
 type stubOpener struct {
 	cookie string
@@ -27,6 +32,16 @@ func (s stubOpener) Open(context.Context, resource.Lease) (string, string, error
 
 type stubCatalog struct {
 	products []catalog.SteamProduct
+}
+
+type stubSessionRecorder struct {
+	err    error
+	states []bool
+}
+
+func (recorder *stubSessionRecorder) Record(_ context.Context, _ resource.Lease, valid bool) error {
+	recorder.states = append(recorder.states, valid)
+	return recorder.err
 }
 
 func (s stubCatalog) ListSteamProductsAfter(_ context.Context, appID int64, after catalog.ProductID, limit int) ([]catalog.SteamProduct, error) {
@@ -62,7 +77,9 @@ func TestFetchAskSendsSteamPriceRange(t *testing.T) {
 	_, err = fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 252490, Side: market.SideAsk, Kind: collection.TaskKindAskPage, Payload: payload,
-		PriceRange: collection.PriceRange{MinCents: &minCents, MaxCents: &maxCents},
+		PriceRange:     collection.PriceRange{MinCents: &minCents, MaxCents: &maxCents},
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +110,8 @@ func TestFetchAskSendsSteamFacets(t *testing.T) {
 			Cats:    []string{"steamcat.armor"},
 			Classes: []string{"burlap.trousers"},
 		},
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +147,8 @@ func TestFetchAskPageAndEmpty(t *testing.T) {
 	page, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage, Payload: firstPayload,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if err != nil || len(page.Attempts) != 1 || page.TotalCount != 11 {
 		t.Fatalf("page=%+v err=%v", page, err)
@@ -142,6 +163,8 @@ func TestFetchAskPageAndEmpty(t *testing.T) {
 	next, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage, Payload: nextPayload,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if err != nil || len(next.Attempts) != 0 {
 		t.Fatalf("next=%+v err=%v", next, err)
@@ -164,6 +187,8 @@ func TestFetchAskDollarMarksSessionInvalid(t *testing.T) {
 	_, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if !errors.Is(err, collection.ErrFetchSessionInvalid) {
 		t.Fatalf("err=%v", err)
@@ -183,6 +208,8 @@ func TestRequestLooksLikeBrowser(t *testing.T) {
 	if _, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +232,7 @@ func TestFetchAskRateLimitAndLogin(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		if hits == 1 {
+			w.Header().Set("Content-Length", "10")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(w, "null")
 			return
@@ -217,20 +245,70 @@ func TestFetchAskRateLimitAndLogin(t *testing.T) {
 	_, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
-	if _, ok := err.(*collection.RateLimitSignal); !ok {
+	var signal *collection.RateLimitSignal
+	if !errors.As(err, &signal) {
 		t.Fatalf("err=%v", err)
+	}
+	if len(signal.Scopes) != 1 || signal.Scopes[0] != ratelimit.ScopeAccountIP {
+		t.Fatalf("rate-limit scopes=%v", signal.Scopes)
 	}
 	_, err = fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if !errors.Is(err, collection.ErrFetchSessionInvalid) {
 		t.Fatalf("err=%v", err)
 	}
 }
 
+func TestFetchReportsSessionRecorderFailures(t *testing.T) {
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if hits == 1 {
+			_, _ = io.WriteString(w, `{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`)
+			return
+		}
+		w.Header().Set("Location", "https://steamcommunity.com/login/home/")
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	recordErr := errors.New("session store failed")
+	recorder := &stubSessionRecorder{err: recordErr}
+	fetcher, err := NewFetcher(Options{
+		BaseURL: server.URL, Opener: stubOpener{cookie: "steamLoginSecure=ok"},
+		Catalog: stubCatalog{}, Sessions: recorder,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		_, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+			TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+			AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+			AdmitRequest:   admitTestRequest,
+			RequestStarted: func() {},
+		})
+		if !errors.Is(err, recordErr) || errors.Is(err, collection.ErrFetchSessionInvalid) {
+			t.Fatalf("error = %v", err)
+		}
+	}
+	if len(recorder.states) != 2 || !recorder.states[0] || recorder.states[1] {
+		t.Fatalf("recorded states = %v", recorder.states)
+	}
+}
+
 func TestFetchBidEmptyAndPresent(t *testing.T) {
+	admissions := 0
+	admit := func(context.Context) (ratelimit.Admission, error) {
+		admissions++
+		return ratelimit.Admission{}, nil
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/market/orderbook", func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Query().Get("qp"), "Missing") {
@@ -251,30 +329,34 @@ func TestFetchBidEmptyAndPresent(t *testing.T) {
 		{ProductID: 3, AppID: 730, Name: "Missing Item"},
 	}
 	fetcher := mustFetcher(t, server.URL, stubCatalog{products: catalogItems})
-	firstPayload, err := collection.EncodeBidBatch(0, 2)
-	if err != nil {
-		t.Fatal(err)
+	for _, test := range []struct {
+		after      catalog.ProductID
+		status     market.ObservationStatus
+		priceCents market.CNYCents
+	}{
+		{after: 0, status: market.StatusEmpty},
+		{after: 1, status: market.StatusPresent, priceCents: 27567},
+		{after: 2, status: market.StatusUnavailable},
+	} {
+		payload, err := collection.EncodeBidBatch(test.after, collection.BidBatchSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+			TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+			AppID: 730, Side: market.SideBid, Kind: collection.TaskKindBidBatch, Payload: payload,
+			AdmitRequest:   admit,
+			RequestStarted: func() {},
+		})
+		if err != nil || len(page.Attempts) != 1 || page.Attempts[0].Observation.Status != test.status {
+			t.Fatalf("after=%d page=%+v err=%v", test.after, page, err)
+		}
+		if test.priceCents != 0 && page.Attempts[0].Observation.Summary.PriceCents != test.priceCents {
+			t.Fatalf("after=%d attempts=%+v", test.after, page.Attempts)
+		}
 	}
-	page, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
-		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
-		AppID: 730, Side: market.SideBid, Kind: collection.TaskKindBidBatch, Payload: firstPayload,
-	})
-	if err != nil || len(page.Attempts) != 2 {
-		t.Fatalf("page=%+v err=%v", page, err)
-	}
-	if page.Attempts[0].Observation.Status != market.StatusEmpty || page.Attempts[1].Observation.Summary.PriceCents != 27567 {
-		t.Fatalf("attempts=%+v", page.Attempts)
-	}
-	restPayload, err := collection.EncodeBidBatch(2, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rest, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
-		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
-		AppID: 730, Side: market.SideBid, Kind: collection.TaskKindBidBatch, Payload: restPayload,
-	})
-	if err != nil || len(rest.Attempts) != 1 || rest.Attempts[0].Observation.Status != market.StatusUnavailable {
-		t.Fatalf("rest=%+v err=%v", rest, err)
+	if admissions != 3 {
+		t.Fatalf("request admissions = %d, want one per HTTP request", admissions)
 	}
 }
 
@@ -291,6 +373,8 @@ func TestFetchBidForeignCurrencyMarksSessionInvalid(t *testing.T) {
 	_, err = fetcher.FetchPage(context.Background(), collection.PageFetch{
 		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
 		AppID: 730, Side: market.SideBid, Kind: collection.TaskKindBidBatch, Payload: payload,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
 	})
 	if !errors.Is(err, collection.ErrFetchSessionInvalid) {
 		t.Fatalf("err=%v", err)

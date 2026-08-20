@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   createAccount,
   createCombination,
@@ -35,7 +35,7 @@ import {
   regionText,
   sessionStateText,
 } from '../utils/format'
-import { nodeAllowsPlatform } from '../utils/platformRegion'
+import { nodeAllowsPlatform, nodeIsUsableAt } from '../utils/platformRegion'
 
 const accounts = ref<Account[] | null>(null)
 const nodes = ref<AccessNode[] | null>(null)
@@ -45,6 +45,7 @@ const stale = ref(false)
 const actionError = ref<string | null>(null)
 const busy = ref(false)
 const showAllGaps = ref(false)
+const now = ref(Date.now())
 
 const confirm = ref<{ title: string; impact: string; consequence: string; run: () => Promise<unknown> } | null>(null)
 const showAddAccount = ref(false)
@@ -63,7 +64,14 @@ const newNode = ref({
   sticky_until: '',
 })
 
-onMounted(() => { void reload() })
+let clock = 0
+onMounted(() => {
+  void reload()
+  clock = window.setInterval(() => { now.value = Date.now() }, 30_000)
+})
+onUnmounted(() => {
+  if (clock) window.clearInterval(clock)
+})
 
 useEscape(() => {
   if (confirm.value) return
@@ -82,21 +90,25 @@ async function reload() {
     combinations.value = c
     loadError.value = null
     stale.value = false
+    return true
   } catch (e) {
     if (accounts.value && nodes.value) stale.value = true
     else loadError.value = e instanceof Error ? apiErrorText(e.message) : '加载失败'
+    return false
   }
 }
 
-async function runAction(fn: () => Promise<unknown>) {
-  if (busy.value) return
+async function runAction(fn: () => Promise<unknown>): Promise<boolean> {
+  if (busy.value) return false
   actionError.value = null
   busy.value = true
   try {
     await fn()
     await reload()
+    return true
   } catch (e) {
     actionError.value = e instanceof Error ? apiErrorText(e.message) : '操作失败'
+    return false
   } finally {
     busy.value = false
   }
@@ -160,8 +172,21 @@ function lineOf(node: AccessNode): string {
 }
 
 function stateClass(node: AccessNode): string {
-  if (node.state === 'available') return 'ok'
+  if (node.state === 'available') return nodeIsUsableAt(node, now.value) ? 'ok' : 'danger'
   return node.state === 'unavailable' ? 'danger' : 'warn'
+}
+
+function nodeStateLabel(node: AccessNode): string {
+  if (node.state !== 'available') return nodeStateText(node.state)
+  if (!node.exit) return '出口不可用'
+  if (!Number.isFinite(Date.parse(node.exit.valid_until)) || now.value >= Date.parse(node.exit.valid_until)) {
+    return '出口过期'
+  }
+  if (node.sticky_session_valid_until) {
+    const until = Date.parse(node.sticky_session_valid_until)
+    if (!Number.isFinite(until) || now.value >= until) return '会话过期'
+  }
+  return nodeStateText(node.state)
 }
 
 function sessionClass(account: Account): string {
@@ -176,9 +201,10 @@ interface Gap {
 }
 
 const gaps = computed<Gap[]>(() => {
+  if (accounts.value === null || nodes.value === null) return []
   const list: Gap[] = []
-  const accountList = accounts.value ?? []
-  const nodeList = nodes.value ?? []
+  const accountList = accounts.value
+  const nodeList = nodes.value
   if (!accountList.length) list.push({ text: '还没有账号，先加一个 Steam 账号并粘贴 Cookie' })
   for (const account of accountList) {
     if (account.session_state === 'invalid') {
@@ -187,9 +213,15 @@ const gaps = computed<Gap[]>(() => {
   }
   if (!nodeList.length) list.push({ text: '还没有节点，加一个本机直连或代理节点' })
   for (const node of nodeList) {
-    if (node.state !== 'available') {
-      list.push({ text: `节点 ${node.name} 还没填出口 IP，不会被采集使用`, nodeId: node.id })
-    }
+    if (nodeIsUsableAt(node, now.value)) continue
+    const expired = node.exit && now.value >= Date.parse(node.exit.valid_until)
+    const stickyExpired = node.sticky_session_valid_until && now.value >= Date.parse(node.sticky_session_valid_until)
+    const reason = expired
+      ? '出口 IP 已过期'
+      : stickyExpired
+        ? '代理会话已过期'
+        : '还没有可用出口 IP'
+    list.push({ text: `节点 ${node.name} ${reason}，不会被采集使用`, nodeId: node.id })
   }
   for (const node of nodeList) {
     if (accountsOfNode(node).length) continue
@@ -228,7 +260,7 @@ async function submitAccount() {
 
 async function submitAccountEdit() {
   const draft = accountEdit.value
-  if (!draft) return
+  if (!draft || busy.value) return
   const alias = draft.alias.trim()
   const session = draft.session.trim()
   if (!alias) {
@@ -239,11 +271,29 @@ async function submitAccountEdit() {
     accountEdit.value = null
     return
   }
-  await runAction(async () => {
-    if (alias !== draft.account.alias) await renameAccount(draft.account.id, alias)
+  actionError.value = null
+  busy.value = true
+  let renamed = false
+  try {
+    if (alias !== draft.account.alias) {
+      await renameAccount(draft.account.id, alias)
+      renamed = true
+    }
     if (session) await replaceAccountSession(draft.account.id, draft.account.session_revision, session)
     accountEdit.value = null
-  })
+    await reload()
+  } catch (e) {
+    const detail = e instanceof Error ? apiErrorText(e.message) : '操作失败'
+    if (renamed) {
+      const reloaded = await reload()
+      accountEdit.value = null
+      actionError.value = `别名已保存，但 Cookie 更新失败：${detail}。${reloaded ? '页面已重新加载实际状态' : '重新加载也失败，当前显示可能过期'}`
+    } else {
+      actionError.value = detail
+    }
+  } finally {
+    busy.value = false
+  }
 }
 
 async function submitNode() {
@@ -382,7 +432,7 @@ async function submitBind() {
             <tr v-for="node in nodes" :key="node.id">
               <td>{{ node.name }}</td>
               <td>{{ lineOf(node) }}</td>
-              <td><span class="badge" :class="stateClass(node)">{{ nodeStateText(node.state) }}</span></td>
+              <td><span class="badge" :class="stateClass(node)">{{ nodeStateLabel(node) }}</span></td>
               <td>
                 <span class="num">{{ node.exit?.address ?? '未填' }}</span>
                 <div v-if="node.exit" class="muted">有效期至 {{ fmtTime(node.exit.valid_until) }}</div>
@@ -555,12 +605,12 @@ async function submitBind() {
       :node="settingsNode"
       :busy="busy"
       @close="settingsNodeId = null"
-      @exit="(address, validUntil) => runAction(() => recordNodeExit(settingsNode!.id, settingsNode!.egress_revision, address, validUntil))"
+      @exit="async (address, validUntil, done) => done(await runAction(() => recordNodeExit(settingsNode!.id, settingsNode!.egress_revision, address, validUntil)))"
       @rename="(name) => runAction(() => renameNode(settingsNode!.id, name))"
-      @connection="(payload) => runAction(() => replaceNodeConnection(settingsNode!.id, {
+      @connection="async (payload, done) => done(await runAction(() => replaceNodeConnection(settingsNode!.id, {
         expected_egress_revision: settingsNode!.egress_revision,
         ...payload,
-      }))"
+      })))"
     />
 
     <ConfirmDialog

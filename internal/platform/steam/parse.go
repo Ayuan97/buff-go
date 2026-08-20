@@ -54,12 +54,29 @@ type orderbookData struct {
 }
 
 func parseSearchRender(body []byte) (searchRenderResponse, error) {
-	var parsed searchRenderResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	type response struct {
+		Success    bool           `json:"success"`
+		Start      int            `json:"start"`
+		PageSize   int            `json:"pagesize"`
+		TotalCount *int           `json:"total_count"`
+		Results    []searchResult `json:"results"`
+	}
+	var decoded response
+	if err := json.Unmarshal(body, &decoded); err != nil {
 		return searchRenderResponse{}, fmt.Errorf("search/render json: %w", err)
 	}
-	if !parsed.Success {
+	if !decoded.Success {
 		return searchRenderResponse{}, fmt.Errorf("search/render success=false")
+	}
+	if decoded.TotalCount == nil {
+		return searchRenderResponse{}, fmt.Errorf("search/render missing total_count")
+	}
+	parsed := searchRenderResponse{
+		Success:    decoded.Success,
+		Start:      decoded.Start,
+		PageSize:   decoded.PageSize,
+		TotalCount: *decoded.TotalCount,
+		Results:    decoded.Results,
 	}
 	if parsed.Start < 0 || parsed.PageSize < 0 || parsed.TotalCount < 0 {
 		return searchRenderResponse{}, fmt.Errorf("search/render pagination is negative")

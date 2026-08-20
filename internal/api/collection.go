@@ -415,17 +415,17 @@ func (h *Handler) serveQuotes(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = value
 	}
-	filter := postgres.MarketQuoteFilter{
-		AppID:     appid,
-		ProductID: productID,
-		Platform:  strings.TrimSpace(query.Get("platform")),
-		Side:      market.Side(strings.TrimSpace(query.Get("side"))),
-		Keyword:   strings.TrimSpace(query.Get("keyword")),
-		ItemType:  strings.TrimSpace(query.Get("item_type")),
-		ItemTypes: queryList(query, "item_types"),
-		SteamCats: queryList(query, "steam_cats"),
-		Sort:       postgres.QuoteSort(strings.TrimSpace(query.Get("sort"))),
-		DropWindow: postgres.DropWindow(strings.TrimSpace(query.Get("drop_window"))),
+	filter := market.QuoteFilter{
+		AppID:      appid,
+		ProductID:  productID,
+		Platform:   strings.TrimSpace(query.Get("platform")),
+		Side:       market.Side(strings.TrimSpace(query.Get("side"))),
+		Keyword:    strings.TrimSpace(query.Get("keyword")),
+		ItemType:   strings.TrimSpace(query.Get("item_type")),
+		ItemTypes:  queryList(query, "item_types"),
+		SteamCats:  queryList(query, "steam_cats"),
+		Sort:       market.QuoteSort(strings.TrimSpace(query.Get("sort"))),
+		DropWindow: market.DropWindow(strings.TrimSpace(query.Get("drop_window"))),
 		DropsOnly:  droppedOnly(query.Get("dropped")),
 		Limit:      limit,
 		Offset:     offset,
@@ -447,6 +447,10 @@ func (h *Handler) serveQuotes(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.market.ListQuotes(r.Context(), filter)
 	if err != nil {
+		if errors.Is(err, market.ErrStorage) {
+			writeError(w, http.StatusServiceUnavailable, "market_storage_unavailable")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_quotes")
 		return
 	}
@@ -477,6 +481,10 @@ func (h *Handler) serveQuoteFacets(w http.ResponseWriter, r *http.Request) {
 	}
 	facets, err := h.market.QuoteFacets(r.Context(), appid)
 	if err != nil {
+		if errors.Is(err, market.ErrStorage) {
+			writeError(w, http.StatusServiceUnavailable, "market_storage_unavailable")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_quotes")
 		return
 	}
@@ -541,7 +549,7 @@ func jsonStrings(values []string) []string {
 	return values
 }
 
-func toQuoteResponse(quote postgres.MarketQuote) quoteResponse {
+func toQuoteResponse(quote market.Quote) quoteResponse {
 	out := quoteResponse{
 		ProductID:          int64(quote.ProductID),
 		AppID:              quote.AppID,

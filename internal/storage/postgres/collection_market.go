@@ -89,7 +89,8 @@ func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) 
 	if err := s.validateCollectionStore(); err != nil {
 		return collection.Page{}, false, err
 	}
-	if input.TargetID.Validate() != nil || input.TaskID.Validate() != nil ||
+	if input.TargetID.Validate() != nil || input.TaskID.Validate() != nil || input.CombinationID.Validate() != nil ||
+		input.ClaimGeneration < 1 ||
 		input.ExpectedSwitch.Validate() != nil || input.CursorBefore.Validate() != nil ||
 		input.CursorAfter.Validate() != nil || !validCollectionTime(input.CollectedAt) ||
 		input.AskTotal < 0 {
@@ -118,25 +119,24 @@ FOR UPDATE`, int64(input.TargetID))
 	if target.TaskType() != collection.TaskTypeSummary || !hasSide || !hasApp {
 		return collection.Page{}, false, ErrCollectionIntegrity
 	}
+	if side == market.SideBid && input.AskTotal != 0 {
+		return collection.Page{}, false, ErrCollectionInvalidInput
+	}
 	if target.Desired() != collection.DesiredEnabled || target.SwitchVersion() != input.ExpectedSwitch {
 		return collection.Page{}, false, ErrCollectionFence
 	}
 
-	var claimedBy sql.NullInt64
+	var claimedTaskID int64
 	err = tx.QueryRowContext(ctx, `
-SELECT claimed_by FROM collection_tasks
-WHERE task_id = $1 AND target_id = $2 AND state = 'claimed'
-FOR UPDATE`, int64(input.TaskID), int64(input.TargetID)).Scan(&claimedBy)
+SELECT task_id FROM collection_tasks
+WHERE task_id = $1 AND target_id = $2 AND state = 'claimed' AND claimed_by = $3 AND claim_generation = $4
+FOR UPDATE`, int64(input.TaskID), int64(input.TargetID), int64(input.CombinationID), input.ClaimGeneration).Scan(&claimedTaskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return collection.Page{}, false, ErrCollectionFence
 	}
 	if err != nil {
 		return collection.Page{}, false, collectionStorageError(ctx)
 	}
-	if !claimedBy.Valid {
-		return collection.Page{}, false, ErrCollectionIntegrity
-	}
-
 	if target.WriteSeq() == int64(^uint64(0)>>1) {
 		return collection.Page{}, false, ErrCollectionIntegrity
 	}
@@ -223,13 +223,25 @@ ON CONFLICT (target_id) DO UPDATE SET
 		return collection.Page{}, false, ErrCollectionIntegrity
 	}
 	refillTotal := target.RefillTotal()
-	if input.AskTotal > 0 {
+	refillCursor := target.RefillCursor()
+	if side == market.SideAsk {
 		refillTotal = input.AskTotal
+		if input.AskTotal == 0 {
+			refillCursor, err = collection.EncodeAskRefill(0)
+			if err != nil {
+				return collection.Page{}, false, ErrCollectionIntegrity
+			}
+			if _, err := tx.ExecContext(ctx, `
+DELETE FROM collection_tasks
+WHERE target_id = $1 AND task_id <> $2 AND state = 'queued'`, int64(input.TargetID), int64(input.TaskID)); err != nil {
+				return collection.Page{}, false, mapCollectionWriteError(ctx, err)
+			}
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE collection_targets
-SET write_seq = $2, refill_total = $3
-WHERE target_id = $1`, int64(input.TargetID), writeSeq, refillTotal); err != nil {
+SET write_seq = $2, refill_total = $3, refill_cursor = $4
+WHERE target_id = $1`, int64(input.TargetID), writeSeq, refillTotal, collectionCursorBytes(refillCursor)); err != nil {
 		return collection.Page{}, false, mapCollectionWriteError(ctx, err)
 	}
 	if err := tx.Commit(); err != nil {

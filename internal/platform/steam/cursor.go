@@ -37,7 +37,7 @@ func decodeBidPayload(request collection.PageFetch) (collection.BidBatchPayload,
 	if err := json.Unmarshal(request.Payload, &batch); err != nil {
 		return collection.BidBatchPayload{}, fmt.Errorf("bid batch payload: %w", err)
 	}
-	if batch.AfterID < 0 || batch.Limit < 1 {
+	if batch.AfterID < 0 || batch.Limit != collection.BidBatchSize {
 		return collection.BidBatchPayload{}, fmt.Errorf("bid batch after_id/limit is invalid")
 	}
 	return batch, nil

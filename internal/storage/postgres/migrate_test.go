@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 19 {
-		t.Fatalf("migration count = %d, want 19", len(migrations))
+	if len(migrations) != 23 {
+		t.Fatalf("migration count = %d, want 23", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -38,6 +38,10 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000017_target_steam_facets",
 		"000018_price_ticks",
 		"000019_drop_price_watches",
+		"000020_single_bid_request",
+		"000021_tick_platform_side_index",
+		"000022_endpoint_account_ip_rate_limit",
+		"000023_collection_claim_generation",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -51,6 +55,54 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 			t.Fatalf("migration %q checksum length = %d", current.Version, len(current.Checksum))
 		}
 	}
+}
+
+func TestCollectionClaimGenerationMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000023_collection_claim_generation")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "add column claim_generation bigint not null default 0")
+	assertContains(t, compact, "set claim_generation = 1 where state = 'claimed'")
+	assertContains(t, compact, "state <> 'claimed' or claim_generation > 0")
+}
+
+func TestSingleBidRequestMigrationRebuildsBidQueue(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000020_single_bid_request")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "pg_advisory_xact_lock(hashtextextended('collection-daemon:' || current_schema(), 0))")
+	assertContains(t, compact, "delete from collection_tasks t using collection_targets g")
+	assertContains(t, compact, "g.side = 'bid'")
+	assertContains(t, compact, "set refill_cursor = convert_to('0', 'utf8')")
+}
+
+func TestPriceTickPlatformSideIndexMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000021_tick_platform_side_index")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "create index market_price_ticks_platform_side_time_idx")
+	assertContains(t, compact, "(platform, side, collected_at desc, tick_id desc)")
+}
+
+func TestEndpointAccountIPRateLimitMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000022_endpoint_account_ip_rate_limit")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "drop constraint rate_limit_policies_endpoint_shape")
+	assertContains(t, compact, "scope = 'account_ip'")
+	assertContains(t, compact, "endpoint_class = ''")
 }
 
 func TestMigrationManifestIsSortedAndValidated(t *testing.T) {
@@ -786,6 +838,17 @@ func tableDefinition(t *testing.T, sqlText, table string) string {
 		t.Fatalf("unterminated table %q", table)
 	}
 	return remainder[:end]
+}
+
+func migrationByVersion(t *testing.T, migrations []migration, version string) migration {
+	t.Helper()
+	for _, current := range migrations {
+		if current.Version == version {
+			return current
+		}
+	}
+	t.Fatalf("missing migration %q", version)
+	return migration{}
 }
 
 func compactSQL(value string) string {

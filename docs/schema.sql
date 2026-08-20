@@ -1,27 +1,24 @@
--- 当前库结构的只读快照，方便一眼看到全貌，不必把十几个迁移在脑子里叠起来。
+-- 当前库结构的只读快照。
 --
 -- 事实来源是 internal/storage/postgres/migrations/，程序启动时按文件名顺序应用。
--- 改结构一律新增迁移，不要改这个文件；它是派生产物，重新导出即可：
+-- 改结构只新增迁移；应用全部迁移后重新导出本文件：
 --
 --   pg_dump --schema-only --no-owner --no-privileges "$BUFFGO_DSN" -f docs/schema.sql
 --
--- 不要加 --schema=public：那会生成 CREATE SCHEMA public，导出的快照就没法直接重放。
---
--- 导出自应用到 000016_target_price_range 的库。
--- buffgo_storage_migrations 是迁移执行器自己建的记录表，不在迁移文件里。
--- 只含结构不含数据，所以不会带出平台会话与代理凭据。
+-- 导出自已应用到 000021_tick_platform_side_index 的空库，不包含业务数据。
+-- buffgo_storage_migrations 是迁移执行器维护的版本记录表。
 
 --
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 17.5 (Homebrew)
--- Dumped by pg_dump version 17.5 (Homebrew)
+
+-- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
+-- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -200,20 +197,24 @@ CREATE TABLE public.collection_targets (
     changed_at timestamp with time zone NOT NULL,
     sort_column text DEFAULT 'price'::text NOT NULL COLLATE pg_catalog."C",
     sort_dir text DEFAULT 'asc'::text NOT NULL COLLATE pg_catalog."C",
-    price_min_cents bigint,
-    price_max_cents bigint,
     refill_cursor bytea DEFAULT '\x'::bytea NOT NULL,
     write_seq bigint DEFAULT 0 NOT NULL,
     refill_total bigint DEFAULT 0 NOT NULL,
+    price_min_cents bigint,
+    price_max_cents bigint,
+    steam_cats text[] DEFAULT '{}'::text[] NOT NULL,
+    item_classes text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT collection_targets_actual_state_valid CHECK ((actual_state = ANY (ARRAY['starting'::text, 'waiting'::text, 'running'::text, 'blocked'::text, 'stopping'::text, 'stopped'::text, 'error'::text]))),
     CONSTRAINT collection_targets_changed_at_finite CHECK (isfinite(changed_at)),
     CONSTRAINT collection_targets_desired_actual_shape CHECK ((((desired_state = 'enabled'::text) AND (actual_state = ANY (ARRAY['starting'::text, 'waiting'::text, 'running'::text, 'blocked'::text, 'error'::text]))) OR ((desired_state = 'disabled'::text) AND (actual_state = ANY (ARRAY['stopping'::text, 'stopped'::text]))))),
     CONSTRAINT collection_targets_desired_state_valid CHECK ((desired_state = ANY (ARRAY['enabled'::text, 'disabled'::text]))),
     CONSTRAINT collection_targets_diagnostic_shape CHECK ((((actual_state = 'waiting'::text) AND (reason_code = ANY (ARRAY['next_cycle'::text, 'scheduler_opportunity'::text, 'transient_failure'::text])) AND (recovery_mode = 'automatic'::text) AND (next_check_at IS NOT NULL) AND isfinite(next_check_at) AND (next_check_at > changed_at)) OR ((actual_state = 'blocked'::text) AND (reason_code = ANY (ARRAY['no_combination'::text, 'cooldown'::text, 'egress_unavailable'::text, 'missing_rate_policy'::text, 'session_invalid'::text, 'invalid_config'::text, 'interface_unverified'::text])) AND (((reason_code = ANY (ARRAY['no_combination'::text, 'cooldown'::text, 'egress_unavailable'::text])) AND (recovery_mode = 'automatic'::text) AND (next_check_at IS NOT NULL) AND isfinite(next_check_at) AND (next_check_at > changed_at)) OR ((reason_code = ANY (ARRAY['missing_rate_policy'::text, 'session_invalid'::text, 'invalid_config'::text, 'interface_unverified'::text])) AND (recovery_mode = 'manual'::text) AND (next_check_at IS NULL)))) OR ((actual_state = 'error'::text) AND (reason_code = ANY (ARRAY['scheduler_failure'::text, 'state_integrity'::text])) AND (recovery_mode = 'manual'::text) AND (next_check_at IS NULL)) OR ((actual_state = ANY (ARRAY['starting'::text, 'running'::text, 'stopping'::text, 'stopped'::text])) AND (reason_code = ''::text) AND (recovery_mode = ''::text) AND (next_check_at IS NULL)))),
     CONSTRAINT collection_targets_identity_positive CHECK ((target_id > 0)),
+    CONSTRAINT collection_targets_item_classes_shape CHECK ((cardinality(item_classes) <= 128)),
     CONSTRAINT collection_targets_kind_shape CHECK (((kind = 'summary'::text) AND (appid IS NOT NULL) AND (appid > 0) AND (side IS NOT NULL) AND (side = ANY (ARRAY['bid'::text, 'ask'::text])) AND (period_microseconds IS NULL))),
     CONSTRAINT collection_targets_kind_valid CHECK ((kind = 'summary'::text)),
     CONSTRAINT collection_targets_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
+    CONSTRAINT collection_targets_price_range_valid CHECK ((((price_min_cents IS NULL) OR (price_min_cents >= 0)) AND ((price_max_cents IS NULL) OR (price_max_cents >= 0)) AND ((price_min_cents IS NULL) OR (price_max_cents IS NULL) OR (price_min_cents <= price_max_cents)))),
     CONSTRAINT collection_targets_reason_valid CHECK (((reason_code = ''::text) OR (reason_code = ANY (ARRAY['next_cycle'::text, 'scheduler_opportunity'::text, 'transient_failure'::text, 'no_combination'::text, 'cooldown'::text, 'egress_unavailable'::text, 'missing_rate_policy'::text, 'session_invalid'::text, 'invalid_config'::text, 'interface_unverified'::text, 'scheduler_failure'::text, 'state_integrity'::text])))),
     CONSTRAINT collection_targets_recovery_mode_valid CHECK ((recovery_mode = ANY (ARRAY[''::text, 'automatic'::text, 'manual'::text]))),
     CONSTRAINT collection_targets_refill_cursor_size CHECK ((octet_length(refill_cursor) <= 4096)),
@@ -222,7 +223,7 @@ CREATE TABLE public.collection_targets (
     CONSTRAINT collection_targets_side_valid CHECK (((side IS NULL) OR (side = ANY (ARRAY['bid'::text, 'ask'::text])))),
     CONSTRAINT collection_targets_sort_column_valid CHECK ((sort_column = ANY (ARRAY['price'::text, 'quantity'::text, 'name'::text]))),
     CONSTRAINT collection_targets_sort_dir_valid CHECK ((sort_dir = ANY (ARRAY['asc'::text, 'desc'::text]))),
-    CONSTRAINT collection_targets_price_range_valid CHECK (((price_min_cents IS NULL OR price_min_cents >= 0) AND (price_max_cents IS NULL OR price_max_cents >= 0) AND (price_min_cents IS NULL OR price_max_cents IS NULL OR price_min_cents <= price_max_cents))),
+    CONSTRAINT collection_targets_steam_cats_shape CHECK ((cardinality(steam_cats) <= 8)),
     CONSTRAINT collection_targets_switch_version_positive CHECK ((switch_version > 0)),
     CONSTRAINT collection_targets_write_seq_nonnegative CHECK ((write_seq >= 0))
 );
@@ -256,6 +257,8 @@ CREATE TABLE public.collection_tasks (
     state text NOT NULL COLLATE pg_catalog."C",
     claimed_by bigint,
     claimed_at timestamp with time zone,
+    claim_generation bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT collection_tasks_claim_generation_valid CHECK (((claim_generation >= 0) AND ((state <> 'claimed'::text) OR (claim_generation > 0)))),
     CONSTRAINT collection_tasks_claim_shape CHECK ((((state = 'queued'::text) AND (claimed_by IS NULL) AND (claimed_at IS NULL)) OR ((state = 'claimed'::text) AND (claimed_by IS NOT NULL) AND (claimed_by > 0) AND (claimed_at IS NOT NULL) AND isfinite(claimed_at)))),
     CONSTRAINT collection_tasks_enqueued_at_valid CHECK (isfinite(enqueued_at)),
     CONSTRAINT collection_tasks_identity_positive CHECK (((task_id > 0) AND (target_id > 0) AND (enqueue_seq > 0))),
@@ -329,6 +332,46 @@ CREATE TABLE public.market_latest_attempts (
     CONSTRAINT market_latest_attempts_status_valid CHECK ((status = ANY (ARRAY['present'::text, 'empty'::text, 'unavailable'::text, 'failed'::text]))),
     CONSTRAINT market_latest_attempts_switch_version_positive CHECK ((switch_version > 0)),
     CONSTRAINT market_latest_attempts_write_seq_positive CHECK ((write_seq > 0))
+);
+
+
+--
+-- Name: market_price_ticks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.market_price_ticks (
+    tick_id bigint NOT NULL,
+    product_id bigint NOT NULL,
+    platform text NOT NULL COLLATE pg_catalog."C",
+    side text NOT NULL COLLATE pg_catalog."C",
+    prev_cents bigint,
+    price_cny_cents bigint NOT NULL,
+    collected_at timestamp with time zone NOT NULL,
+    switch_version bigint NOT NULL,
+    write_seq bigint NOT NULL,
+    CONSTRAINT market_price_ticks_cents_changed CHECK (((prev_cents IS NULL) OR (prev_cents IS DISTINCT FROM price_cny_cents))),
+    CONSTRAINT market_price_ticks_collected_at_finite CHECK (isfinite(collected_at)),
+    CONSTRAINT market_price_ticks_platform_canonical CHECK ((platform ~ '^[a-z][a-z0-9_.-]{0,31}$'::text)),
+    CONSTRAINT market_price_ticks_prev_nonnegative CHECK (((prev_cents IS NULL) OR (prev_cents >= 0))),
+    CONSTRAINT market_price_ticks_price_nonnegative CHECK ((price_cny_cents >= 0)),
+    CONSTRAINT market_price_ticks_product_id_positive CHECK ((product_id > 0)),
+    CONSTRAINT market_price_ticks_side_valid CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text]))),
+    CONSTRAINT market_price_ticks_switch_version_positive CHECK ((switch_version > 0)),
+    CONSTRAINT market_price_ticks_write_seq_positive CHECK ((write_seq > 0))
+);
+
+
+--
+-- Name: market_price_ticks_tick_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.market_price_ticks ALTER COLUMN tick_id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.market_price_ticks_tick_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
 );
 
 
@@ -452,7 +495,7 @@ CREATE TABLE public.rate_limit_policies (
     changed_at timestamp with time zone NOT NULL,
     ready_at timestamp with time zone NOT NULL,
     CONSTRAINT rate_limit_policies_duration_bounds CHECK ((((min_interval_microseconds IS NULL) OR ((min_interval_microseconds >= 1) AND (min_interval_microseconds <= '31536000000000'::bigint))) AND ((window_microseconds IS NULL) OR ((window_microseconds >= 1) AND (window_microseconds <= '31536000000000'::bigint))) AND ((default_cooldown_microseconds IS NULL) OR ((default_cooldown_microseconds >= 1) AND (default_cooldown_microseconds <= '31536000000000'::bigint))))),
-    CONSTRAINT rate_limit_policies_endpoint_shape CHECK ((((scope = 'interface'::text) AND (endpoint_class ~ '^[a-z][a-z0-9_.-]{0,63}$'::text)) OR ((scope <> 'interface'::text) AND (endpoint_class = ''::text)))),
+    CONSTRAINT rate_limit_policies_endpoint_shape CHECK ((((scope = 'interface'::text) AND (endpoint_class ~ '^[a-z][a-z0-9_.-]{0,63}$'::text)) OR ((scope = 'account_ip'::text) AND ((endpoint_class = ''::text) OR (endpoint_class ~ '^[a-z][a-z0-9_.-]{0,63}$'::text))) OR ((scope <> ALL (ARRAY['interface'::text, 'account_ip'::text])) AND (endpoint_class = ''::text)))),
     CONSTRAINT rate_limit_policies_identity_positive CHECK ((policy_id > 0)),
     CONSTRAINT rate_limit_policies_kind_shape CHECK ((((kind = 'cooldown_only'::text) AND (min_interval_microseconds IS NULL) AND (window_microseconds IS NULL) AND (max_requests IS NULL)) OR ((kind = 'min_interval'::text) AND (min_interval_microseconds IS NOT NULL) AND (window_microseconds IS NULL) AND (max_requests IS NULL)) OR ((kind = 'rolling_window'::text) AND (min_interval_microseconds IS NULL) AND (window_microseconds IS NOT NULL) AND ((max_requests >= 1) AND (max_requests <= 1024))))),
     CONSTRAINT rate_limit_policies_kind_valid CHECK ((kind = ANY (ARRAY['cooldown_only'::text, 'min_interval'::text, 'rolling_window'::text]))),
@@ -662,6 +705,22 @@ ALTER TABLE ONLY public.market_latest_attempts
 
 
 --
+-- Name: market_price_ticks market_price_ticks_identity_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_ticks
+    ADD CONSTRAINT market_price_ticks_identity_key UNIQUE (product_id, platform, side, switch_version, write_seq);
+
+
+--
+-- Name: market_price_ticks market_price_ticks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_ticks
+    ADD CONSTRAINT market_price_ticks_pkey PRIMARY KEY (tick_id);
+
+
+--
 -- Name: platform_accounts platform_accounts_account_platform_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -802,6 +861,27 @@ CREATE UNIQUE INDEX collection_tasks_claimed_by ON public.collection_tasks USING
 
 
 --
+-- Name: market_price_ticks_collected_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX market_price_ticks_collected_at_idx ON public.market_price_ticks USING btree (collected_at);
+
+
+--
+-- Name: market_price_ticks_platform_side_time_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX market_price_ticks_platform_side_time_idx ON public.market_price_ticks USING btree (platform, side, collected_at DESC, tick_id DESC);
+
+
+--
+-- Name: market_price_ticks_series_time_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX market_price_ticks_series_time_idx ON public.market_price_ticks USING btree (product_id, platform, side, collected_at DESC, tick_id DESC);
+
+
+--
 -- Name: rate_limit_states_account_ip_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -914,6 +994,14 @@ ALTER TABLE ONLY public.market_latest_attempts
 
 
 --
+-- Name: market_price_ticks market_price_ticks_product_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.market_price_ticks
+    ADD CONSTRAINT market_price_ticks_product_fkey FOREIGN KEY (product_id) REFERENCES public.steam_products(product_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: platform_product_mappings platform_product_mappings_product_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -940,4 +1028,3 @@ ALTER TABLE ONLY public.rate_limit_states
 --
 -- PostgreSQL database dump complete
 --
-

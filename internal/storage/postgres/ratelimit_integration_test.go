@@ -150,6 +150,9 @@ INSERT INTO rate_limit_states (
 			t.Fatalf("invalid rate policy was accepted: %s", statement)
 		}
 	}
+	if id := insertRawRatePolicy(t, db, "steam", "account_ip_endpoint", "account_ip", "summary", "cooldown_only"); id < 1 {
+		t.Fatal("endpoint account-IP policy was not stored")
+	}
 }
 
 func assertRateLimitDatabaseShape(t *testing.T, db *sql.DB) {
@@ -406,6 +409,7 @@ func testRateLimitStorage(t *testing.T, dsn string) {
 	t.Run("shared exit aggregation", func(t *testing.T) { testRateLimitSharedExit(t, dsn) })
 	t.Run("same combination exit change", func(t *testing.T) { testRateLimitSameCombinationExitChange(t, dsn) })
 	t.Run("endpoint shares platform budget", func(t *testing.T) { testRateLimitEndpointPlatformBudget(t, dsn) })
+	t.Run("endpoint account-IP isolation", func(t *testing.T) { testRateLimitEndpointAccountIPIsolation(t, dsn) })
 	t.Run("platforms isolate shared exit", func(t *testing.T) { testRateLimitPlatformIsolation(t, dsn) })
 	t.Run("post-lock database clock", func(t *testing.T) { testRateLimitPostLockClock(t, dsn) })
 	t.Run("strict rolling boundary", func(t *testing.T) { testRateLimitRollingBoundary(t, dsn) })
@@ -540,6 +544,10 @@ func testRateLimitConcurrentAdmission(t *testing.T, dsn string) {
 		EndpointClass: "summary", Kind: ratelimit.KindCooldownOnly,
 	})
 	makeRateLimitPolicyReady(t, db, profile.ID)
+	if _, err := store.AdmitRateLimit(ctx, fixture.request); !errors.Is(err, ratelimit.ErrPolicyUnavailable) {
+		t.Fatalf("missing exact account-IP rate error=%v", err)
+	}
+	required := createRequiredEndpointRate(t, store, db, "steam", "summary")
 
 	start := make(chan struct{})
 	results := make(chan rateLimitAdmissionResult, 2)
@@ -620,30 +628,31 @@ func testRateLimitConcurrentAdmission(t *testing.T, dsn string) {
 	if err != nil || profileStates[0].CooldownUntil == nil || !profileStates[0].CooldownUntil.Equal(persistedDeadline) {
 		t.Fatalf("rejected old ticket changed deadline=%+v err=%v", profileStates, err)
 	}
-	platform, err = store.ReplaceRateLimitPolicy(ctx, platform.ID, platform.Revision, platform.Spec, false)
+	required, err = store.ReplaceRateLimitPolicy(ctx, required.ID, required.Revision, required.Spec, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.AdmitRateLimit(ctx, fixture.request); !errors.Is(err, ratelimit.ErrPolicyUnavailable) {
-		t.Fatalf("disabled platform requirement error=%v", err)
+		t.Fatalf("disabled exact account-IP requirement error=%v", err)
 	}
-	platform, err = store.ReplaceRateLimitPolicy(ctx, platform.ID, platform.Revision, platform.Spec, true)
+	required, err = store.ReplaceRateLimitPolicy(ctx, required.ID, required.Revision, required.Spec, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	makeRateLimitPolicyReady(t, db, platform.ID)
+	makeRateLimitPolicyReady(t, db, required.ID)
 	profile, err = store.ReplaceRateLimitPolicy(ctx, profile.ID, profile.Revision, profile.Spec, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AdmitRateLimit(ctx, fixture.request); !errors.Is(err, ratelimit.ErrPolicyUnavailable) {
-		t.Fatalf("disabled interface requirement error=%v", err)
+	if _, err := store.AdmitRateLimit(ctx, fixture.request); err != nil {
+		t.Fatalf("disabled legacy interface profile error=%v", err)
 	}
 }
 
 func testRateLimitDelayedFeedback(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "feedback", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -729,6 +738,7 @@ RETURNING clock_floor_at`, int64(accountA.ID)).Scan(&feedbackFloor); err != nil 
 func testRateLimitReplacementReset(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "replace", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_interval", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindMinInterval, MinInterval: 10 * time.Second,
@@ -811,6 +821,7 @@ RETURNING clock_floor_at`, int64(platform.ID)).Scan(&futureFloor); err != nil {
 func testRateLimitFeedbackRollbackRetry(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "feedback-retry", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -881,6 +892,7 @@ func testRateLimitSharedExit(t *testing.T, dsn string) {
 	first := newRateLimitRequestFixture(t, store, "shared-one", netip.MustParseAddr("1.1.1.1"))
 	second := newRateLimitRequestFixture(t, store, "shared-two", netip.MustParseAddr("1.1.1.1"))
 	other := newRateLimitRequestFixture(t, store, "other-exit", netip.MustParseAddr("8.8.8.8"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -953,6 +965,7 @@ func testRateLimitSharedExit(t *testing.T, dsn string) {
 func testRateLimitSemanticIntegrity(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "integrity", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_interval", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindMinInterval, MinInterval: 10 * time.Second,
@@ -995,6 +1008,7 @@ WHERE policy_id = $1`, int64(platform.ID)); err != nil {
 func testRateLimitRollingBoundary(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "rolling", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "strict_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 2,
@@ -1044,6 +1058,8 @@ func testRateLimitEndpointPlatformBudget(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	bid := newRateLimitRequestFixtureFor(t, store, "bid", netip.MustParseAddr("1.1.1.1"), "steam", "bid")
 	ask := newRateLimitRequestFixtureFor(t, store, "ask", netip.MustParseAddr("8.8.8.8"), "steam", "ask")
+	createRequiredEndpointRate(t, store, db, "steam", "bid")
+	createRequiredEndpointRate(t, store, db, "steam", "ask")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_total", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindMinInterval, MinInterval: time.Minute,
@@ -1082,11 +1098,76 @@ func testRateLimitEndpointPlatformBudget(t *testing.T, dsn string) {
 	}
 }
 
+func testRateLimitEndpointAccountIPIsolation(t *testing.T, dsn string) {
+	store, db := newRateLimitTestStore(t, dsn)
+	first := newRateLimitRequestFixtureFor(t, store, "endpoint-first", netip.MustParseAddr("1.1.1.1"), "steam", "ask")
+	second := newRateLimitRequestFixtureFor(t, store, "endpoint-second", netip.MustParseAddr("8.8.8.8"), "steam", "ask")
+	firstBid, err := ratelimit.RequestFromLease(first.lease, "bid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
+		Platform: "steam", RuleKey: "ask_account_exit", Scope: ratelimit.ScopeAccountIP,
+		EndpointClass: "ask", Kind: ratelimit.KindMinInterval,
+		MinInterval: time.Minute, DefaultCooldown: time.Minute,
+	})
+	bid := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
+		Platform: "steam", RuleKey: "bid_account_exit", Scope: ratelimit.ScopeAccountIP,
+		EndpointClass: "bid", Kind: ratelimit.KindMinInterval,
+		MinInterval: time.Minute, DefaultCooldown: time.Minute,
+	})
+	generic := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
+		Platform: "steam", RuleKey: "generic_account_exit", Scope: ratelimit.ScopeAccountIP,
+		Kind: ratelimit.KindCooldownOnly,
+	})
+	for _, id := range []ratelimit.PolicyID{ask.ID, bid.ID, generic.ID} {
+		makeRateLimitPolicyReady(t, db, id)
+	}
+
+	firstAsk, err := store.AdmitRateLimit(t.Context(), first.request)
+	if err != nil || !firstAsk.Allowed() {
+		t.Fatalf("first ask allowed=%v err=%v", firstAsk.Allowed(), err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		t.Context(), firstAsk.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	genericStates, err := store.ListRateLimitStates(t.Context(), generic.ID)
+	if err != nil || len(genericStates) != 1 || genericStates[0].CooldownUntil != nil {
+		t.Fatalf("generic account-IP rule received endpoint feedback states=%+v err=%v", genericStates, err)
+	}
+	secondAsk, err := store.AdmitRateLimit(t.Context(), second.request)
+	if err != nil || !secondAsk.Allowed() {
+		t.Fatalf("other account-IP ask allowed=%v err=%v", secondAsk.Allowed(), err)
+	}
+	firstBidDecision, err := store.AdmitRateLimit(t.Context(), firstBid)
+	if err != nil || !firstBidDecision.Allowed() {
+		t.Fatalf("same account-IP bid allowed=%v err=%v", firstBidDecision.Allowed(), err)
+	}
+	blocked, err := store.AdmitRateLimit(t.Context(), first.request)
+	if err != nil || blocked.Allowed() {
+		t.Fatalf("cooled account-IP ask allowed=%v err=%v", blocked.Allowed(), err)
+	}
+	found := false
+	for _, blocker := range blocked.Blockers() {
+		if blocker.PolicyID() == ask.ID && blocker.Scope() == ratelimit.ScopeAccountIP &&
+			blocker.Reason() == ratelimit.BlockReasonCooldown {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("account-IP ask cooldown blocker missing: %+v", blocked.Blockers())
+	}
+}
+
 func testRateLimitSameCombinationExitChange(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	firstAddress := netip.MustParseAddr("1.1.1.1")
 	secondAddress := netip.MustParseAddr("8.8.8.8")
 	fixture := newRateLimitRequestFixture(t, store, "exit-change", firstAddress)
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -1138,7 +1219,7 @@ func testRateLimitSameCombinationExitChange(t *testing.T, dsn string) {
 	}
 
 	lease, err := fixture.coordinator.AcquireCombination(
-		t.Context(), fixture.component, fixture.combinationID, resource.TargetRegionDomestic, verifiedAt,
+		t.Context(), fixture.component, fixture.combinationID, fixture.targetRegion, verifiedAt,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1200,6 +1281,7 @@ func testRateLimitPlatformIsolation(t *testing.T, dsn string) {
 	buff := newRateLimitRequestFixtureFor(t, store, "buff-shared", address, "buff", "summary")
 	policies := make(map[resource.Platform][]ratelimit.Policy)
 	for _, platform := range []resource.Platform{"steam", "buff"} {
+		createRequiredEndpointRate(t, store, db, platform, "summary")
 		policies[platform] = []ratelimit.Policy{
 			createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 				Platform: platform, RuleKey: "platform_total", Scope: ratelimit.ScopePlatform,
@@ -1245,6 +1327,7 @@ func testRateLimitPlatformIsolation(t *testing.T, dsn string) {
 func testRateLimitPostLockClock(t *testing.T, dsn string) {
 	t.Run("expired exit is rejected", func(t *testing.T) {
 		store, db := newRateLimitTestStore(t, dsn)
+		createRequiredEndpointRate(t, store, db, "steam", "summary")
 		platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 			Platform: "steam", RuleKey: "platform_total", Scope: ratelimit.ScopePlatform,
 			Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -1331,6 +1414,7 @@ SELECT policy_id FROM rate_limit_policies WHERE policy_id = $1 FOR SHARE`, int64
 func testClosedRateLimitErrors(t *testing.T, dsn string) {
 	store, db := newRateLimitTestStore(t, dsn)
 	fixture := newRateLimitRequestFixture(t, store, "closed", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
 	platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 		Platform: "steam", RuleKey: "platform_window", Scope: ratelimit.ScopePlatform,
 		Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -1385,6 +1469,7 @@ type rateLimitRequestFixture struct {
 	coordinator   *resource.Coordinator
 	component     resource.ComponentID
 	lease         resource.Lease
+	targetRegion  resource.TargetRegion
 	accountID     resource.AccountID
 	nodeID        resource.NodeID
 	combinationID resource.CombinationID
@@ -1432,6 +1517,10 @@ func newRateLimitRequestFixtureWithValidity(
 	t.Helper()
 	ctx := t.Context()
 	now := time.Now().UTC().Truncate(time.Microsecond)
+	targetRegion, known := resource.TargetRegionForPlatform(platform)
+	if !known {
+		t.Fatalf("rate-limit fixture requires a known platform: %s", platform)
+	}
 	account, err := store.CreateAccount(ctx, platform, "rate-account-"+suffix, []byte("rate-session-"+suffix))
 	if err != nil {
 		t.Fatal(err)
@@ -1441,7 +1530,7 @@ func newRateLimitRequestFixtureWithValidity(
 		t.Fatal(err)
 	}
 	node, err := store.CreateNode(ctx, "rate-node-"+suffix, resource.NodeConnectionInput{
-		Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeStatic,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1462,7 +1551,7 @@ func newRateLimitRequestFixtureWithValidity(
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, resource.TargetRegionDomestic, now)
+	lease, err := coordinator.AcquireCombination(ctx, component, combination.ID, targetRegion, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1566,8 @@ func newRateLimitRequestFixtureWithValidity(
 	}
 	return rateLimitRequestFixture{
 		request: request, coordinator: coordinator, component: component, lease: lease,
-		accountID: account.ID, nodeID: node.ID, combinationID: combination.ID,
+		targetRegion: targetRegion,
+		accountID:    account.ID, nodeID: node.ID, combinationID: combination.ID,
 	}
 }
 
@@ -1487,6 +1577,24 @@ func createRateLimitPolicy(t *testing.T, store *Store, spec ratelimit.PolicySpec
 	if err != nil {
 		t.Fatal(err)
 	}
+	return policy
+}
+
+func createRequiredEndpointRate(
+	t *testing.T,
+	store *Store,
+	db *sql.DB,
+	platform resource.Platform,
+	endpoint ratelimit.EndpointClass,
+) ratelimit.Policy {
+	t.Helper()
+	policy := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
+		Platform: platform,
+		RuleKey:  ratelimit.RuleKey(string(endpoint) + "_required_account_exit"),
+		Scope:    ratelimit.ScopeAccountIP, EndpointClass: endpoint,
+		Kind: ratelimit.KindMinInterval, MinInterval: time.Microsecond,
+	})
+	makeRateLimitPolicyReady(t, db, policy.ID)
 	return policy
 }
 

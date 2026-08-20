@@ -136,8 +136,14 @@ func (spec PolicySpec) Validate() error {
 		if err := spec.EndpointClass.Validate(); err != nil {
 			return err
 		}
+	} else if spec.Scope == ScopeAccountIP {
+		if spec.EndpointClass != "" {
+			if err := spec.EndpointClass.Validate(); err != nil {
+				return err
+			}
+		}
 	} else if spec.EndpointClass != "" {
-		return fmt.Errorf("endpoint class is only valid for interface scope")
+		return fmt.Errorf("endpoint class is only valid for interface or account-IP scope")
 	}
 	if err := spec.Kind.Validate(); err != nil {
 		return err
@@ -468,8 +474,14 @@ func (rule AppliedRule) Validate() error {
 		if err := rule.endpointClass.Validate(); err != nil {
 			return err
 		}
+	} else if rule.scope == ScopeAccountIP {
+		if rule.endpointClass != "" {
+			if err := rule.endpointClass.Validate(); err != nil {
+				return err
+			}
+		}
 	} else if rule.endpointClass != "" {
-		return fmt.Errorf("endpoint class is only valid for interface scope")
+		return fmt.Errorf("endpoint class is only valid for interface or account-IP scope")
 	}
 	return validateOptionalDuration("fallback cooldown", rule.fallbackCooldown)
 }
@@ -590,8 +602,8 @@ func (admission Admission) validateShape() error {
 		if rule.platform != admission.request.platform {
 			return fmt.Errorf("applied policy platform does not match request")
 		}
-		if rule.scope == ScopeInterface && rule.endpointClass != admission.request.endpointClass {
-			return fmt.Errorf("applied interface policy does not match request")
+		if rule.endpointClass != "" && rule.endpointClass != admission.request.endpointClass {
+			return fmt.Errorf("applied endpoint policy does not match request")
 		}
 		seen[rule.policyID] = struct{}{}
 	}
@@ -615,6 +627,51 @@ func (admission Admission) HasScope(scope Scope) bool {
 		}
 	}
 	return false
+}
+
+// FeedbackRules returns the exact applied rules selected by scoped feedback.
+// An endpoint-specific account-IP rule supersedes a legacy cross-endpoint rule.
+func (admission Admission) FeedbackRules(scopes []Scope) ([]AppliedRule, error) {
+	if err := admission.validateShape(); err != nil {
+		return nil, err
+	}
+	if len(scopes) == 0 {
+		return nil, fmt.Errorf("feedback requires at least one scope")
+	}
+	selectedScopes := make(map[Scope]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if err := scope.Validate(); err != nil {
+			return nil, err
+		}
+		if _, exists := selectedScopes[scope]; exists {
+			return nil, fmt.Errorf("duplicate feedback scope")
+		}
+		if !admission.HasScope(scope) {
+			return nil, fmt.Errorf("feedback scope was not applied by admission")
+		}
+		selectedScopes[scope] = struct{}{}
+	}
+	exactAccountIP := false
+	if _, selected := selectedScopes[ScopeAccountIP]; selected {
+		for _, rule := range admission.rules {
+			if rule.scope == ScopeAccountIP && rule.endpointClass != "" {
+				exactAccountIP = true
+				break
+			}
+		}
+	}
+	rules := make([]AppliedRule, 0)
+	for _, rule := range admission.rules {
+		if _, selected := selectedScopes[rule.scope]; !selected {
+			continue
+		}
+		if exactAccountIP && rule.scope == ScopeAccountIP && rule.endpointClass == "" {
+			continue
+		}
+		rules = append(rules, rule)
+	}
+	sort.Slice(rules, func(left, right int) bool { return rules[left].policyID < rules[right].policyID })
+	return rules, nil
 }
 
 func (admission Admission) isZero() bool {
@@ -880,23 +937,14 @@ func (feedback Feedback) Validate() error {
 		return err
 	}
 
-	seen := make(map[Scope]struct{}, len(feedback.scopes))
-	for _, scope := range feedback.scopes {
-		if err := scope.Validate(); err != nil {
-			return err
-		}
-		if _, exists := seen[scope]; exists {
-			return fmt.Errorf("duplicate feedback scope")
-		}
-		if !feedback.admission.HasScope(scope) {
-			return fmt.Errorf("feedback scope was not applied by admission")
-		}
-		seen[scope] = struct{}{}
+	selectedRules, err := feedback.admission.FeedbackRules(feedback.scopes)
+	if err != nil {
+		return err
 	}
 
 	if feedback.cooldown == 0 {
-		for _, rule := range feedback.admission.rules {
-			if _, selected := seen[rule.scope]; selected && rule.fallbackCooldown == 0 {
+		for _, rule := range selectedRules {
+			if rule.fallbackCooldown == 0 {
 				return fmt.Errorf("selected rule has no fallback cooldown")
 			}
 		}
@@ -916,16 +964,20 @@ func (feedback Feedback) CooldownUntil(policyID PolicyID) (time.Time, error) {
 	if err := feedback.Validate(); err != nil {
 		return time.Time{}, err
 	}
+	selectedRules, err := feedback.admission.FeedbackRules(feedback.scopes)
+	if err != nil {
+		return time.Time{}, err
+	}
 	var applied AppliedRule
 	found := false
-	for _, rule := range feedback.admission.rules {
+	for _, rule := range selectedRules {
 		if rule.policyID == policyID {
 			applied = rule
 			found = true
 			break
 		}
 	}
-	if !found || !feedback.hasScope(applied.scope) {
+	if !found {
 		return time.Time{}, fmt.Errorf("policy was not selected by feedback")
 	}
 	duration := feedback.cooldown
@@ -936,15 +988,6 @@ func (feedback Feedback) CooldownUntil(policyID PolicyID) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return checkedAdd(feedback.observedAt, duration)
-}
-
-func (feedback Feedback) hasScope(scope Scope) bool {
-	for _, candidate := range feedback.scopes {
-		if candidate == scope {
-			return true
-		}
-	}
-	return false
 }
 
 func sameFeedbackCommand(left, right Feedback) bool {

@@ -8,15 +8,12 @@ import (
 	steam "buff-go/internal/platform/steam"
 	"buff-go/internal/resource"
 	"buff-go/internal/storage/postgres"
+	"buff-go/internal/telemetry"
 )
 
 // platformSiteRegions 是平台站点地域的唯一来源。这是平台事实，与是否已接入采集无关：
 // BUFF/IGXE 还没有调度档案，控制面仍要拦住国外节点绑国内站账号。
-var platformSiteRegions = map[resource.Platform]resource.TargetRegion{
-	"steam": resource.TargetRegionForeign,
-	"buff":  resource.TargetRegionDomestic,
-	"igxe":  resource.TargetRegionDomestic,
-}
+var platformSiteRegions = resource.PlatformTargetRegions()
 
 // collectionProfiles 只包含真正接入采集的平台，调度器据此挑组合。
 var collectionProfiles = map[collection.Platform]collection.PlatformProfile{
@@ -24,6 +21,7 @@ var collectionProfiles = map[collection.Platform]collection.PlatformProfile{
 		TargetRegion:    platformSiteRegions["steam"],
 		SummaryEndpoint: "market_summary",
 		BidEndpoint:     "market_orderbook",
+		RequestInterval: steamRequestInterval,
 	},
 }
 
@@ -54,14 +52,43 @@ func newCollectionDaemon(store *postgres.Store, coordinator *resource.Coordinato
 	if err != nil {
 		return nil, fmt.Errorf("collection scheduler: %w", err)
 	}
+	cycleObserver, recoveryObserver := collectionDaemonObservers(telemetry.NewLog())
 	daemon, err := collection.NewDaemon(scheduler, collection.DaemonConfig{
-		Interval:          2 * time.Second,
-		ShutdownTimeout:   30 * time.Second,
-		LockVerifyTimeout: 3 * time.Second,
-		Guard:             store,
+		Interval:                     steamRequestInterval,
+		PriceTickMaintenanceInterval: 24 * time.Hour,
+		ShutdownTimeout:              30 * time.Second,
+		LockVerifyTimeout:            3 * time.Second,
+		Guard:                        store,
+		Observer:                     cycleObserver,
+		RecoveryObserver:             recoveryObserver,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("collection daemon: %w", err)
 	}
 	return daemon, nil
+}
+
+func collectionDaemonObservers(recorder telemetry.Recorder) (func(collection.DaemonCycle), func(collection.RecoveryReport)) {
+	emitFailure := func(source string, err error) {
+		if err == nil {
+			return
+		}
+		telemetry.Emit(recorder, telemetry.Event{
+			Kind: telemetry.KindJobFail, Reason: telemetry.ReasonError,
+			Source: source, Detail: err.Error(),
+		})
+	}
+	cycle := func(result collection.DaemonCycle) {
+		emitFailure("collection.daemon", result.Err)
+		for _, target := range result.Report.Targets {
+			emitFailure("collection.target", target.Err)
+		}
+		for _, worker := range result.Report.Workers {
+			emitFailure("collection.worker", worker.Err)
+		}
+	}
+	recovery := func(report collection.RecoveryReport) {
+		emitFailure("collection.recovery", report.Failures)
+	}
+	return cycle, recovery
 }

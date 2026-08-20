@@ -64,30 +64,8 @@ type LastPresent struct {
 	Order       market.WriteOrder
 }
 
-// MarketQuote is one latest attempt joined with catalog identity and last present.
-type MarketQuote struct {
-	ProductID catalog.ProductID
-	AppID     int64
-	Name      string
-	// Media 是展示元数据，000011 迁移之前建的商品在被重新采到之前是空的。
-	Media              catalog.ProductMedia
-	Platform           string
-	Side               market.Side
-	Status             market.ObservationStatus
-	ReasonCode         string
-	CollectedAt        time.Time
-	SourceTime         *time.Time
-	PresentCents       *market.CNYCents
-	PresentOrderCount  *int64
-	PresentCollectedAt *time.Time
-	// DropCents 是窗口内相对最高价少了多少分；现价已是窗口高或没有窗口变价则为空。
-	DropCents *int64
-	HighCents *int64
-	// DropPctBP 是窗口降幅，单位万分之一（1234 = 12.34%）。
-	DropPctBP  *int64
-	DropCount  *int64
-	LastDropAt *time.Time
-}
+// MarketQuote keeps the storage API compatible with the market query model.
+type MarketQuote = market.Quote
 
 type attemptSnapshot struct {
 	productID      catalog.ProductID
@@ -221,9 +199,6 @@ func savePreparedObservationsTx(
 				return false, err
 			}
 		}
-	}
-	if err := purgeExpiredPriceTicks(ctx, tx, time.Now().UTC()); err != nil {
-		return false, err
 	}
 	return true, nil
 }

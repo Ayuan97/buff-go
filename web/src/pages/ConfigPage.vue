@@ -359,7 +359,7 @@ async function saveCredential() {
   <div class="pg">
     <header class="hero">
       <h1>配置</h1>
-      <p class="hero-sub">这里存的是以后自动补短效代理要用的参数。程序现在不会向代理商拉号，填了也不会多出节点。</p>
+      <p class="hero-sub">这里保存出售搜索条件，以及代理商与地域水位配置；代理节点当前由人工创建和维护。</p>
     </header>
 
     <div v-if="actionError" class="panel fail">
@@ -372,10 +372,9 @@ async function saveCredential() {
       <div class="panel-head">采集配置</div>
       <div class="panel-body">
         <p class="note">
-          顺序决定平台先返回哪一头。出售价格区间会原样传给 Steam 搜索
+          出售顺序决定 Steam 先返回哪一头。出售价格区间会原样传给 Steam 搜索
           （price_min / price_max / price_currency=23），区间外的商品 Steam 根本不返回。
-          Rust 的分类和物品类型在页面上是中文，交给 Steam 的仍是原来的英文参数。
-          求购没有这些参数，填了也不会少打。
+          Rust 的分类和物品类型在页面上是中文，交给 Steam 的仍是原来的英文参数。求购不使用这些搜索条件。
         </p>
         <p class="note warn">
           改顺序、价格区间或分类会丢掉该方向未完成任务，补货从头开始。已经存下来的行情不会丢。
@@ -391,17 +390,18 @@ async function saveCredential() {
               <td>
                 <div class="strong">{{ gameName(target.appid) }} · {{ sideText(target.side) }}</div>
                 <div class="muted">{{ platformLabel(target.platform) }}</div>
-                <div v-if="isRust(target)" class="muted">筛选：{{ facetSummary(target) }}</div>
+                <div v-if="isRust(target) && target.side === 'ask'" class="muted">筛选：{{ facetSummary(target) }}</div>
               </td>
               <td>
-                <select v-model="sortDraft[target.id]" class="mini wide">
+                <select v-if="target.side === 'ask'" v-model="sortDraft[target.id]" class="mini wide">
                   <option v-for="option in SORT_OPTIONS" :key="option.value" :value="option.value">
                     {{ option.label }}
                   </option>
                 </select>
+                <span v-else class="muted">不适用</span>
               </td>
               <td>
-                <div class="range">
+                <div v-if="target.side === 'ask'" class="range">
                   <input
                     v-model="rangeOf(target.id).min"
                     class="mini"
@@ -416,14 +416,14 @@ async function saveCredential() {
                     placeholder="最高"
                   />
                 </div>
-                <div v-if="target.side === 'bid'" class="muted">求购打不出去</div>
+                <span v-else class="muted">不适用</span>
               </td>
               <td>
                 <span v-if="target.desired === 'enabled'">已开</span>
                 <span v-else class="muted">已关</span>
               </td>
               <td>
-                <div class="ops">
+                <div v-if="target.side === 'ask'" class="ops">
                   <button
                     class="btn sm"
                     :disabled="busy || sortDraft[target.id] === sortKey(target)"
@@ -441,6 +441,7 @@ async function saveCredential() {
                     @click="facetEdit = target"
                   >编辑筛选</button>
                 </div>
+                <span v-else class="muted">按已有目录扫描</span>
               </td>
             </tr>
           </tbody>
@@ -451,7 +452,7 @@ async function saveCredential() {
     <section class="panel">
       <div class="panel-head">短效代理水位</div>
       <div class="panel-body">
-        <p class="note">按地域设定「至少要有几个可用的短效代理」。自动补号接入后才会按这个数去拉号。</p>
+        <p class="note">按地域记录期望的可用短效代理数量。当前只保存水位，不会自动获取或补充节点。</p>
         <EmptyState v-if="!watermarks" kind="empty" text="读取中" />
         <EmptyState v-else-if="!watermarks.length" kind="unconfigured" text="还没设置任何地域水位" />
         <table v-else class="data">
@@ -478,7 +479,7 @@ async function saveCredential() {
         <button class="btn sm" @click="showAdd = true">添加代理商</button>
       </div>
       <div class="panel-body">
-        <p class="note">优先级数字小的先用。凭证只写进数据库，页面不回显。</p>
+        <p class="note">当前只保存代理商配置，不会自动拉取代理。优先级数字小的排在前面，凭证不在页面回显。</p>
         <EmptyState v-if="!providers" kind="empty" text="读取中" />
         <EmptyState v-else-if="!providers.length" kind="unconfigured" text="还没有代理商，点右上角添加" />
         <table v-else class="data">

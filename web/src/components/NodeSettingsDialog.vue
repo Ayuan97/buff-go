@@ -11,7 +11,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  exit: [address: string, validUntil: string]
+  exit: [address: string, validUntil: string, done: (saved: boolean) => void]
   rename: [name: string]
   connection: [payload: {
     kind: 'direct' | 'proxy'
@@ -19,7 +19,7 @@ const emit = defineEmits<{
     egress_mode: 'static' | 'sticky'
     proxy_credential?: string
     sticky_session_valid_until?: string
-  }]
+  }, done: (saved: boolean) => void]
 }>()
 
 useEscape(() => emit('close'))
@@ -72,9 +72,11 @@ function submitExit() {
     localError.value = '有效期必须晚于现在'
     return
   }
-  emit('exit', address, until)
-  exitAddress.value = ''
-  exitValidUntil.value = ''
+  emit('exit', address, until, (saved) => {
+    if (!saved) return
+    exitAddress.value = ''
+    exitValidUntil.value = ''
+  })
 }
 
 function submitName() {
@@ -135,8 +137,11 @@ function submitConnection() {
       payload.sticky_session_valid_until = until
     }
   }
-  emit('connection', payload)
-  draft.proxy_credential = ''
+  emit('connection', payload, (saved) => {
+    if (!saved) return
+    draft.proxy_credential = ''
+    draft.sticky_until = ''
+  })
 }
 </script>
 

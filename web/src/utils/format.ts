@@ -172,6 +172,7 @@ export const apiErrorText = (code: string): string => {
     collection_in_use: '这个方向跑过采集，只能关掉，不能移除（移除会丢采集历史）',
     invalid_collection: '采集目标内容不合法',
     collection_storage_unavailable: '数据库不可用，稍后再试',
+    market_storage_unavailable: '数据库不可用，稍后再试',
     collection_error: '采集数据异常，检查服务日志',
     credential_required: '请填写代理商凭证',
     credential_too_large: '凭证内容过大',
@@ -202,7 +203,7 @@ export const targetReasonText = (reason: string | null): string => {
   const map: Record<string, string> = {
     no_combination: '没有可用组合',
     egress_unavailable: '出口不可用或地域不符',
-    session_invalid: '会话失效，换 Cookie 后请关掉再打开该方向',
+    session_invalid: '会话失效，请更换 Cookie',
     cooldown: '限流冷却中',
     missing_rate_policy: '缺少限频策略',
     next_cycle: '等待下一轮',

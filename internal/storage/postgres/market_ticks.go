@@ -11,29 +11,13 @@ import (
 	"buff-go/internal/market"
 )
 
-// PriceTickRetention 是变价记录的保留期，到期由写入事务清掉。
+// PriceTickRetention 是变价记录的保留期，到期由常驻 daemon 定期清理。
 const PriceTickRetention = 30 * 24 * time.Hour
 
-// PriceTick 是一次人民币分变动。PrevCents 为空表示这个方向第一次入价。
-type PriceTick struct {
-	TickID      int64
-	ProductID   catalog.ProductID
-	AppID       int64
-	Name        string
-	Platform    string
-	Side        market.Side
-	PrevCents   *int64
-	PriceCents  int64
-	CollectedAt time.Time
-}
+const priceTickPurgeBatchSize = 5000
 
-// PriceTickFilter 筛变价记录。
-type PriceTickFilter struct {
-	ProductID int64
-	Platform  string
-	Side      market.Side
-	Limit     int
-}
+type PriceTick = market.PriceTick
+type PriceTickFilter = market.PriceTickFilter
 
 func shouldRecordPriceTick(exists bool, oldCents, newCents market.CNYCents) bool {
 	return !exists || oldCents != newCents
@@ -61,14 +45,36 @@ INSERT INTO market_price_ticks (
 	return nil
 }
 
-func purgeExpiredPriceTicks(ctx context.Context, tx *sql.Tx, now time.Time) error {
-	_, err := tx.ExecContext(ctx, `
-DELETE FROM market_price_ticks
-WHERE collected_at < $1`, now.Add(-PriceTickRetention))
-	if err != nil {
-		return fmt.Errorf("purge price ticks: %w", err)
+// PurgeExpiredPriceTicks 独立清理过期变价，不占用行情页面写入事务。
+func (s *Store) PurgeExpiredPriceTicks(ctx context.Context, now time.Time) error {
+	if err := s.validate(); err != nil {
+		return collectionStorageError(ctx)
 	}
-	return nil
+	cutoff := now.UTC().Add(-PriceTickRetention)
+	for {
+		result, err := s.db.ExecContext(ctx, `
+WITH expired AS (
+    SELECT tick_id
+    FROM market_price_ticks
+    WHERE collected_at < $1
+    ORDER BY collected_at, tick_id
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM market_price_ticks ticks
+USING expired
+WHERE ticks.tick_id = expired.tick_id`, cutoff, priceTickPurgeBatchSize)
+		if err != nil {
+			return collectionStorageError(ctx)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return collectionStorageError(ctx)
+		}
+		if deleted < priceTickPurgeBatchSize {
+			return nil
+		}
+	}
 }
 
 func validatePriceTickFilter(filter PriceTickFilter) error {
@@ -94,7 +100,7 @@ func validatePriceTickFilter(filter PriceTickFilter) error {
 // ListPriceTicks 按时间倒序返回变价记录。
 func (s *Store) ListPriceTicks(ctx context.Context, filter PriceTickFilter) ([]PriceTick, error) {
 	if err := s.validate(); err != nil {
-		return nil, err
+		return nil, marketQueryError(ctx, "list price ticks", err)
 	}
 	if filter.Limit == 0 {
 		filter.Limit = 50
@@ -129,7 +135,7 @@ JOIN steam_products p ON p.product_id = t.product_id`
 	query += fmt.Sprintf(" ORDER BY t.collected_at DESC, t.tick_id DESC LIMIT $%d", len(args))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, ErrCollectionStorage
+		return nil, marketQueryError(ctx, "list price ticks", err)
 	}
 	defer rows.Close()
 	out := make([]PriceTick, 0)
@@ -140,14 +146,14 @@ JOIN steam_products p ON p.product_id = t.product_id`
 			&tick.TickID, &tick.ProductID, &tick.AppID, &tick.Name, &tick.Platform, &tick.Side,
 			&prev, &tick.PriceCents, &tick.CollectedAt,
 		); err != nil {
-			return nil, ErrCollectionStorage
+			return nil, marketQueryError(ctx, "scan price tick", err)
 		}
 		tick.PrevCents = int64FromNull(prev)
 		tick.CollectedAt = normalizePostgresTime(tick.CollectedAt)
 		out = append(out, tick)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, ErrCollectionStorage
+		return nil, marketQueryError(ctx, "list price ticks", err)
 	}
 	return out, nil
 }

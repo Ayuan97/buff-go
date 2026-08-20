@@ -451,7 +451,7 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatal(err)
 	}
 	nodeTwo, err := store.CreateNode(ctx, "combination-node-two", resource.NodeConnectionInput{
-		Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -522,6 +522,10 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil || len(steamListed) != 4 {
 		t.Fatalf("steam combinations = %+v err=%v", steamListed, err)
 	}
+	steamResources, err := store.ListCombinationResourcesFor(ctx, "steam")
+	if err != nil || len(steamResources) != 4 || steamResources[0].Combination.ID != steamListed[0].ID {
+		t.Fatalf("steam combination resources = %+v err=%v", steamResources, err)
+	}
 	buffListed, err := store.ListCombinationsFor(ctx, "buff")
 	if err != nil || len(buffListed) != 1 || buffListed[0].ID != buffCombination.ID {
 		t.Fatalf("buff ask combinations = %+v err=%v", buffListed, err)
@@ -543,11 +547,18 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatal("safe combination node lost credential presence")
 	}
 
-	if _, err := store.CreateCombination(ctx, accountOne.ID, spare.ID); err != nil {
+	if _, err := store.CreateCombination(ctx, accountOne.ID, spare.ID); !errors.Is(err, ErrCombinationIncompatible) {
 		t.Fatalf("spare-node combination error = %v", err)
 	}
-	if _, err := store.CreateCombination(ctx, buffAccount.ID, nodeTwo.ID); err != nil {
-		t.Fatalf("buff combination on steam node error = %v", err)
+	buffSpare, err := store.CreateCombination(ctx, buffAccount.ID, spare.ID)
+	if err != nil {
+		t.Fatalf("buff combination on domestic node error = %v", err)
+	}
+	created = append(created, buffSpare)
+	if _, err := store.ReplaceNodeConnection(ctx, nodeTwo.ID, nodeTwo.EgressRevision, resource.NodeConnectionInput{
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic, EgressMode: resource.EgressModeStatic,
+	}); !errors.Is(err, ErrCombinationIncompatible) {
+		t.Fatalf("incompatible node replacement error = %v", err)
 	}
 	if _, err := store.CreateCombination(ctx, resource.AccountID(math.MaxInt64), nodeOne.ID); !errors.Is(err, ErrResourceNotFound) {
 		t.Fatalf("missing account combination error = %v", err)

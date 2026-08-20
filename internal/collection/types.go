@@ -13,8 +13,8 @@ const QueueWatermark = 100
 // AskPageSize is one Steam search page.
 const AskPageSize = 10
 
-// BidBatchSize is one Steam orderbook batch.
-const BidBatchSize = 10
+// BidBatchSize keeps one rate-limited HTTP request in each bid task.
+const BidBatchSize = 1
 
 // TargetID identifies one controllable summary target.
 type TargetID int64

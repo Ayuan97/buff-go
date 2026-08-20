@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"sort"
 	"time"
 
@@ -182,7 +181,8 @@ WHERE active = TRUE
   AND (
       scope = 'platform' OR
       (scope = 'interface' AND endpoint_class = $2) OR
-      scope IN ('account', 'ip', 'account_ip')
+      scope IN ('account', 'ip') OR
+      (scope = 'account_ip' AND (endpoint_class = '' OR endpoint_class = $2))
   )
 ORDER BY policy_id
 FOR UPDATE`, string(request.Platform()), string(request.EndpointClass()))
@@ -209,17 +209,13 @@ FOR UPDATE`, string(request.Platform()), string(request.EndpointClass()))
 }
 
 func hasRequiredRateLimitPolicies(policies []ratelimit.Policy) bool {
-	platformRate := false
-	interfaceProfile := false
 	for _, policy := range policies {
-		if policy.Spec.Scope == ratelimit.ScopePlatform && policy.Spec.IsRate() {
-			platformRate = true
-		}
-		if policy.Spec.Scope == ratelimit.ScopeInterface {
-			interfaceProfile = true
+		if policy.Spec.Scope == ratelimit.ScopeAccountIP &&
+			policy.Spec.EndpointClass != "" && policy.Spec.IsRate() {
+			return true
 		}
 	}
-	return platformRate && interfaceProfile
+	return false
 }
 
 func selectRateLimitStateForUpdate(
@@ -456,30 +452,7 @@ RETURNING `+rateLimitStateColumns,
 }
 
 func selectedRateLimitRules(admission ratelimit.Admission, scopes []ratelimit.Scope) ([]ratelimit.AppliedRule, error) {
-	if len(scopes) == 0 {
-		return nil, fmt.Errorf("feedback requires at least one scope")
-	}
-	selectedScopes := make(map[ratelimit.Scope]struct{}, len(scopes))
-	for _, scope := range scopes {
-		if err := scope.Validate(); err != nil {
-			return nil, err
-		}
-		if _, exists := selectedScopes[scope]; exists {
-			return nil, fmt.Errorf("duplicate feedback scope")
-		}
-		if !admission.HasScope(scope) {
-			return nil, fmt.Errorf("feedback scope was not applied by admission")
-		}
-		selectedScopes[scope] = struct{}{}
-	}
-	rules := make([]ratelimit.AppliedRule, 0)
-	for _, rule := range admission.Rules() {
-		if _, selected := selectedScopes[rule.Scope()]; selected {
-			rules = append(rules, rule)
-		}
-	}
-	sort.Slice(rules, func(left, right int) bool { return rules[left].PolicyID() < rules[right].PolicyID() })
-	return rules, nil
+	return admission.FeedbackRules(scopes)
 }
 
 func selectRateLimitPolicyForFeedback(ctx context.Context, tx *sql.Tx, rule ratelimit.AppliedRule) (ratelimit.Policy, error) {

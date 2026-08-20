@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,63 +12,34 @@ import (
 	"buff-go/internal/market"
 )
 
-// QuoteSort 是行情列表的排序方式。
-type QuoteSort string
-
 const (
-	QuoteSortPriceDesc    QuoteSort = "price_desc"
-	QuoteSortPriceAsc     QuoteSort = "price_asc"
-	QuoteSortListingsDesc QuoteSort = "listings_desc"
-	QuoteSortName         QuoteSort = "name"
-	QuoteSortDropDesc     QuoteSort = "drop_desc"
-	QuoteSortDropPctDesc  QuoteSort = "drop_pct_desc"
+	QuoteSortPriceDesc    = market.QuoteSortPriceDesc
+	QuoteSortPriceAsc     = market.QuoteSortPriceAsc
+	QuoteSortListingsDesc = market.QuoteSortListingsDesc
+	QuoteSortName         = market.QuoteSortName
+	QuoteSortDropDesc     = market.QuoteSortDropDesc
+	QuoteSortDropPctDesc  = market.QuoteSortDropPctDesc
 )
 
-// DropWindow 是降价统计回看多久。空值按 24 小时。
-type DropWindow string
-
 const (
-	DropWindow24h DropWindow = "24h"
-	DropWindow7d  DropWindow = "7d"
-	DropWindow30d DropWindow = "30d"
+	DropWindow24h = market.DropWindow24h
+	DropWindow7d  = market.DropWindow7d
+	DropWindow30d = market.DropWindow30d
 )
 
-// MarketQuoteFilter 是行情列表的筛选条件，零值字段表示不限制。
-type MarketQuoteFilter struct {
-	AppID     int64
-	ProductID int64
-	Platform  string
-	Side      market.Side
-	// Keyword 按商品名包含匹配，大小写不敏感。
-	Keyword   string
-	ItemType  string
-	ItemTypes []string
-	SteamCats []string
-	// 价格区间以分为单位，只筛有最近有效价的商品。
-	MinCents *int64
-	MaxCents *int64
-	// DropWindow 决定最高价和降幅回看多久，空值按 24 小时。
-	DropWindow DropWindow
-	// DropsOnly 只看窗口内现价低于最高价的商品。
-	DropsOnly bool
-	// MinDropCents 只看窗口降价至少这么多分的商品。
-	MinDropCents *int64
-	Sort         QuoteSort
-	Limit        int
-	Offset       int
-}
+type QuoteSort = market.QuoteSort
+type DropWindow = market.DropWindow
+type MarketQuoteFilter = market.QuoteFilter
+type MarketQuoteResult = market.QuoteResult
+type MarketFacets = market.QuoteFacets
 
-// MarketQuoteResult 是一页行情与命中总数，供前端分页。
-type MarketQuoteResult struct {
-	Quotes []MarketQuote
-	Total  int64
-}
+type quoteTickJoinMode uint8
 
-// MarketFacets 是筛选器的可选项，从已采数据推导。
-type MarketFacets struct {
-	AppIDs    []int64
-	ItemTypes []string
-}
+const (
+	quoteTicksNone quoteTickJoinMode = iota
+	quoteTicksLateral
+	quoteTicksGrouped
+)
 
 const quoteSelectColumns = `
        p.product_id, p.appid, p.name, p.icon_path, p.item_type, p.name_color,
@@ -87,6 +59,23 @@ LEFT JOIN market_last_present lp
 
 // 窗口最高价取变价点的现价和变动前价，避免窗口第一跳丢掉切入点。
 const quoteTickJoin = `
+LEFT JOIN LATERAL (
+  SELECT GREATEST(MAX(t.price_cny_cents), MAX(t.prev_cents)) AS high_cents,
+         COUNT(*) FILTER (
+           WHERE t.prev_cents IS NOT NULL AND t.prev_cents > t.price_cny_cents
+         ) AS drop_count,
+         MAX(t.collected_at) FILTER (
+           WHERE t.prev_cents IS NOT NULL AND t.prev_cents > t.price_cny_cents
+         ) AS last_drop_at
+  FROM market_price_ticks t
+  WHERE t.product_id = a.product_id
+    AND t.platform = a.platform
+    AND t.side = a.side
+    AND t.collected_at >= $1
+    HAVING COUNT(*) > 0
+) tk ON TRUE`
+
+const quoteTickGroupedJoin = `
 LEFT JOIN (
   SELECT t.product_id, t.platform, t.side,
          GREATEST(MAX(t.price_cny_cents), MAX(t.prev_cents)) AS high_cents,
@@ -116,19 +105,19 @@ const quoteDropPredicate = `lp.price_cny_cents IS NOT NULL AND tk.high_cents IS 
 // ListMarketQuotes lists latest attempts with catalog media and last present prices.
 func (s *Store) ListMarketQuotes(ctx context.Context, filter MarketQuoteFilter) (MarketQuoteResult, error) {
 	if s == nil || s.db == nil {
-		return MarketQuoteResult{}, fmt.Errorf("PostgreSQL store is required")
+		return MarketQuoteResult{}, marketQueryError(ctx, "list market quotes", errors.New("PostgreSQL store is required"))
 	}
 	if err := validateQuoteFilter(filter); err != nil {
 		return MarketQuoteResult{}, err
 	}
 	since := dropSince(filter.DropWindow, time.Now().UTC())
-	countFrom, countWhere, countArgs := quoteFrom(filter, quoteNeedsTickJoin(filter), since)
-	listFrom, listWhere, listArgs := quoteFrom(filter, true, since)
+	countFrom, countWhere, countArgs := quoteFrom(filter, quoteCountTickMode(filter), since)
+	listFrom, listWhere, listArgs := quoteFrom(filter, quoteListTickMode(filter), since)
 
 	var total int64
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*)`+countFrom+countWhere, countArgs...).Scan(&total); err != nil {
-		return MarketQuoteResult{}, fmt.Errorf("count market quotes: %w", err)
+		return MarketQuoteResult{}, marketQueryError(ctx, "count market quotes", err)
 	}
 
 	query := `SELECT` + quoteSelectColumns + listFrom + listWhere +
@@ -136,7 +125,7 @@ func (s *Store) ListMarketQuotes(ctx context.Context, filter MarketQuoteFilter) 
 		fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(listArgs)+1, len(listArgs)+2)
 	rows, err := s.db.QueryContext(ctx, query, append(listArgs, filter.Limit, filter.Offset)...)
 	if err != nil {
-		return MarketQuoteResult{}, fmt.Errorf("list market quotes: %w", err)
+		return MarketQuoteResult{}, marketQueryError(ctx, "list market quotes", err)
 	}
 	defer rows.Close()
 
@@ -144,12 +133,12 @@ func (s *Store) ListMarketQuotes(ctx context.Context, filter MarketQuoteFilter) 
 	for rows.Next() {
 		quote, err := scanMarketQuote(rows)
 		if err != nil {
-			return MarketQuoteResult{}, err
+			return MarketQuoteResult{}, marketQueryError(ctx, "scan market quote", err)
 		}
 		quotes = append(quotes, quote)
 	}
 	if err := rows.Err(); err != nil {
-		return MarketQuoteResult{}, fmt.Errorf("list market quotes: %w", err)
+		return MarketQuoteResult{}, marketQueryError(ctx, "list market quotes", err)
 	}
 	return MarketQuoteResult{Quotes: quotes, Total: total}, nil
 }
@@ -158,7 +147,7 @@ func (s *Store) ListMarketQuotes(ctx context.Context, filter MarketQuoteFilter) 
 // appid 为 0 时分类跨全部游戏。
 func (s *Store) QuoteFacets(ctx context.Context, appid int64) (MarketFacets, error) {
 	if s == nil || s.db == nil {
-		return MarketFacets{}, fmt.Errorf("PostgreSQL store is required")
+		return MarketFacets{}, marketQueryError(ctx, "list quote facets", errors.New("PostgreSQL store is required"))
 	}
 	if appid != 0 {
 		if err := validateAppID(appid); err != nil {
@@ -173,18 +162,18 @@ FROM market_latest_attempts a
 JOIN steam_products p ON p.product_id = a.product_id
 ORDER BY p.appid`)
 	if err != nil {
-		return MarketFacets{}, fmt.Errorf("list quote appids: %w", err)
+		return MarketFacets{}, marketQueryError(ctx, "list quote appids", err)
 	}
 	defer appRows.Close()
 	for appRows.Next() {
 		var value int64
 		if err := appRows.Scan(&value); err != nil {
-			return MarketFacets{}, fmt.Errorf("scan quote appid: %w", err)
+			return MarketFacets{}, marketQueryError(ctx, "scan quote appid", err)
 		}
 		facets.AppIDs = append(facets.AppIDs, value)
 	}
 	if err := appRows.Err(); err != nil {
-		return MarketFacets{}, fmt.Errorf("list quote appids: %w", err)
+		return MarketFacets{}, marketQueryError(ctx, "list quote appids", err)
 	}
 
 	typeRows, err := s.db.QueryContext(ctx, `
@@ -194,20 +183,27 @@ JOIN steam_products p ON p.product_id = a.product_id
 WHERE p.item_type IS NOT NULL AND ($1 = 0 OR p.appid = $1)
 ORDER BY p.item_type`, appid)
 	if err != nil {
-		return MarketFacets{}, fmt.Errorf("list quote item types: %w", err)
+		return MarketFacets{}, marketQueryError(ctx, "list quote item types", err)
 	}
 	defer typeRows.Close()
 	for typeRows.Next() {
 		var value string
 		if err := typeRows.Scan(&value); err != nil {
-			return MarketFacets{}, fmt.Errorf("scan quote item type: %w", err)
+			return MarketFacets{}, marketQueryError(ctx, "scan quote item type", err)
 		}
 		facets.ItemTypes = append(facets.ItemTypes, value)
 	}
 	if err := typeRows.Err(); err != nil {
-		return MarketFacets{}, fmt.Errorf("list quote item types: %w", err)
+		return MarketFacets{}, marketQueryError(ctx, "list quote item types", err)
 	}
 	return facets, nil
+}
+
+func marketQueryError(ctx context.Context, operation string, cause error) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fmt.Errorf("%w: %s: %w", market.ErrStorage, operation, cause)
 }
 
 func validateQuoteFilter(filter MarketQuoteFilter) error {
@@ -280,6 +276,21 @@ func quoteNeedsTickJoin(filter MarketQuoteFilter) bool {
 	return filter.DropsOnly || filter.MinDropCents != nil
 }
 
+// 普通排序可把逐条统计延后到当前页；降价条件必须先得到全部窗口统计。
+func quoteCountTickMode(filter MarketQuoteFilter) quoteTickJoinMode {
+	if quoteNeedsTickJoin(filter) {
+		return quoteTicksGrouped
+	}
+	return quoteTicksNone
+}
+
+func quoteListTickMode(filter MarketQuoteFilter) quoteTickJoinMode {
+	if quoteNeedsTickJoin(filter) || filter.Sort == QuoteSortDropDesc || filter.Sort == QuoteSortDropPctDesc {
+		return quoteTicksGrouped
+	}
+	return quoteTicksLateral
+}
+
 func dropSince(window DropWindow, now time.Time) time.Time {
 	switch window {
 	case DropWindow7d:
@@ -291,11 +302,16 @@ func dropSince(window DropWindow, now time.Time) time.Time {
 	}
 }
 
-func quoteFrom(filter MarketQuoteFilter, withTicks bool, since time.Time) (from, where string, args []any) {
+func quoteFrom(filter MarketQuoteFilter, mode quoteTickJoinMode, since time.Time) (from, where string, args []any) {
 	from = quoteFromClause
 	argBase := 0
-	if withTicks {
+	switch mode {
+	case quoteTicksLateral:
 		from += quoteTickJoin
+	case quoteTicksGrouped:
+		from += quoteTickGroupedJoin
+	}
+	if mode != quoteTicksNone {
 		args = append(args, since)
 		argBase = 1
 	}

@@ -28,7 +28,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		failed := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: collectedAt}
 		next := mustCollectionCursor(t, []byte("next"))
 		input := SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
 			CollectedAt: collectedAt,
 			Attempts: []AttemptWrite{
@@ -68,7 +68,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 	t.Run("fence and transaction rollback", func(t *testing.T) {
 		store, _ := migratedStore(t, dsn)
 		ctx := t.Context()
-		target, task, _, products := summaryPageFixture(t, store, 730, "page-fence", 1)
+		target, task, combination, products := summaryPageFixture(t, store, 730, "page-fence", 1)
 		wrongApp, err := store.CreateSteamProduct(ctx, 440, "wrong-app")
 		if err != nil {
 			t.Fatal(err)
@@ -76,13 +76,21 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 		valid := market.Observation{Side: market.SideBid, Status: market.StatusEmpty, CollectedAt: collectedAt}
 		invalidScope := SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts: []AttemptWrite{
 				{ProductID: products[0].ProductID, Observation: valid},
 				{ProductID: wrongApp.ProductID, Observation: valid},
 			},
 		}
+		wrongOwner := invalidScope
+		wrongOwner.CombinationID = combination.ID + 1
+		wrongOwner.Attempts = []AttemptWrite{{ProductID: products[0].ProductID, Observation: valid}}
+		if _, _, err := store.CommitSummaryPage(ctx, wrongOwner); !errors.Is(err, ErrCollectionFence) {
+			t.Fatalf("wrong claim owner error = %v", err)
+		}
+		assertNoCommittedSummaryPage(t, store, target, products[0].ProductID)
+
 		if _, _, err := store.CommitSummaryPage(ctx, invalidScope); !errors.Is(err, ErrCollectionInvalidInput) {
 			t.Fatalf("cross-app page error = %v", err)
 		}
@@ -91,7 +99,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		lateAttempt := valid
 		lateAttempt.CollectedAt = collectedAt.Add(time.Microsecond)
 		if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: lateAttempt}},
 		}); !errors.Is(err, ErrCollectionInvalidInput) {
@@ -105,7 +113,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 			t.Fatal(err)
 		}
 		if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt,
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt,
 		}); !errors.Is(err, ErrCollectionFence) {
 			t.Fatalf("disabled page error = %v", err)
 		}
@@ -118,11 +126,53 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 			t.Fatal(err)
 		}
 		if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt,
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: oldSwitch, CollectedAt: collectedAt,
 		}); !errors.Is(err, ErrCollectionFence) {
 			t.Fatalf("old-switch page error = %v", err)
 		}
 		assertNoCommittedSummaryPage(t, store, target, products[0].ProductID)
+	})
+
+	t.Run("zero ask total resets queued scan", func(t *testing.T) {
+		store, _ := migratedStore(t, dsn)
+		ctx := t.Context()
+		target, task, _, _ := summaryPageFixture(t, store, 730, "page-zero", 0)
+		cursor, err := collection.EncodeAskRefill(40)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 4), cursor, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, secondCombination := mustQueueCombination(t, store, "page-zero")
+		secondTask, _, claimed, err := store.ClaimTask(ctx, secondCombination.ID, "page-zero")
+		if err != nil || !claimed {
+			t.Fatalf("second claim task=%+v claimed=%v err=%v", secondTask, claimed, err)
+		}
+		collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(),
+			ExpectedSwitch: target.SwitchVersion(), CollectedAt: collectedAt, AskTotal: 0,
+		}); err != nil || !applied {
+			t.Fatalf("zero-total commit applied=%v err=%v", applied, err)
+		}
+		if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 2 {
+			t.Fatalf("queue after zero total depth=%d err=%v", depth, err)
+		}
+		stored, found, err := store.Target(ctx, target.ID())
+		if err != nil || !found || stored.RefillTotal() != 0 {
+			t.Fatalf("target after zero total = %+v found=%v err=%v", stored, found, err)
+		}
+		start, err := collection.DecodeAskRefill(stored.RefillCursor())
+		if err != nil || start != 0 {
+			t.Fatalf("refill cursor start=%d err=%v", start, err)
+		}
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: secondTask.ID(), CombinationID: secondCombination.ID, ClaimGeneration: secondTask.ClaimGeneration(),
+			ExpectedSwitch: target.SwitchVersion(), CollectedAt: collectedAt.Add(time.Microsecond), AskTotal: 10,
+		}); err != nil || !applied {
+			t.Fatalf("preserved claim commit applied=%v err=%v", applied, err)
+		}
 	})
 
 	t.Run("orphan market facts", func(t *testing.T) {
@@ -141,7 +191,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 			t.Fatalf("seed orphan market fact applied=%v err=%v", applied, err)
 		}
 		if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: observation}},
 		}); !errors.Is(err, ErrCollectionIntegrity) {
@@ -161,7 +211,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 		observation := market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt}
 		page, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts:    []AttemptWrite{{ExactName: "AK-47 | Redline", Observation: observation}},
 		})
@@ -188,7 +238,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 
 		// 第一页不带元数据，模拟本次迁移之前建立的商品
 		first, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts:    []AttemptWrite{{ExactName: "AK-47 | Redline", Observation: observation}},
 		})
@@ -208,7 +258,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		media := catalog.ProductMedia{IconPath: "iconAK47", ItemType: "Rifle", NameColor: "d2d2d2"}
 		secondCollected := collectedAt.Add(time.Second)
 		second, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
 			CollectedAt: secondCollected,
 			Attempts: []AttemptWrite{{
@@ -234,7 +284,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		third := mustCollectionCursor(t, []byte("3"))
 		thirdCollected := collectedAt.Add(2 * time.Second)
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: next, CursorAfter: third,
 			CollectedAt: thirdCollected,
 			Attempts: []AttemptWrite{{
@@ -261,7 +311,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		observation := market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: collectedAt}
 		raw := []byte(`{"success":true,"total_count":35252,"results":[]}`)
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: observation}},
 			Payload:     raw,
@@ -277,7 +327,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		next := mustCollectionCursor(t, []byte("2"))
 		secondCollected := collectedAt.Add(time.Second)
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
 			CollectedAt: secondCollected,
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: market.Observation{Side: market.SideAsk, Status: market.StatusEmpty, CollectedAt: secondCollected}}},
@@ -293,7 +343,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 	t.Run("price ticks record cent changes only", func(t *testing.T) {
 		store, _ := migratedStore(t, dsn)
 		ctx := t.Context()
-		target, task, _, products := summaryPageFixture(t, store, 730, "page-ticks", 1)
+		target, task, _, products := summaryPageFixture(t, store, 730, "page-ticks", 2)
 		collectedAt := time.Now().UTC().Truncate(time.Microsecond)
 		price := market.CNYCents(100)
 		present, err := market.NewPresentObservation(market.PresentInput{
@@ -303,9 +353,12 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 			t.Fatal(err)
 		}
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CollectedAt: collectedAt,
-			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: present}},
+			Attempts: []AttemptWrite{
+				{ProductID: products[0].ProductID, Observation: present},
+				{ProductID: products[1].ProductID, Observation: present},
+			},
 		}); err != nil || !applied {
 			t.Fatalf("first present applied=%v err=%v", applied, err)
 		}
@@ -324,7 +377,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		}
 		next := mustCollectionCursor(t, []byte("2"))
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: mustCollectionCursor(t, nil), CursorAfter: next,
 			CollectedAt: collectedAt.Add(time.Second),
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: samePrice}},
@@ -346,7 +399,7 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		}
 		third := mustCollectionCursor(t, []byte("3"))
 		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
-			TargetID: target.ID(), TaskID: task.ID(), ExpectedSwitch: target.SwitchVersion(),
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
 			CursorBefore: next, CursorAfter: third,
 			CollectedAt: collectedAt.Add(2 * time.Second),
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: newPrice}},
@@ -356,6 +409,84 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		ticks, err = store.ListPriceTicks(ctx, PriceTickFilter{ProductID: int64(products[0].ProductID), Limit: 10})
 		if err != nil || len(ticks) != 2 || ticks[0].PrevCents == nil || *ticks[0].PrevCents != 100 || ticks[0].PriceCents != 110 {
 			t.Fatalf("changed ticks = %+v err=%v", ticks, err)
+		}
+
+		decreased := market.CNYCents(90)
+		downPrice, err := market.NewPresentObservation(market.PresentInput{
+			Currency: market.CurrencyCNY, Side: market.SideAsk, PriceCents: &decreased,
+			CollectedAt: collectedAt.Add(3 * time.Second),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fourth := mustCollectionCursor(t, []byte("4"))
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+			CursorBefore: third, CursorAfter: fourth,
+			CollectedAt: collectedAt.Add(3 * time.Second),
+			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: downPrice}},
+		}); err != nil || !applied {
+			t.Fatalf("downward price applied=%v err=%v", applied, err)
+		}
+
+		ordinary, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{
+			ProductID: int64(products[0].ProductID), Platform: "page-ticks", Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dropped, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{
+			AppID: 730, Platform: "page-ticks", DropsOnly: true, Sort: QuoteSortDropDesc, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, result := range map[string]MarketQuoteResult{"ordinary": ordinary, "dropped": dropped} {
+			if result.Total != 1 || len(result.Quotes) != 1 {
+				t.Fatalf("%s quote result = %+v", name, result)
+			}
+			quote := result.Quotes[0]
+			if quote.DropCents == nil || *quote.DropCents != 20 || quote.HighCents == nil || *quote.HighCents != 110 ||
+				quote.DropPctBP == nil || *quote.DropPctBP != 1818 || quote.DropCount == nil || *quote.DropCount != 1 ||
+				quote.LastDropAt == nil || !quote.LastDropAt.Equal(collectedAt.Add(3*time.Second)) {
+				t.Fatalf("%s drop stats = %+v", name, quote)
+			}
+		}
+	})
+
+	t.Run("price tick purge advances in batches", func(t *testing.T) {
+		store, db := migratedStore(t, dsn)
+		ctx := t.Context()
+		product, err := store.CreateSteamProduct(ctx, 730, "purge-price-ticks")
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldAt := time.Now().UTC().Add(-PriceTickRetention - time.Hour)
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO market_price_ticks (
+    product_id, platform, side, prev_cents, price_cny_cents, collected_at, switch_version, write_seq
+)
+SELECT $1, 'purge-test', 'ask', 100, 101, $2, 1, value
+FROM generate_series(1, 5001) AS value`, int64(product.ProductID), oldAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO market_price_ticks (
+    product_id, platform, side, prev_cents, price_cny_cents, collected_at, switch_version, write_seq
+)
+VALUES ($1, 'purge-test', 'ask', 101, 102, $2, 1, 6000)`, int64(product.ProductID), time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PurgeExpiredPriceTicks(ctx, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		var remaining int
+		if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM market_price_ticks WHERE platform = 'purge-test'`).Scan(&remaining); err != nil {
+			t.Fatal(err)
+		}
+		if remaining != 1 {
+			t.Fatalf("remaining price ticks = %d, want recent row only", remaining)
 		}
 	})
 }

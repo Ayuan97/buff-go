@@ -54,6 +54,10 @@ func TestPolicySpecValidate(t *testing.T) {
 			value.Scope = ScopeInterface
 			value.EndpointClass = "market_summary"
 		}},
+		{name: "endpoint account IP", mutate: func(value *PolicySpec) {
+			value.Scope = ScopeAccountIP
+			value.EndpointClass = "market_summary"
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			value := base
@@ -365,6 +369,15 @@ func TestAdmissionSignerRejectsForgeryAndMutation(t *testing.T) {
 	if _, err := signer.Issue(admission.request, []AppliedRule{wrongInterfaceRule}, admission.admittedAt); err == nil {
 		t.Fatal("Issue() accepted a policy for another interface")
 	}
+	wrongAccountIP := testPolicy(12, ScopeAccountIP, time.Minute)
+	wrongAccountIP.Spec.EndpointClass = "catalog"
+	wrongAccountIPRule, err := AppliedRuleFromPolicy(wrongAccountIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.Issue(admission.request, []AppliedRule{wrongAccountIPRule}, admission.admittedAt); err == nil {
+		t.Fatal("Issue() accepted an endpoint account-IP policy for another interface")
+	}
 	decision, err := signer.Allow(admission)
 	if err != nil {
 		t.Fatal(err)
@@ -571,6 +584,42 @@ func TestFeedbackIsScopedAndReplayStable(t *testing.T) {
 	}
 	if _, err := zeroFallbackSigner.Feedback(zeroFallbackAdmission, []Scope{ScopeAccount}, ReasonHTTP429, observedAt, 0); err == nil {
 		t.Fatal("zero cooldown without fallback was accepted")
+	}
+}
+
+func TestFeedbackPrefersEndpointAccountIPRule(t *testing.T) {
+	_, base := testAdmission(t)
+	generic := testPolicy(20, ScopeAccountIP, 0)
+	exact := testPolicy(21, ScopeAccountIP, time.Minute)
+	exact.Spec.RuleKey = "exact_account_ip"
+	exact.Spec.EndpointClass = base.Request().EndpointClass()
+	rules := make([]AppliedRule, 0, 2)
+	for _, policy := range []Policy{generic, exact} {
+		rule, err := AppliedRuleFromPolicy(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules = append(rules, rule)
+	}
+	signer, err := NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := signer.Issue(base.Request(), rules, base.AdmittedAt())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := admission.AdmittedAt().Add(time.Second)
+	feedback, err := signer.Feedback(admission, []Scope{ScopeAccountIP}, ReasonHTTP429, observedAt, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline, err := feedback.CooldownUntil(exact.ID)
+	if err != nil || !deadline.Equal(observedAt.Add(time.Minute)) {
+		t.Fatalf("exact deadline=%s err=%v", deadline, err)
+	}
+	if _, err := feedback.CooldownUntil(generic.ID); err == nil {
+		t.Fatal("legacy cross-endpoint rule was selected by endpoint feedback")
 	}
 }
 

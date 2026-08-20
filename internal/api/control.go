@@ -8,7 +8,6 @@ import (
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
 	"buff-go/internal/resource"
-	"buff-go/internal/storage/postgres"
 )
 
 // ControlServices are occupancy-guarded control-plane facades.
@@ -49,9 +48,9 @@ type CollectionService interface {
 
 // MarketService lists latest quotes without raw platform payloads.
 type MarketService interface {
-	ListQuotes(context.Context, postgres.MarketQuoteFilter) (postgres.MarketQuoteResult, error)
-	QuoteFacets(context.Context, int64) (postgres.MarketFacets, error)
-	ListPriceTicks(context.Context, postgres.PriceTickFilter) ([]postgres.PriceTick, error)
+	ListQuotes(context.Context, market.QuoteFilter) (market.QuoteResult, error)
+	QuoteFacets(context.Context, int64) (market.QuoteFacets, error)
+	ListPriceTicks(context.Context, market.PriceTickFilter) ([]market.PriceTick, error)
 }
 
 // NodeService is the credential-safe node control boundary.

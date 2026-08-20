@@ -4,12 +4,14 @@ import {
   createTarget,
   deleteTarget,
   getAccounts,
+  getCombinations,
   getNodes,
   getTargets,
   setTargetDesired,
   type AccessNode,
   type Account,
   type ActualState,
+  type Combination,
   type Side,
   type Target,
 } from '../api'
@@ -27,6 +29,7 @@ import {
   sideText,
   targetReasonText,
 } from '../utils/format'
+import { nodeAllowsPlatform, nodeIsUsableAt } from '../utils/platformRegion'
 
 type SideDraft = {
   enabled: boolean
@@ -34,7 +37,9 @@ type SideDraft = {
   reason: string | null
   recheckAt: string | null
   nodeIds: number[]
-  usableNodeCount: number
+  usableNodeIds: number[]
+  combinationCount: number
+  usableCombinationCount: number
   target: Target | null
 }
 
@@ -44,6 +49,7 @@ type GameDraft = {
   name: string
   shortName: string
   nodeIds: number[]
+  usableNodeIds: number[]
   platforms: PlatInGame[]
 }
 
@@ -69,49 +75,109 @@ const confirm = ref<{
 } | null>(null)
 
 let poll = 0
+let reloadSeq = 0
 
-function buildGames(nodes: AccessNode[], targets: Target[]): GameDraft[] {
+type PlatformCapacity = {
+  nodeIds: number[]
+  usableNodeIds: number[]
+  combinationCount: number
+  usableCombinationCount: number
+}
+
+function platformCapacity(
+  platform: string,
+  nodes: AccessNode[],
+  accounts: Account[],
+  combinations: Combination[],
+  now: number,
+): PlatformCapacity {
+  const accountById = new Map(accounts.map((account) => [account.id, account]))
+  const nodeById = new Map(nodes.map((node) => [node.id, node]))
+  const configured = combinations.filter((combination) => combination.platform === platform)
+  const usable = configured.filter((combination) => {
+    const account = accountById.get(combination.account_id)
+    const node = nodeById.get(combination.node_id)
+    return !!account &&
+      account.platform === platform &&
+      account.session_state !== 'invalid' &&
+      !!node &&
+      nodeIsUsableAt(node, now) &&
+      nodeAllowsPlatform(node.region, platform)
+  })
+  return {
+    nodeIds: [...new Set(configured.map((combination) => combination.node_id))],
+    usableNodeIds: [...new Set(usable.map((combination) => combination.node_id))],
+    combinationCount: configured.length,
+    usableCombinationCount: usable.length,
+  }
+}
+
+function buildGames(
+  nodes: AccessNode[],
+  targets: Target[],
+  accounts: Account[],
+  combinations: Combination[],
+): GameDraft[] {
   const appids = new Set<number>()
   for (const t of targets) appids.add(t.appid)
   const list = [...appids].sort((a, b) => a - b)
+  const steamCapacity = platformCapacity('steam', nodes, accounts, combinations, Date.now())
   return list.map((appid) => {
     const platforms = ['steam']
     return {
       appid,
       shortName: gameName(appid),
       name: gameFullName(appid),
-      nodeIds: nodes.map((n) => n.id),
+      nodeIds: steamCapacity.nodeIds,
+      usableNodeIds: steamCapacity.usableNodeIds,
       platforms: platforms.map((platform) => ({
         platform,
-        bid: makeSide(appid, platform, 'bid', nodes, targets),
-        ask: makeSide(appid, platform, 'ask', nodes, targets),
+        bid: makeSide(appid, platform, 'bid', targets, steamCapacity),
+        ask: makeSide(appid, platform, 'ask', targets, steamCapacity),
       })),
     }
   })
 }
 
-function makeSide(appid: number, platform: string, side: Side, nodes: AccessNode[], targets: Target[]): SideDraft {
+function makeSide(
+  appid: number,
+  platform: string,
+  side: Side,
+  targets: Target[],
+  capacity: PlatformCapacity,
+): SideDraft {
   const target = targets.find((t) => t.appid === appid && t.platform === platform && t.side === side) ?? null
-  const usable = nodes.filter((n) => n.state === 'available')
   return {
     enabled: target?.desired === 'enabled',
     actual: target?.actual ?? 'stopped',
     reason: target?.reason ?? null,
     recheckAt: target?.recheck_at ?? null,
-    nodeIds: usable.map((n) => n.id),
-    usableNodeCount: usable.length,
+    nodeIds: capacity.nodeIds,
+    usableNodeIds: capacity.usableNodeIds,
+    combinationCount: capacity.combinationCount,
+    usableCombinationCount: capacity.usableCombinationCount,
     target,
   }
 }
 
 async function reload() {
-  const [n, t, a] = await Promise.all([getNodes(), getTargets(), getAccounts()])
+  const request = ++reloadSeq
+  let result: [AccessNode[], Target[], Account[], Combination[]]
+  try {
+    result = await Promise.all([getNodes(), getTargets(), getAccounts(), getCombinations()])
+  } catch (error) {
+    if (request !== reloadSeq) return false
+    throw error
+  }
+  if (request !== reloadSeq) return false
+  const [n, t, a, c] = result
   nodeMap.value = new Map(n.map((x) => [x.id, x]))
   accounts.value = a
-  games.value = buildGames(n, t)
+  games.value = buildGames(n, t, a, c)
   loaded.value = true
   loadError.value = null
   stale.value = false
+  return true
 }
 
 onMounted(async () => {
@@ -215,7 +281,7 @@ function requestToggle(g: GameDraft, p: PlatInGame, side: Side) {
     confirm.value = {
       title: '关闭采集',
       impact: sideLabel(g, p, side),
-      consequence: '先进入停止中：不再发新请求。在途结束后才是已停止。已保存数据保留。',
+      consequence: '先进入停止中：不再派发新任务并清理未完成任务。已发出的旧结果不会写入，已保存数据保留。',
       confirmText: '关闭',
       run: () => toggleLatest(g.appid, p.platform, side),
     }
@@ -381,7 +447,7 @@ function onConfirm() {
               <div class="game-full">{{ g.name }} · {{ g.appid }}</div>
             </div>
             <div class="game-meta">
-              <span class="num">节点 {{ g.nodeIds.length }}</span>
+              <span class="num">可用节点 {{ g.usableNodeIds.length }}/{{ g.nodeIds.length }}</span>
               <span class="game-heat">{{ heatLabel(gameHeat(g)) }}</span>
             </div>
           </header>
@@ -430,14 +496,17 @@ function onConfirm() {
                   </div>
                   <div class="dir-body">
                     <div class="num cap">
-                      节点 {{ sideOf(p, side).usableNodeCount }}/{{ sideOf(p, side).nodeIds.length }}
+                      健康绑定 {{ sideOf(p, side).usableCombinationCount }}/{{ sideOf(p, side).combinationCount }}
+                      · 节点 {{ sideOf(p, side).usableNodeIds.length }}/{{ sideOf(p, side).nodeIds.length }}
                     </div>
-                    <div v-if="sideOf(p, side).nodeIds.length" class="mini-nodes">
-                      <span v-for="id in sideOf(p, side).nodeIds" :key="id" class="ntag sm">
+                    <div v-if="sideOf(p, side).usableNodeIds.length" class="mini-nodes">
+                      <span v-for="id in sideOf(p, side).usableNodeIds" :key="id" class="ntag sm">
                         {{ nodeMap.get(id)?.name ?? id }}
                       </span>
                     </div>
-                    <div v-else class="muted sm">未分节点</div>
+                    <div v-else class="muted sm">
+                      {{ sideOf(p, side).nodeIds.length ? '暂无可用节点' : '未分节点' }}
+                    </div>
                     <div
                       v-if="sideOf(p, side).reason && !isPacingBeat(sideOf(p, side).reason, sideOf(p, side).recheckAt)"
                       class="reason"

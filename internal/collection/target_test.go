@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"errors"
 	"math"
 	"reflect"
 	"testing"
@@ -404,5 +405,23 @@ func TestPriceRangeRejectsInvertedBounds(t *testing.T) {
 	maxCents := int64(100)
 	if err := (PriceRange{MinCents: &minCents, MaxCents: &maxCents}).Validate(); err == nil {
 		t.Fatal("inverted range must fail")
+	}
+}
+
+func TestBidRejectsAskSearchConfiguration(t *testing.T) {
+	input := stoppedSummaryTargetInput()
+	input.Side = market.SideBid
+	target, err := NewSummaryTarget(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.SetSortOrder(SortOrder{Column: SortColumnName, Direction: SortAscending}, targetTime(1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("bid sort error = %v", err)
+	}
+	if _, err := target.SetPriceRange(PriceRange{}, targetTime(1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("bid price range error = %v", err)
+	}
+	if _, err := target.SetSteamFacets(SteamFacets{}, targetTime(1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("bid facets error = %v", err)
 	}
 }

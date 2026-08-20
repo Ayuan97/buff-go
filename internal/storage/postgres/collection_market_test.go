@@ -16,16 +16,19 @@ import (
 	"buff-go/internal/catalog"
 	"buff-go/internal/collection"
 	"buff-go/internal/market"
+	"buff-go/internal/resource"
 )
 
 func TestSummaryPageCommitValidatesPublicInputBeforeDatabaseAccess(t *testing.T) {
 	base := SummaryPageCommit{
-		TargetID:       1,
-		TaskID:         1,
-		ExpectedSwitch: 1,
-		CursorBefore:   mustSummaryPageCursor(t, nil),
-		CursorAfter:    mustSummaryPageCursor(t, []byte("next")),
-		CollectedAt:    time.Date(2026, 8, 11, 12, 0, 0, 123456000, time.UTC),
+		TargetID:        1,
+		TaskID:          1,
+		CombinationID:   1,
+		ClaimGeneration: 1,
+		ExpectedSwitch:  1,
+		CursorBefore:    mustSummaryPageCursor(t, nil),
+		CursorAfter:     mustSummaryPageCursor(t, []byte("next")),
+		CollectedAt:     time.Date(2026, 8, 11, 12, 0, 0, 123456000, time.UTC),
 	}
 	tests := []struct {
 		name   string
@@ -35,6 +38,10 @@ func TestSummaryPageCommitValidatesPublicInputBeforeDatabaseAccess(t *testing.T)
 		{name: "negative target id", mutate: func(input *SummaryPageCommit) { input.TargetID = -1 }},
 		{name: "zero task id", mutate: func(input *SummaryPageCommit) { input.TaskID = 0 }},
 		{name: "negative task id", mutate: func(input *SummaryPageCommit) { input.TaskID = -1 }},
+		{name: "zero combination id", mutate: func(input *SummaryPageCommit) { input.CombinationID = 0 }},
+		{name: "negative combination id", mutate: func(input *SummaryPageCommit) { input.CombinationID = -1 }},
+		{name: "zero claim generation", mutate: func(input *SummaryPageCommit) { input.ClaimGeneration = 0 }},
+		{name: "negative claim generation", mutate: func(input *SummaryPageCommit) { input.ClaimGeneration = -1 }},
 		{name: "zero expected switch", mutate: func(input *SummaryPageCommit) { input.ExpectedSwitch = 0 }},
 		{name: "negative expected switch", mutate: func(input *SummaryPageCommit) { input.ExpectedSwitch = -1 }},
 		{name: "negative ask total", mutate: func(input *SummaryPageCommit) { input.AskTotal = -1 }},
@@ -74,23 +81,27 @@ func TestSummaryPageCommitValidatesPublicInputBeforeDatabaseAccess(t *testing.T)
 		{
 			name: "minimum identity and timestamp",
 			input: SummaryPageCommit{
-				TargetID:       1,
-				TaskID:         1,
-				ExpectedSwitch: 1,
-				CursorBefore:   mustSummaryPageCursor(t, nil),
-				CursorAfter:    mustSummaryPageCursor(t, nil),
-				CollectedAt:    time.Date(1, 1, 1, 0, 0, 0, int(time.Microsecond), time.UTC),
+				TargetID:        1,
+				TaskID:          1,
+				CombinationID:   1,
+				ClaimGeneration: 1,
+				ExpectedSwitch:  1,
+				CursorBefore:    mustSummaryPageCursor(t, nil),
+				CursorAfter:     mustSummaryPageCursor(t, nil),
+				CollectedAt:     time.Date(1, 1, 1, 0, 0, 0, int(time.Microsecond), time.UTC),
 			},
 		},
 		{
 			name: "maximum identity cursor and timestamp",
 			input: SummaryPageCommit{
-				TargetID:       collection.TargetID(1<<63 - 1),
-				TaskID:         collection.TaskID(1<<63 - 1),
-				ExpectedSwitch: collection.Revision(1<<63 - 1),
-				CursorBefore:   maximumCursor,
-				CursorAfter:    maximumCursor,
-				CollectedAt:    time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC),
+				TargetID:        collection.TargetID(1<<63 - 1),
+				TaskID:          collection.TaskID(1<<63 - 1),
+				CombinationID:   resource.CombinationID(1<<63 - 1),
+				ClaimGeneration: 1<<63 - 1,
+				ExpectedSwitch:  collection.Revision(1<<63 - 1),
+				CursorBefore:    maximumCursor,
+				CursorAfter:     maximumCursor,
+				CollectedAt:     time.Date(9999, 12, 31, 23, 59, 59, 999999000, time.UTC),
 			},
 		},
 	}
@@ -340,6 +351,8 @@ func TestSummaryPageCommitExposesNoScopeOrderOrDigest(t *testing.T) {
 	}{
 		{name: "TargetID", typeOf: reflect.TypeOf(collection.TargetID(0))},
 		{name: "TaskID", typeOf: reflect.TypeOf(collection.TaskID(0))},
+		{name: "CombinationID", typeOf: reflect.TypeOf(resource.CombinationID(0))},
+		{name: "ClaimGeneration", typeOf: reflect.TypeOf(int64(0))},
 		{name: "ExpectedSwitch", typeOf: reflect.TypeOf(collection.Revision(0))},
 		{name: "CursorBefore", typeOf: reflect.TypeOf(collection.Cursor{})},
 		{name: "CursorAfter", typeOf: reflect.TypeOf(collection.Cursor{})},

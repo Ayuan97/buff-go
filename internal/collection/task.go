@@ -59,40 +59,43 @@ type BidBatchPayload struct {
 
 // TaskInput is the persisted shape of one queue item.
 type TaskInput struct {
-	ID         TaskID
-	TargetID   TargetID
-	EnqueueSeq int64
-	Kind       TaskKind
-	Payload    []byte
-	State      TaskState
-	ClaimedBy  *resource.CombinationID
-	ClaimedAt  *time.Time
-	EnqueuedAt time.Time
+	ID              TaskID
+	TargetID        TargetID
+	EnqueueSeq      int64
+	Kind            TaskKind
+	Payload         []byte
+	State           TaskState
+	ClaimedBy       *resource.CombinationID
+	ClaimedAt       *time.Time
+	ClaimGeneration int64
+	EnqueuedAt      time.Time
 }
 
 // Task is one ordered queue item for a direction.
 type Task struct {
-	id         TaskID
-	targetID   TargetID
-	enqueueSeq int64
-	kind       TaskKind
-	payload    []byte
-	state      TaskState
-	claimedBy  resource.CombinationID
-	claimedAt  time.Time
-	enqueuedAt time.Time
+	id              TaskID
+	targetID        TargetID
+	enqueueSeq      int64
+	kind            TaskKind
+	payload         []byte
+	state           TaskState
+	claimedBy       resource.CombinationID
+	claimedAt       time.Time
+	claimGeneration int64
+	enqueuedAt      time.Time
 }
 
 // NewTask validates a task restored from persistence.
 func NewTask(input TaskInput) (Task, error) {
 	task := Task{
-		id:         input.ID,
-		targetID:   input.TargetID,
-		enqueueSeq: input.EnqueueSeq,
-		kind:       input.Kind,
-		payload:    append([]byte(nil), input.Payload...),
-		state:      input.State,
-		enqueuedAt: input.EnqueuedAt,
+		id:              input.ID,
+		targetID:        input.TargetID,
+		enqueueSeq:      input.EnqueueSeq,
+		kind:            input.Kind,
+		payload:         append([]byte(nil), input.Payload...),
+		state:           input.State,
+		claimGeneration: input.ClaimGeneration,
+		enqueuedAt:      input.EnqueuedAt,
 	}
 	if input.ClaimedBy != nil {
 		task.claimedBy = *input.ClaimedBy
@@ -131,12 +134,18 @@ func (task Task) Validate() error {
 		if task.claimedBy != 0 || !task.claimedAt.IsZero() {
 			return fmt.Errorf("queued task must not be claimed")
 		}
+		if task.claimGeneration < 0 {
+			return fmt.Errorf("claim_generation cannot be negative")
+		}
 	case TaskClaimed:
 		if err := task.claimedBy.Validate(); err != nil {
 			return fmt.Errorf("claimed_by: %w", err)
 		}
 		if err := validateTime("claimed_at", task.claimedAt); err != nil {
 			return err
+		}
+		if task.claimGeneration < 1 {
+			return fmt.Errorf("claimed task generation must be positive")
 		}
 	}
 	switch task.kind {
@@ -153,7 +162,7 @@ func (task Task) Validate() error {
 		if err != nil {
 			return err
 		}
-		if batch.AfterID < 0 || batch.Limit < 1 {
+		if batch.AfterID < 0 || batch.Limit != BidBatchSize {
 			return fmt.Errorf("bid batch after_id/limit is invalid")
 		}
 	}
@@ -194,7 +203,7 @@ func EncodeAskPage(start, count int) ([]byte, error) {
 
 // EncodeBidBatch serializes one catalog batch.
 func EncodeBidBatch(after catalog.ProductID, limit int) ([]byte, error) {
-	if after < 0 || limit < 1 {
+	if after < 0 || limit != BidBatchSize {
 		return nil, fmt.Errorf("bid batch after_id/limit is invalid")
 	}
 	return json.Marshal(BidBatchPayload{AfterID: after, Limit: limit})
@@ -233,6 +242,9 @@ func (task Task) ClaimedBy() (resource.CombinationID, bool) {
 func (task Task) ClaimedAt() (time.Time, bool) {
 	return task.claimedAt, task.state == TaskClaimed
 }
+
+// ClaimGeneration is the persistent claim epoch used to fence stale workers.
+func (task Task) ClaimGeneration() int64 { return task.claimGeneration }
 
 // EnqueuedAt returns when the task was appended.
 func (task Task) EnqueuedAt() time.Time { return task.enqueuedAt }

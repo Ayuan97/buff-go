@@ -38,6 +38,8 @@ var (
 	ErrPageConflict = errors.New("collection page conflicts with stored facts")
 )
 
+const schedulerCleanupTimeout = 5 * time.Second
+
 // TargetTransition 是调度器拥有的一次显式实际状态转换。
 type TargetTransition struct {
 	State     ActualState
@@ -58,17 +60,19 @@ type AttemptWrite struct {
 
 // SummaryPageCommit 是一次成功抓取后写入的当前页。
 type SummaryPageCommit struct {
-	TargetID       TargetID
-	TaskID         TaskID
-	ExpectedSwitch Revision
-	CursorBefore   Cursor
-	CursorAfter    Cursor
-	CollectedAt    time.Time
-	Attempts       []AttemptWrite
-	Payload        []byte
-	AccountID      int64
-	ExitAddress    netip.Addr
-	AskTotal       int64
+	TargetID        TargetID
+	TaskID          TaskID
+	CombinationID   resource.CombinationID
+	ClaimGeneration int64
+	ExpectedSwitch  Revision
+	CursorBefore    Cursor
+	CursorAfter     Cursor
+	CollectedAt     time.Time
+	Attempts        []AttemptWrite
+	Payload         []byte
+	AccountID       int64
+	ExitAddress     netip.Addr
+	AskTotal        int64
 }
 
 // ProductCatalog 给求购补货提供目录窗口。
@@ -81,17 +85,23 @@ type ScheduleStore interface {
 	Targets(ctx context.Context) ([]Target, error)
 	TransitionTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision, transition TargetTransition) (Target, error)
 	QueueDepth(ctx context.Context, id TargetID) (int, error)
-	EnqueueTasks(ctx context.Context, id TargetID, expectedSwitch Revision, specs []EnqueueSpec, cursor Cursor, total int64) error
+	EnqueueTasksFenced(ctx context.Context, expected Target, specs []EnqueueSpec, cursor Cursor, total int64) error
 	ClearTargetQueue(ctx context.Context, id TargetID) error
-	ClaimTask(ctx context.Context, combinationID resource.CombinationID, platform Platform) (Task, Target, bool, error)
+	ClaimTaskForTargets(ctx context.Context, combinationID resource.CombinationID, platform Platform, eligibleTargets []TargetID) (Task, Target, bool, error)
 	ReleaseStaleClaims(ctx context.Context, olderThan time.Duration) (int, error)
+	ReleaseStaleClaimsExcept(ctx context.Context, olderThan time.Duration, activeTasks []TaskID) (int, error)
 	ReleaseAllClaims(ctx context.Context) (int, error)
-	CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error
-	RequeueTask(ctx context.Context, id TaskID, combinationID resource.CombinationID) error
+	CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID, claimGeneration int64) error
+	RequeueTask(ctx context.Context, id TaskID, combinationID resource.CombinationID, claimGeneration int64) error
 	CommitSummaryPage(ctx context.Context, input SummaryPageCommit) (Page, bool, error)
 	ListCombinationsFor(ctx context.Context, platform Platform) ([]resource.AccountNodeCombination, error)
 	CombinationResources(ctx context.Context, id resource.CombinationID) (resource.CombinationResources, bool, error)
 	ListWorkers(ctx context.Context) ([]WorkerSnapshot, error)
+}
+
+// CombinationResourceBatchStore 是调度器可选的平台级组合资源批量端口。
+type CombinationResourceBatchStore interface {
+	ListCombinationResourcesFor(ctx context.Context, platform Platform) ([]resource.CombinationResources, error)
 }
 
 // RateLimitAdmitter 是限频准入端口，由 storage/postgres 的 Store 满足。
@@ -102,16 +112,20 @@ type RateLimitAdmitter interface {
 
 // PageFetch 是一次页面请求。页参数来自队列 payload，凭据由租约打开。
 type PageFetch struct {
-	TaskType   TaskType
-	Platform   Platform
-	AppID      int64
-	Side       market.Side
-	Kind       TaskKind
-	Payload    []byte
-	Lease      resource.Lease
+	TaskType    TaskType
+	Platform    Platform
+	AppID       int64
+	Side        market.Side
+	Kind        TaskKind
+	Payload     []byte
+	Lease       resource.Lease
 	Sort        SortOrder
 	PriceRange  PriceRange
 	SteamFacets SteamFacets
+	// AdmitRequest 必须在每次真实平台 HTTP 请求前调用。
+	AdmitRequest func(context.Context) (ratelimit.Admission, error)
+	// RequestStarted 必须紧贴每次真实平台 HTTP 的发送动作调用。
+	RequestStarted func()
 }
 
 // FetchedPage 是一次成功页面响应的规整结果。
@@ -135,19 +149,136 @@ var (
 
 // RateLimitSignal 表示平台返回了限频信号。
 type RateLimitSignal struct {
-	Scopes   []ratelimit.Scope
-	Reason   ratelimit.ReasonCode
-	Cooldown time.Duration
+	Admission ratelimit.Admission
+	Scopes    []ratelimit.Scope
+	Reason    ratelimit.ReasonCode
+	Cooldown  time.Duration
 }
 
 // Error 只输出固定文案，不携带平台原文。
 func (signal *RateLimitSignal) Error() string { return "platform signaled rate limiting" }
+
+// RateLimitDeferred 表示本页超时前无法等到下一次准入。
+type RateLimitDeferred struct {
+	RetryAt time.Time
+}
+
+// Error 只输出固定文案，不携带策略细节。
+func (deferred *RateLimitDeferred) Error() string { return "platform request is rate limited" }
 
 // PlatformProfile 描述一个平台的调度事实：目标线路与摘要接口类别。
 type PlatformProfile struct {
 	TargetRegion    resource.TargetRegion
 	SummaryEndpoint ratelimit.EndpointClass
 	BidEndpoint     ratelimit.EndpointClass
+	// RequestInterval 是单个接口、账号与出口 IP 组合的固定请求间隔。
+	// 调度器只用它平滑独立工人的起跑时间，持久准入仍是限频权威。
+	RequestInterval time.Duration
+}
+
+type requestLane struct {
+	platform Platform
+	endpoint ratelimit.EndpointClass
+}
+
+type requestPacer interface {
+	Wait(context.Context, requestLane, workerRateKey, time.Duration, int) error
+	SetReadyAt(workerRateKey, time.Time)
+}
+
+type smoothRequestPacer struct {
+	mu           sync.Mutex
+	nextSlot     map[requestLane]time.Time
+	nextIdentity map[workerRateKey]time.Time
+	lastCleanup  time.Time
+}
+
+func newSmoothRequestPacer() *smoothRequestPacer {
+	return &smoothRequestPacer{
+		nextSlot: make(map[requestLane]time.Time), nextIdentity: make(map[workerRateKey]time.Time),
+	}
+}
+
+func (pacer *smoothRequestPacer) reserve(
+	lane requestLane,
+	now time.Time,
+	interval time.Duration,
+	workers int,
+) time.Time {
+	spacing := interval / time.Duration(workers)
+	if spacing <= 0 {
+		spacing = time.Nanosecond
+	}
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	slot := now
+	if next := pacer.nextSlot[lane]; next.After(slot) {
+		slot = next
+	}
+	pacer.nextSlot[lane] = slot.Add(spacing)
+	if pacer.lastCleanup.IsZero() || now.Sub(pacer.lastCleanup) >= time.Minute {
+		for key, readyAt := range pacer.nextIdentity {
+			if !readyAt.After(now) {
+				delete(pacer.nextIdentity, key)
+			}
+		}
+		pacer.lastCleanup = now
+	}
+	return slot
+}
+
+func (pacer *smoothRequestPacer) Wait(
+	ctx context.Context,
+	lane requestLane,
+	identity workerRateKey,
+	interval time.Duration,
+	workers int,
+) error {
+	if ctx == nil {
+		return fmt.Errorf("nil request pacing context")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if workers < 1 {
+		return fmt.Errorf("request pacing workers must be positive")
+	}
+	pacer.mu.Lock()
+	identityReadyAt := pacer.nextIdentity[identity]
+	pacer.mu.Unlock()
+	if err := waitForRequestSlot(ctx, identityReadyAt); err != nil {
+		return err
+	}
+	slot := pacer.reserve(lane, time.Now(), interval, workers)
+	return waitForRequestSlot(ctx, slot)
+}
+
+func (pacer *smoothRequestPacer) SetReadyAt(identity workerRateKey, readyAt time.Time) {
+	pacer.mu.Lock()
+	defer pacer.mu.Unlock()
+	if current := pacer.nextIdentity[identity]; readyAt.After(current) {
+		pacer.nextIdentity[identity] = readyAt
+	}
+}
+
+func waitForRequestSlot(ctx context.Context, slot time.Time) error {
+	wait := time.Until(slot)
+	if wait <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // SchedulerConfig 是单周期调度参数。
@@ -181,6 +312,20 @@ func (config SchedulerConfig) validate() error {
 				return fmt.Errorf("profile %s bid endpoint: %w", platform, err)
 			}
 		}
+		if profile.RequestInterval < 0 ||
+			(profile.RequestInterval > 0 && profile.RequestInterval%time.Microsecond != 0) {
+			return fmt.Errorf("profile %s request interval must be a non-negative whole number of microseconds", platform)
+		}
+		if profile.RequestInterval > 0 &&
+			(profile.RequestInterval >= config.PageTimeout || profile.RequestInterval >= config.ClaimTimeout) {
+			return fmt.Errorf("profile %s request interval must be shorter than page and claim timeouts", platform)
+		}
+		if profile.RequestInterval > ratelimit.MaxDuration {
+			return fmt.Errorf("profile %s request interval is too long", platform)
+		}
+		if profile.RequestInterval > 0 && profile.SummaryEndpoint == "" {
+			return fmt.Errorf("profile %s request pacing requires a summary endpoint", platform)
+		}
 	}
 	if config.PageTimeout <= 0 || config.TransientRetry <= 0 || config.ClaimTimeout <= 0 {
 		return fmt.Errorf("scheduler durations must be positive")
@@ -190,12 +335,14 @@ func (config SchedulerConfig) validate() error {
 
 // Scheduler 执行一次调度周期：规划补货，再让空闲工人领任务。
 type Scheduler struct {
-	store       ScheduleStore
-	catalog     ProductCatalog
-	coordinator *resource.Coordinator
-	admitter    RateLimitAdmitter
-	fetcher     PageFetcher
-	config      SchedulerConfig
+	store                 ScheduleStore
+	combinationBatchStore CombinationResourceBatchStore
+	catalog               ProductCatalog
+	coordinator           *resource.Coordinator
+	admitter              RateLimitAdmitter
+	fetcher               PageFetcher
+	config                SchedulerConfig
+	pacer                 requestPacer
 }
 
 // NewScheduler 校验依赖并创建单周期调度器。
@@ -228,13 +375,16 @@ func NewScheduler(
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
+	combinationBatchStore, _ := store.(CombinationResourceBatchStore)
 	return &Scheduler{
-		store:       store,
-		catalog:     catalog,
-		coordinator: coordinator,
-		admitter:    admitter,
-		fetcher:     fetcher,
-		config:      config,
+		store:                 store,
+		combinationBatchStore: combinationBatchStore,
+		catalog:               catalog,
+		coordinator:           coordinator,
+		admitter:              admitter,
+		fetcher:               fetcher,
+		config:                config,
+		pacer:                 newSmoothRequestPacer(),
 	}, nil
 }
 
@@ -255,14 +405,87 @@ type WorkerOutcome struct {
 	TaskID        TaskID
 	TargetID      TargetID
 	Committed     bool
+	RetryAt       time.Time
 	Err           error
+	retryKind     workerRetryKind
 }
+
+type workerRetryKind uint8
+
+const workerRetryRate workerRetryKind = 1
 
 // CycleReport 汇总一次调度周期。
 type CycleReport struct {
 	StartedAt time.Time
 	Targets   []TargetOutcome
 	Workers   []WorkerOutcome
+}
+
+// cycleCombinationResources 保存单个 RunCycle 的平台资源快照。
+type cycleCombinationResources struct {
+	store  ScheduleStore
+	batch  CombinationResourceBatchStore
+	loaded map[Platform][]resource.CombinationResources
+	errors map[Platform]error
+}
+
+func newCycleCombinationResources(store ScheduleStore, batch CombinationResourceBatchStore) *cycleCombinationResources {
+	return &cycleCombinationResources{
+		store:  store,
+		batch:  batch,
+		loaded: make(map[Platform][]resource.CombinationResources),
+		errors: make(map[Platform]error),
+	}
+}
+
+// load 按平台只加载一次，并缓存该平台的错误结果。
+func (cache *cycleCombinationResources) load(ctx context.Context, platform Platform) ([]resource.CombinationResources, error) {
+	if resources, ok := cache.loaded[platform]; ok {
+		return resources, nil
+	}
+	if err, ok := cache.errors[platform]; ok {
+		return nil, err
+	}
+
+	var (
+		resources []resource.CombinationResources
+		err       error
+	)
+	if cache.batch != nil {
+		resources, err = cache.batch.ListCombinationResourcesFor(ctx, platform)
+	} else {
+		var combinations []resource.AccountNodeCombination
+		combinations, err = cache.store.ListCombinationsFor(ctx, platform)
+		if err == nil {
+			resources = make([]resource.CombinationResources, 0, len(combinations))
+			for _, combination := range combinations {
+				current, found, currentErr := cache.store.CombinationResources(ctx, combination.ID)
+				if currentErr != nil {
+					err = currentErr
+					break
+				}
+				if found {
+					resources = append(resources, current)
+				}
+			}
+		}
+	}
+	if err != nil {
+		cache.errors[platform] = err
+		return nil, err
+	}
+	cache.loaded[platform] = resources
+	return resources, nil
+}
+
+func (cache *cycleCombinationResources) combinationIDs() map[resource.CombinationID]struct{} {
+	ids := make(map[resource.CombinationID]struct{})
+	for _, resources := range cache.loaded {
+		for _, current := range resources {
+			ids[current.Combination.ID] = struct{}{}
+		}
+	}
+	return ids
 }
 
 func (s *Scheduler) now() time.Time {
@@ -276,42 +499,65 @@ func (s *Scheduler) RunCycle(ctx context.Context) (CycleReport, error) {
 	}
 	startedAt := s.now()
 	if _, err := s.store.ReleaseStaleClaims(ctx, s.config.ClaimTimeout); err != nil {
-		return CycleReport{}, fmt.Errorf("release stale claims: %w", err)
+		return CycleReport{StartedAt: startedAt}, fmt.Errorf("release stale claims: %w", err)
 	}
-	targets, err := s.store.Targets(ctx)
+	report, targets, combinationResources, err := s.planCycle(ctx)
 	if err != nil {
-		return CycleReport{}, fmt.Errorf("list collection targets: %w", err)
+		return report, err
 	}
 	component, err := s.coordinator.RegisterComponent()
 	if err != nil {
-		return CycleReport{}, fmt.Errorf("register scheduler component: %w", err)
+		return report, fmt.Errorf("register scheduler component: %w", err)
 	}
 	defer func() { _ = s.coordinator.CancelComponent(context.Background(), component) }()
+	report.Workers, err = s.dispatchWorkers(ctx, component, targets, combinationResources)
+	return report, err
+}
+
+func (s *Scheduler) planCycle(
+	ctx context.Context,
+) (CycleReport, []Target, *cycleCombinationResources, error) {
+	startedAt := s.now()
+	targets, err := s.store.Targets(ctx)
+	if err != nil {
+		return CycleReport{StartedAt: startedAt}, nil, nil, fmt.Errorf("list collection targets: %w", err)
+	}
+	combinationResources := newCycleCombinationResources(s.store, s.combinationBatchStore)
 
 	planned := make([]TargetOutcome, 0, len(targets))
 	for _, target := range targets {
 		if target.Desired() != DesiredEnabled {
 			continue
 		}
-		planned = append(planned, s.planTarget(ctx, target))
+		planned = append(planned, s.planTarget(ctx, target, combinationResources))
 	}
 	sort.Slice(planned, func(left, right int) bool {
 		return planned[left].TargetID < planned[right].TargetID
 	})
 
-	workers, err := s.dispatchWorkers(ctx, component, targets)
-	if err != nil {
-		return CycleReport{StartedAt: startedAt, Targets: planned}, err
-	}
-	return CycleReport{StartedAt: startedAt, Targets: planned, Workers: workers}, nil
+	return CycleReport{StartedAt: startedAt, Targets: planned}, targets, combinationResources, nil
 }
 
-func (s *Scheduler) planTarget(ctx context.Context, target Target) TargetOutcome {
+func (s *Scheduler) planResidentCycle(
+	ctx context.Context,
+	activeTasks []TaskID,
+) (CycleReport, []Target, *cycleCombinationResources, error) {
+	startedAt := s.now()
+	if _, err := s.store.ReleaseStaleClaimsExcept(ctx, s.config.ClaimTimeout, activeTasks); err != nil {
+		return CycleReport{StartedAt: startedAt}, nil, nil, fmt.Errorf("release stale claims: %w", err)
+	}
+	return s.planCycle(ctx)
+}
+
+func (s *Scheduler) planTarget(ctx context.Context, target Target, combinationResources *cycleCombinationResources) TargetOutcome {
 	outcome := TargetOutcome{
 		TargetID: target.ID(),
 		TaskType: target.TaskType(),
 		Platform: target.Platform(),
 		Target:   target,
+	}
+	if !targetReadyAt(target, s.now()) {
+		return outcome
 	}
 	profile, hasProfile := s.config.Profiles[target.Platform()]
 	if !hasProfile || profile.TargetRegion.Validate() != nil {
@@ -319,11 +565,12 @@ func (s *Scheduler) planTarget(ctx context.Context, target Target) TargetOutcome
 			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonInvalidConfig, time.Time{}))
 		return outcome
 	}
-	healthy, err := s.healthyWorkerCount(ctx, target.Platform(), profile.TargetRegion)
+	resources, err := combinationResources.load(ctx, target.Platform())
 	if err != nil {
 		outcome.Err = err
 		return outcome
 	}
+	healthy := s.healthyWorkerCount(resources, profile.TargetRegion)
 	if healthy == 0 {
 		outcome.Target, outcome.Superseded, outcome.Err =
 			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonNoCombination, s.now().Add(s.config.TransientRetry)))
@@ -334,18 +581,22 @@ func (s *Scheduler) planTarget(ctx context.Context, target Target) TargetOutcome
 		outcome.Err = err
 		return outcome
 	}
-	if depth >= QueueWatermark {
+	desiredDepth := QueueWatermark
+	if healthy > desiredDepth {
+		desiredDepth = healthy
+	}
+	if depth >= desiredDepth {
 		outcome.Target, outcome.Superseded, outcome.Err =
 			s.applyDisposition(ctx, target, runningDisposition())
 		return outcome
 	}
-	specs, cursor, total, err := s.buildRefill(ctx, target, QueueWatermark-depth)
+	specs, cursor, total, err := s.buildRefill(ctx, target, desiredDepth-depth)
 	if err != nil {
 		outcome.Err = err
 		return outcome
 	}
 	if len(specs) > 0 {
-		if err := s.store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), specs, cursor, total); err != nil {
+		if err := s.store.EnqueueTasksFenced(ctx, target, specs, cursor, total); err != nil {
 			if errors.Is(err, ErrFence) || errors.Is(err, ErrConflict) || errors.Is(err, ErrTargetDisabled) {
 				outcome.Superseded = true
 				return outcome
@@ -381,6 +632,13 @@ func (s *Scheduler) buildAskRefill(target Target, need int) ([]EnqueueSpec, Curs
 		return nil, Cursor{}, 0, err
 	}
 	total := target.RefillTotal()
+	if total == 0 && target.WriteSeq() > 0 {
+		if need < QueueWatermark {
+			return nil, target.RefillCursor(), total, nil
+		}
+		start = 0
+		need = 1
+	}
 	specs := make([]EnqueueSpec, 0, need)
 	for i := 0; i < need; i++ {
 		payload, err := EncodeAskPage(start, AskPageSize)
@@ -440,74 +698,42 @@ func (s *Scheduler) buildBidRefill(ctx context.Context, target Target, appID int
 	return specs, cursor, 0, nil
 }
 
-func (s *Scheduler) healthyWorkerCount(ctx context.Context, platform Platform, region resource.TargetRegion) (int, error) {
-	combinations, err := s.store.ListCombinationsFor(ctx, platform)
-	if err != nil {
-		return 0, err
-	}
+func (s *Scheduler) healthyWorkerCount(resources []resource.CombinationResources, region resource.TargetRegion) int {
 	now := s.now()
-	count := 0
-	for _, combination := range combinations {
-		resources, found, err := s.store.CombinationResources(ctx, combination.ID)
-		if err != nil || !found {
-			if err != nil {
-				return 0, err
-			}
-			continue
-		}
-		if resources.ValidateForUse(now, region) == nil {
-			count++
+	healthy := make([]resource.CombinationResources, 0, len(resources))
+	for _, current := range resources {
+		if current.ValidateForUse(now, region) == nil {
+			healthy = append(healthy, current)
 		}
 	}
-	return count, nil
+	return len(maximumIndependentCombinations(healthy))
 }
 
 func (s *Scheduler) dispatchWorkers(
 	ctx context.Context,
 	component resource.ComponentID,
 	targets []Target,
+	combinationResources *cycleCombinationResources,
 ) ([]WorkerOutcome, error) {
-	platforms := make(map[Platform]struct{})
-	for _, target := range targets {
-		if target.Desired() == DesiredEnabled {
-			platforms[target.Platform()] = struct{}{}
-		}
+	outcomes, prepared, err := s.prepareWorkers(ctx, component, targets, combinationResources, workerExclusions{})
+	if err != nil {
+		return nil, err
 	}
-	seen := make(map[resource.CombinationID]struct{})
-	jobs := make([]resource.AccountNodeCombination, 0)
-	for platform := range platforms {
-		combinations, err := s.store.ListCombinationsFor(ctx, platform)
-		if err != nil {
-			return nil, err
-		}
-		profile := s.config.Profiles[platform]
-		now := s.now()
-		for _, combination := range combinations {
-			if _, exists := seen[combination.ID]; exists {
-				continue
-			}
-			resources, found, err := s.store.CombinationResources(ctx, combination.ID)
-			if err != nil || !found {
-				if err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if resources.ValidateForUse(now, profile.TargetRegion) != nil {
-				continue
-			}
-			seen[combination.ID] = struct{}{}
-			jobs = append(jobs, combination)
-		}
+	workersByPlatform := make(map[Platform]int)
+	for _, worker := range prepared {
+		workersByPlatform[worker.target.Platform()]++
 	}
-	outcomes := make([]WorkerOutcome, len(jobs))
 	var group sync.WaitGroup
-	for index, combination := range jobs {
+	for _, worker := range prepared {
 		group.Add(1)
-		go func(slot int, combination resource.AccountNodeCombination) {
+		go func(worker preparedWorker) {
 			defer group.Done()
-			outcomes[slot] = s.runWorker(ctx, component, combination)
-		}(index, combination)
+			defer func() { _ = s.coordinator.Release(worker.lease.Token) }()
+			outcomes[worker.slot] = s.executeTask(
+				ctx, worker.lease, worker.task, worker.target, worker.outcome,
+				workersByPlatform[worker.target.Platform()],
+			)
+		}(worker)
 	}
 	group.Wait()
 	sort.Slice(outcomes, func(left, right int) bool {
@@ -516,15 +742,550 @@ func (s *Scheduler) dispatchWorkers(
 	return outcomes, nil
 }
 
-func (s *Scheduler) runWorker(
+type workerExclusions struct {
+	combinations map[resource.CombinationID]struct{}
+	rateLanes    map[workerRateKey]struct{}
+	lastLanes    map[resource.CombinationID]requestLane
+	accounts     map[resource.AccountID]struct{}
+	nodes        map[workerNodeKey]struct{}
+}
+
+type workerNodeKey struct {
+	nodeID   resource.NodeID
+	platform resource.Platform
+}
+
+type workerRateKey struct {
+	accountID   resource.AccountID
+	exitAddress netip.Addr
+	lane        requestLane
+}
+
+func (excluded workerExclusions) contains(resources resource.CombinationResources) bool {
+	if _, found := excluded.combinations[resources.Combination.ID]; found {
+		return true
+	}
+	if _, found := excluded.accounts[resources.Account.ID]; found {
+		return true
+	}
+	_, found := excluded.nodes[workerNodeKey{
+		nodeID: resources.Node.ID, platform: resources.Combination.Platform,
+	}]
+	return found
+}
+
+func (s *Scheduler) prepareWorkers(
+	ctx context.Context,
+	component resource.ComponentID,
+	targets []Target,
+	combinationResources *cycleCombinationResources,
+	excluded workerExclusions,
+) ([]WorkerOutcome, []preparedWorker, error) {
+	platforms := make(map[Platform]struct{})
+	now := s.now()
+	for _, target := range targets {
+		if target.Desired() == DesiredEnabled && targetReadyAt(target, now) {
+			platforms[target.Platform()] = struct{}{}
+		}
+	}
+	seen := make(map[resource.CombinationID]struct{})
+	candidates := make([]resource.CombinationResources, 0)
+	for platform := range platforms {
+		resources, err := combinationResources.load(ctx, platform)
+		if err != nil {
+			return nil, nil, err
+		}
+		profile := s.config.Profiles[platform]
+		for _, current := range resources {
+			combination := current.Combination
+			if _, exists := seen[combination.ID]; exists {
+				continue
+			}
+			if current.ValidateForUse(now, profile.TargetRegion) != nil {
+				continue
+			}
+			if excluded.contains(current) {
+				continue
+			}
+			if !s.hasRunnableLane(current, targets, excluded.rateLanes, now) {
+				continue
+			}
+			seen[combination.ID] = struct{}{}
+			candidates = append(candidates, current)
+		}
+	}
+	jobs := workerCombinationOrder(candidates)
+	outcomes := make([]WorkerOutcome, len(jobs))
+	prepared := make([]preparedWorker, 0, len(jobs))
+	for index, combination := range jobs {
+		worker, outcome, ready := s.prepareWorker(
+			ctx, component, combination, targets, excluded.rateLanes, excluded.lastLanes, index,
+		)
+		outcomes[index] = outcome
+		if ready {
+			prepared = append(prepared, worker)
+		}
+	}
+	return outcomes, prepared, nil
+}
+
+func (s *Scheduler) hasRunnableLane(
+	resources resource.CombinationResources,
+	targets []Target,
+	blocked map[workerRateKey]struct{},
+	now time.Time,
+) bool {
+	if resources.Node.ExitVerification == nil {
+		return true
+	}
+	// Sticky nodes may rotate to a new exit between cached planning snapshots.
+	// Their authoritative lease is the only safe place to apply an exact exit cooldown.
+	if resources.Node.EgressMode == resource.EgressModeSticky {
+		return true
+	}
+	for _, target := range targets {
+		if target.Platform() != Platform(resources.Combination.Platform) ||
+			target.Desired() != DesiredEnabled || !targetReadyAt(target, now) {
+			continue
+		}
+		key := workerRateKey{
+			accountID:   resources.Account.ID,
+			exitAddress: resources.Node.ExitVerification.Address,
+			lane:        s.requestLane(target),
+		}
+		if _, found := blocked[key]; !found {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scheduler) eligibleWorkerTargets(
+	targets []Target,
+	lease resource.Lease,
+	blocked map[workerRateKey]struct{},
+	lastLanes map[resource.CombinationID]requestLane,
+) ([]TargetID, []TargetID) {
+	if blocked == nil {
+		return nil, nil
+	}
+	now := s.now()
+	byLane := make(map[requestLane][]TargetID)
+	lanes := make([]requestLane, 0)
+	for _, target := range targets {
+		if target.Platform() != Platform(lease.Snapshot.Platform) || target.Desired() != DesiredEnabled ||
+			!targetReadyAt(target, now) {
+			continue
+		}
+		lane := s.requestLane(target)
+		key := workerRateKey{
+			accountID: lease.Snapshot.AccountID, exitAddress: lease.Snapshot.ExitAddress,
+			lane: lane,
+		}
+		if _, found := blocked[key]; !found {
+			if _, exists := byLane[lane]; !exists {
+				lanes = append(lanes, lane)
+			}
+			byLane[lane] = append(byLane[lane], target.ID())
+		}
+	}
+	if len(lanes) == 0 {
+		return []TargetID{}, nil
+	}
+	sort.Slice(lanes, func(left, right int) bool {
+		if lanes[left].platform != lanes[right].platform {
+			return lanes[left].platform < lanes[right].platform
+		}
+		return lanes[left].endpoint < lanes[right].endpoint
+	})
+	selected := int(lease.Snapshot.CombinationID) % len(lanes)
+	if previous, found := lastLanes[lease.Snapshot.CombinationID]; found {
+		for index, lane := range lanes {
+			if lane == previous {
+				selected = (index + 1) % len(lanes)
+				break
+			}
+		}
+	}
+	preferred := append([]TargetID(nil), byLane[lanes[selected]]...)
+	if len(lanes) == 1 {
+		return preferred, nil
+	}
+	fallback := make([]TargetID, 0, len(targets)-len(preferred))
+	for offset := 1; offset < len(lanes); offset++ {
+		fallback = append(fallback, byLane[lanes[(selected+offset)%len(lanes)]]...)
+	}
+	return preferred, fallback
+}
+
+func workerCombinationOrder(candidates []resource.CombinationResources) []resource.AccountNodeCombination {
+	selected := maximumIndependentCombinations(candidates)
+	selectedIDs := make(map[resource.CombinationID]struct{}, len(selected))
+	for _, combination := range selected {
+		selectedIDs[combination.ID] = struct{}{}
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return candidates[left].Combination.ID < candidates[right].Combination.ID
+	})
+	ordered := append([]resource.AccountNodeCombination(nil), selected...)
+	for _, candidate := range candidates {
+		if _, found := selectedIDs[candidate.Combination.ID]; !found {
+			ordered = append(ordered, candidate.Combination)
+		}
+	}
+	return ordered
+}
+
+func maximumIndependentCombinations(
+	candidates []resource.CombinationResources,
+) []resource.AccountNodeCombination {
+	sort.Slice(candidates, func(left, right int) bool {
+		return candidates[left].Combination.ID < candidates[right].Combination.ID
+	})
+	byAccount := make(map[resource.AccountID][]resource.CombinationResources)
+	accounts := make([]resource.AccountID, 0)
+	for _, candidate := range candidates {
+		accountID := candidate.Account.ID
+		if _, found := byAccount[accountID]; !found {
+			accounts = append(accounts, accountID)
+		}
+		byAccount[accountID] = append(byAccount[accountID], candidate)
+	}
+	sort.Slice(accounts, func(left, right int) bool { return accounts[left] < accounts[right] })
+	matchedNodes := make(map[workerNodeKey]resource.CombinationResources)
+	var match func(resource.AccountID, map[workerNodeKey]struct{}) bool
+	match = func(accountID resource.AccountID, visited map[workerNodeKey]struct{}) bool {
+		for _, candidate := range byAccount[accountID] {
+			node := workerNodeKey{
+				nodeID: candidate.Node.ID, platform: candidate.Combination.Platform,
+			}
+			if _, seen := visited[node]; seen {
+				continue
+			}
+			visited[node] = struct{}{}
+			previous, occupied := matchedNodes[node]
+			if !occupied || match(previous.Account.ID, visited) {
+				matchedNodes[node] = candidate
+				return true
+			}
+		}
+		return false
+	}
+	for _, accountID := range accounts {
+		match(accountID, make(map[workerNodeKey]struct{}))
+	}
+	selected := make([]resource.AccountNodeCombination, 0, len(matchedNodes))
+	for _, candidate := range matchedNodes {
+		selected = append(selected, candidate.Combination)
+	}
+	sort.Slice(selected, func(left, right int) bool { return selected[left].ID < selected[right].ID })
+	return selected
+}
+
+type preparedWorker struct {
+	slot    int
+	lane    requestLane
+	lease   resource.Lease
+	task    Task
+	target  Target
+	outcome WorkerOutcome
+}
+
+type residentFlight struct {
+	lane      requestLane
+	accountID resource.AccountID
+	node      workerNodeKey
+	targetID  TargetID
+	taskID    TaskID
+}
+
+// residentDispatcher lets each leased combination finish and refill
+// independently while the daemon keeps planning on its own interval.
+type residentDispatcher struct {
+	scheduler *Scheduler
+	component resource.ComponentID
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wake      chan struct{}
+
+	mu               sync.Mutex
+	closed           bool
+	inFlight         map[resource.CombinationID]residentFlight
+	rateRetryAt      map[workerRateKey]time.Time
+	transientRetryAt map[resource.CombinationID]time.Time
+	lastLanes        map[resource.CombinationID]requestLane
+	targets          []Target
+	resources        *cycleCombinationResources
+	completed        []WorkerOutcome
+	wg               sync.WaitGroup
+}
+
+func (s *Scheduler) newResidentDispatcher(ctx context.Context) (*residentDispatcher, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil resident dispatcher context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.config.ClaimTimeout-s.config.PageTimeout <= 2*schedulerCleanupTimeout {
+		return nil, fmt.Errorf("resident claim timeout must leave time for commit and cleanup")
+	}
+	component, err := s.coordinator.RegisterComponent()
+	if err != nil {
+		return nil, fmt.Errorf("register resident scheduler component: %w", err)
+	}
+	executionCtx, cancel := context.WithCancel(ctx)
+	return &residentDispatcher{
+		scheduler:        s,
+		component:        component,
+		ctx:              executionCtx,
+		cancel:           cancel,
+		wake:             make(chan struct{}, 1),
+		inFlight:         make(map[resource.CombinationID]residentFlight),
+		rateRetryAt:      make(map[workerRateKey]time.Time),
+		transientRetryAt: make(map[resource.CombinationID]time.Time),
+		lastLanes:        make(map[resource.CombinationID]requestLane),
+	}, nil
+}
+
+func (dispatcher *residentDispatcher) Wake() <-chan struct{} { return dispatcher.wake }
+
+func (dispatcher *residentDispatcher) Drain() []WorkerOutcome {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	outcomes := append([]WorkerOutcome(nil), dispatcher.completed...)
+	dispatcher.completed = dispatcher.completed[:0]
+	sort.Slice(outcomes, func(left, right int) bool {
+		return outcomes[left].CombinationID < outcomes[right].CombinationID
+	})
+	return outcomes
+}
+
+func (dispatcher *residentDispatcher) BusyTargets() map[TargetID]struct{} {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	targets := make(map[TargetID]struct{})
+	for _, flight := range dispatcher.inFlight {
+		targets[flight.targetID] = struct{}{}
+	}
+	return targets
+}
+
+func (dispatcher *residentDispatcher) ActiveTasks() []TaskID {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	tasks := make([]TaskID, 0, len(dispatcher.inFlight))
+	for _, flight := range dispatcher.inFlight {
+		tasks = append(tasks, flight.taskID)
+	}
+	sort.Slice(tasks, func(left, right int) bool { return tasks[left] < tasks[right] })
+	return tasks
+}
+
+func (dispatcher *residentDispatcher) NextRetryAt() time.Time {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	var next time.Time
+	for _, retryAt := range dispatcher.rateRetryAt {
+		if next.IsZero() || retryAt.Before(next) {
+			next = retryAt
+		}
+	}
+	for _, retryAt := range dispatcher.transientRetryAt {
+		if next.IsZero() || retryAt.Before(next) {
+			next = retryAt
+		}
+	}
+	return next
+}
+
+func (dispatcher *residentDispatcher) Dispatch(
+	ctx context.Context,
+	targets []Target,
+	combinationResources *cycleCombinationResources,
+) ([]WorkerOutcome, error) {
+	currentCombinations := combinationResources.combinationIDs()
+	dispatcher.mu.Lock()
+	dispatcher.targets = append(dispatcher.targets[:0], targets...)
+	dispatcher.resources = combinationResources
+	for combinationID := range dispatcher.lastLanes {
+		if _, found := currentCombinations[combinationID]; !found {
+			delete(dispatcher.lastLanes, combinationID)
+		}
+	}
+	dispatcher.mu.Unlock()
+	return dispatcher.dispatch(ctx, targets, combinationResources)
+}
+
+func (dispatcher *residentDispatcher) DispatchCached(ctx context.Context) ([]WorkerOutcome, error) {
+	dispatcher.mu.Lock()
+	targets := append([]Target(nil), dispatcher.targets...)
+	resources := dispatcher.resources
+	dispatcher.mu.Unlock()
+	if resources == nil {
+		return nil, nil
+	}
+	return dispatcher.dispatch(ctx, targets, resources)
+}
+
+func (dispatcher *residentDispatcher) dispatch(
+	ctx context.Context,
+	targets []Target,
+	combinationResources *cycleCombinationResources,
+) ([]WorkerOutcome, error) {
+	dispatcher.mu.Lock()
+	if dispatcher.closed {
+		dispatcher.mu.Unlock()
+		return nil, context.Canceled
+	}
+	excluded := workerExclusions{
+		combinations: make(map[resource.CombinationID]struct{}, len(dispatcher.transientRetryAt)),
+		rateLanes:    make(map[workerRateKey]struct{}, len(dispatcher.rateRetryAt)),
+		lastLanes:    make(map[resource.CombinationID]requestLane, len(dispatcher.lastLanes)),
+		accounts:     make(map[resource.AccountID]struct{}, len(dispatcher.inFlight)),
+		nodes:        make(map[workerNodeKey]struct{}, len(dispatcher.inFlight)),
+	}
+	now := dispatcher.scheduler.now()
+	for key, retryAt := range dispatcher.rateRetryAt {
+		if now.Before(retryAt) {
+			excluded.rateLanes[key] = struct{}{}
+		} else {
+			delete(dispatcher.rateRetryAt, key)
+		}
+	}
+	for combinationID, retryAt := range dispatcher.transientRetryAt {
+		if now.Before(retryAt) {
+			excluded.combinations[combinationID] = struct{}{}
+		} else {
+			delete(dispatcher.transientRetryAt, combinationID)
+		}
+	}
+	for combinationID, lane := range dispatcher.lastLanes {
+		excluded.lastLanes[combinationID] = lane
+	}
+	for _, flight := range dispatcher.inFlight {
+		excluded.accounts[flight.accountID] = struct{}{}
+		excluded.nodes[flight.node] = struct{}{}
+	}
+	dispatcher.mu.Unlock()
+
+	outcomes, prepared, err := dispatcher.scheduler.prepareWorkers(
+		ctx, dispatcher.component, targets, combinationResources, excluded,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	dispatcher.mu.Lock()
+	if dispatcher.closed {
+		dispatcher.mu.Unlock()
+		for _, worker := range prepared {
+			_ = dispatcher.scheduler.requeueTask(ctx, worker.task, worker.lease.Snapshot.CombinationID)
+			_ = dispatcher.scheduler.coordinator.Release(worker.lease.Token)
+		}
+		return nil, context.Canceled
+	}
+	workersByPlatform := make(map[Platform]int)
+	for _, flight := range dispatcher.inFlight {
+		workersByPlatform[flight.lane.platform]++
+	}
+	for _, worker := range prepared {
+		workersByPlatform[worker.target.Platform()]++
+		dispatcher.inFlight[worker.lease.Snapshot.CombinationID] = residentFlight{
+			lane: worker.lane, accountID: worker.lease.Snapshot.AccountID,
+			node: workerNodeKey{
+				nodeID: worker.lease.Snapshot.NodeID, platform: worker.lease.Snapshot.Platform,
+			},
+			targetID: worker.target.ID(), taskID: worker.task.ID(),
+		}
+		dispatcher.lastLanes[worker.lease.Snapshot.CombinationID] = worker.lane
+	}
+	dispatcher.wg.Add(len(prepared))
+	dispatcher.mu.Unlock()
+
+	started := make(map[int]struct{}, len(prepared))
+	for _, worker := range prepared {
+		started[worker.slot] = struct{}{}
+		go dispatcher.execute(worker, workersByPlatform[worker.target.Platform()])
+	}
+	immediate := make([]WorkerOutcome, 0)
+	for index, outcome := range outcomes {
+		if _, running := started[index]; !running && outcome.Err != nil {
+			immediate = append(immediate, outcome)
+		}
+	}
+	return immediate, nil
+}
+
+func (dispatcher *residentDispatcher) execute(worker preparedWorker, activeWorkers int) {
+	defer dispatcher.wg.Done()
+	executionCtx, cancel := context.WithTimeout(
+		dispatcher.ctx, dispatcher.scheduler.config.ClaimTimeout-2*schedulerCleanupTimeout,
+	)
+	outcome := dispatcher.scheduler.executeTask(
+		executionCtx, worker.lease, worker.task, worker.target, worker.outcome,
+		activeWorkers,
+	)
+	cancel()
+	if err := dispatcher.scheduler.coordinator.Release(worker.lease.Token); err != nil &&
+		!errors.Is(err, resource.ErrLeaseNotHeld) {
+		outcome.Err = errors.Join(outcome.Err, err)
+	}
+	dispatcher.mu.Lock()
+	delete(dispatcher.inFlight, worker.lease.Snapshot.CombinationID)
+	rateKey := workerRateKey{
+		accountID: worker.lease.Snapshot.AccountID, exitAddress: worker.lease.Snapshot.ExitAddress,
+		lane: worker.lane,
+	}
+	if outcome.RetryAt.IsZero() && outcome.Err != nil {
+		outcome.RetryAt = dispatcher.scheduler.now().Add(dispatcher.scheduler.config.TransientRetry)
+	}
+	if outcome.RetryAt.After(dispatcher.scheduler.now()) {
+		if outcome.retryKind == workerRetryRate {
+			dispatcher.rateRetryAt[rateKey] = outcome.RetryAt
+		} else {
+			dispatcher.transientRetryAt[worker.lease.Snapshot.CombinationID] = outcome.RetryAt
+		}
+	} else {
+		delete(dispatcher.rateRetryAt, rateKey)
+		delete(dispatcher.transientRetryAt, worker.lease.Snapshot.CombinationID)
+	}
+	dispatcher.completed = append(dispatcher.completed, outcome)
+	dispatcher.mu.Unlock()
+	select {
+	case dispatcher.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (dispatcher *residentDispatcher) Close(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("nil resident dispatcher close context")
+	}
+	dispatcher.mu.Lock()
+	dispatcher.closed = true
+	dispatcher.mu.Unlock()
+	dispatcher.cancel()
+	if err := dispatcher.scheduler.coordinator.CancelComponent(ctx, dispatcher.component); err != nil {
+		return err
+	}
+	dispatcher.wg.Wait()
+	return nil
+}
+
+func (s *Scheduler) prepareWorker(
 	ctx context.Context,
 	component resource.ComponentID,
 	combination resource.AccountNodeCombination,
-) WorkerOutcome {
+	targets []Target,
+	blockedRateLanes map[workerRateKey]struct{},
+	lastLanes map[resource.CombinationID]requestLane,
+	slot int,
+) (preparedWorker, WorkerOutcome, bool) {
 	outcome := WorkerOutcome{CombinationID: combination.ID}
 	profile, ok := s.config.Profiles[Platform(combination.Platform)]
 	if !ok {
-		return outcome
+		return preparedWorker{}, outcome, false
 	}
 	lease, err := s.coordinator.AcquireCombination(ctx, component, combination.ID, profile.TargetRegion, s.now())
 	if err != nil {
@@ -533,21 +1294,46 @@ func (s *Scheduler) runWorker(
 			!errors.Is(err, resource.ErrResourceUnusable) {
 			outcome.Err = err
 		}
-		return outcome
+		return preparedWorker{}, outcome, false
 	}
-	defer func() { _ = s.coordinator.Release(lease.Token) }()
+	eligibleTargets, fallbackTargets := s.eligibleWorkerTargets(targets, lease, blockedRateLanes, lastLanes)
+	if eligibleTargets != nil && len(eligibleTargets) == 0 {
+		_ = s.coordinator.Release(lease.Token)
+		return preparedWorker{}, outcome, false
+	}
 
-	task, target, found, err := s.store.ClaimTask(ctx, combination.ID, Platform(combination.Platform))
+	task, target, found, err := s.store.ClaimTaskForTargets(
+		ctx, combination.ID, Platform(combination.Platform), eligibleTargets,
+	)
+	if err == nil && !found && len(fallbackTargets) > 0 {
+		task, target, found, err = s.store.ClaimTaskForTargets(
+			ctx, combination.ID, Platform(combination.Platform), fallbackTargets,
+		)
+	}
 	if err != nil {
 		outcome.Err = err
-		return outcome
+		_ = s.coordinator.Release(lease.Token)
+		return preparedWorker{}, outcome, false
 	}
 	if !found {
-		return outcome
+		_ = s.coordinator.Release(lease.Token)
+		return preparedWorker{}, outcome, false
 	}
 	outcome.TaskID = task.ID()
 	outcome.TargetID = target.ID()
-	return s.executeTask(ctx, lease, task, target, outcome)
+	return preparedWorker{
+		slot: slot, lane: s.requestLane(target),
+		lease: lease, task: task, target: target, outcome: outcome,
+	}, outcome, true
+}
+
+func (s *Scheduler) requestLane(target Target) requestLane {
+	profile := s.config.Profiles[target.Platform()]
+	endpoint := profile.SummaryEndpoint
+	if side, ok := target.Side(); ok && side == market.SideBid && profile.BidEndpoint != "" {
+		endpoint = profile.BidEndpoint
+	}
+	return requestLane{platform: target.Platform(), endpoint: endpoint}
 }
 
 func (s *Scheduler) executeTask(
@@ -556,6 +1342,7 @@ func (s *Scheduler) executeTask(
 	task Task,
 	target Target,
 	outcome WorkerOutcome,
+	activeWorkers int,
 ) WorkerOutcome {
 	side, _ := target.Side()
 	appID, _ := target.AppID()
@@ -566,76 +1353,150 @@ func (s *Scheduler) executeTask(
 	}
 	request, err := ratelimit.RequestFromLease(lease, endpoint)
 	if err != nil {
-		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
-		outcome.Err = err
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
-	decision, err := s.admitter.AdmitRateLimit(ctx, request)
-	if err != nil {
-		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
-		outcome.Err = err
+	if err := lease.Context().Err(); err != nil {
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
-	if !decision.Allowed() {
-		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
-		return outcome
-	}
-	admission := decision.Admission()
-
-	fetchCtx, cancel := context.WithTimeout(lease.Context(), s.config.PageTimeout)
+	fetchCtx, cancel := context.WithTimeout(ctx, s.config.PageTimeout)
+	stopLeaseCancel := context.AfterFunc(lease.Context(), cancel)
 	fetched, err := s.fetcher.FetchPage(fetchCtx, PageFetch{
-		TaskType:   target.TaskType(),
-		Platform:   target.Platform(),
-		AppID:      appID,
-		Side:       side,
-		Kind:       task.Kind(),
-		Payload:    task.Payload(),
-		Lease:      lease,
+		TaskType:    target.TaskType(),
+		Platform:    target.Platform(),
+		AppID:       appID,
+		Side:        side,
+		Kind:        task.Kind(),
+		Payload:     task.Payload(),
+		Lease:       lease,
 		Sort:        target.Sort(),
 		PriceRange:  target.PriceRange(),
 		SteamFacets: target.SteamFacets(),
+		AdmitRequest: func(requestCtx context.Context) (ratelimit.Admission, error) {
+			return s.admitRequest(requestCtx, request, profile.RequestInterval, activeWorkers)
+		},
+		RequestStarted: func() {
+			if profile.RequestInterval > 0 {
+				s.pacer.SetReadyAt(workerRateKey{
+					accountID: lease.Snapshot.AccountID, exitAddress: lease.Snapshot.ExitAddress,
+					lane: s.requestLane(target),
+				}, time.Now().Add(profile.RequestInterval))
+			}
+		},
 	})
-	deadlineHit := errors.Is(fetchCtx.Err(), context.DeadlineExceeded)
+	fetchContextErr := fetchCtx.Err()
+	deadlineHit := errors.Is(fetchContextErr, context.DeadlineExceeded)
+	stopLeaseCancel()
+	leaseContextErr := lease.Context().Err()
 	cancel()
 	if err != nil {
-		return s.mapFetchError(ctx, lease, task, target, admission, err, deadlineHit, outcome)
+		return s.mapFetchError(ctx, lease, task, target, err, deadlineHit, outcome)
+	}
+	if fetchContextErr != nil || leaseContextErr != nil || ctx.Err() != nil {
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+		outcome.Err = errors.Join(fetchContextErr, leaseContextErr, ctx.Err(), requeueErr)
+		return outcome
 	}
 
 	cursorBefore, err := taskCursor(task)
 	if err != nil {
-		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
-		outcome.Err = err
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
 	collectedAt := s.now()
 	_, _, err = s.store.CommitSummaryPage(ctx, SummaryPageCommit{
-		TargetID:       target.ID(),
-		TaskID:         task.ID(),
-		ExpectedSwitch: target.SwitchVersion(),
-		CursorBefore:   cursorBefore,
-		CursorAfter:    Cursor{},
-		CollectedAt:    collectedAt,
-		Attempts:       fetched.Attempts,
-		Payload:        fetched.Payload,
-		AccountID:      int64(lease.Snapshot.AccountID),
-		ExitAddress:    lease.Snapshot.ExitAddress,
-		AskTotal:       fetched.TotalCount,
+		TargetID:        target.ID(),
+		TaskID:          task.ID(),
+		CombinationID:   lease.Snapshot.CombinationID,
+		ClaimGeneration: task.ClaimGeneration(),
+		ExpectedSwitch:  target.SwitchVersion(),
+		CursorBefore:    cursorBefore,
+		CursorAfter:     Cursor{},
+		CollectedAt:     collectedAt,
+		Attempts:        fetched.Attempts,
+		Payload:         fetched.Payload,
+		AccountID:       int64(lease.Snapshot.AccountID),
+		ExitAddress:     lease.Snapshot.ExitAddress,
+		AskTotal:        fetched.TotalCount,
 	})
 	if err != nil {
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
 		if errors.Is(err, ErrFence) || errors.Is(err, ErrTargetDisabled) || errors.Is(err, ErrConflict) {
-			_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+			outcome.Err = requeueErr
 			return outcome
 		}
-		_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
-		outcome.Err = err
+		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
-	if err := s.store.CompleteTask(ctx, task.ID(), lease.Snapshot.CombinationID); err != nil {
+	if err := s.store.CompleteTask(ctx, task.ID(), lease.Snapshot.CombinationID, task.ClaimGeneration()); err != nil {
 		outcome.Err = err
 		return outcome
 	}
 	outcome.Committed = true
 	return outcome
+}
+
+func (s *Scheduler) admitRequest(
+	ctx context.Context,
+	request ratelimit.Request,
+	interval time.Duration,
+	activeWorkers int,
+) (ratelimit.Admission, error) {
+	lane := requestLane{platform: Platform(request.Platform()), endpoint: request.EndpointClass()}
+	identity := workerRateKey{
+		accountID: request.AccountID(), exitAddress: request.ExitAddress(), lane: lane,
+	}
+	for {
+		if interval > 0 {
+			if s.pacer == nil {
+				return ratelimit.Admission{}, fmt.Errorf("request pacer is unavailable")
+			}
+			if err := s.pacer.Wait(ctx, lane, identity, interval, activeWorkers); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					return ratelimit.Admission{}, &RateLimitDeferred{RetryAt: s.now().Add(interval)}
+				}
+				return ratelimit.Admission{}, err
+			}
+		}
+		decision, err := s.admitter.AdmitRateLimit(ctx, request)
+		if err != nil {
+			return ratelimit.Admission{}, err
+		}
+		if decision.Allowed() {
+			return decision.Admission(), nil
+		}
+		retryAt := decision.RetryAt()
+		if interval > 0 {
+			s.pacer.SetReadyAt(identity, retryAt)
+		}
+		for _, blocker := range decision.Blockers() {
+			if blocker.Reason() == ratelimit.BlockReasonCooldown ||
+				blocker.Reason() == ratelimit.BlockReasonWarmup {
+				return ratelimit.Admission{}, &RateLimitDeferred{RetryAt: retryAt}
+			}
+		}
+		if deadline, ok := ctx.Deadline(); ok && !retryAt.Before(deadline) {
+			return ratelimit.Admission{}, &RateLimitDeferred{RetryAt: retryAt}
+		}
+		wait := time.Until(retryAt)
+		if wait < 100*time.Millisecond {
+			wait = 100 * time.Millisecond
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return ratelimit.Admission{}, &RateLimitDeferred{RetryAt: retryAt}
+			}
+			return ratelimit.Admission{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func taskCursor(task Task) (Cursor, error) {
@@ -662,33 +1523,95 @@ func (s *Scheduler) mapFetchError(
 	lease resource.Lease,
 	task Task,
 	target Target,
-	admission ratelimit.Admission,
 	fetchErr error,
 	deadlineHit bool,
 	outcome WorkerOutcome,
 ) WorkerOutcome {
-	_ = s.store.RequeueTask(context.WithoutCancel(ctx), task.ID(), lease.Snapshot.CombinationID)
+	requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+	apply := func(disposition disposition) {
+		_, _, err := s.applyDisposition(ctx, target, disposition)
+		outcome.Err = errors.Join(outcome.Err, err)
+	}
 	var signal *RateLimitSignal
+	var deferred *RateLimitDeferred
 	switch {
 	case errors.As(fetchErr, &signal):
-		if err := s.admitter.ApplyRateLimitFeedback(ctx, admission, signal.Scopes, signal.Reason, signal.Cooldown); err != nil {
-			outcome.Err = err
+		outcome.retryKind = workerRetryRate
+		if err := s.applyRateLimitFeedback(ctx, signal.Admission, signal.Scopes, signal.Reason, signal.Cooldown); err != nil {
+			outcome.Err = errors.Join(outcome.Err, err)
+			outcome.RetryAt = s.now().Add(s.config.TransientRetry)
+		} else {
+			outcome.RetryAt = s.workerRetryAt(target.Platform(), time.Time{})
 		}
+	case errors.As(fetchErr, &deferred):
+		// 冷却属于精确工人桶；任务回队即可，不能停止同目标的其他工人。
+		outcome.retryKind = workerRetryRate
+		outcome.RetryAt = s.workerRetryAt(target.Platform(), deferred.RetryAt)
+	case errors.Is(fetchErr, ratelimit.ErrPolicyUnavailable):
+		apply(blockedDisposition(TargetReasonMissingRatePolicy, time.Time{}))
 	case errors.Is(fetchErr, ErrFetchSessionInvalid):
 		// 账号失效由适配器落库；任务已回队，本工人本周期停领。
 	case deadlineHit, errors.Is(fetchErr, context.DeadlineExceeded), errors.Is(fetchErr, ErrFetchNetwork):
-		_, _, _ = s.applyDisposition(ctx, target, waitingDisposition(TargetReasonTransientFailure, s.now().Add(s.config.TransientRetry)))
+		// 单个请求或代理失败只影响当前工人，不能暂停同目标的其他独立工人。
+		outcome.Err = errors.Join(outcome.Err, fetchErr)
+		outcome.RetryAt = s.now().Add(s.config.TransientRetry)
 	default:
-		outcome.Err = fetchErr
+		outcome.Err = errors.Join(outcome.Err, fetchErr)
+		outcome.RetryAt = s.now().Add(s.config.TransientRetry)
 	}
+	outcome.Err = errors.Join(outcome.Err, requeueErr)
 	return outcome
+}
+
+func (s *Scheduler) workerRetryAt(platform Platform, candidate time.Time) time.Time {
+	now := s.now()
+	if candidate.After(now) {
+		return candidate
+	}
+	delay := s.config.Profiles[platform].RequestInterval
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+	return now.Add(delay)
+}
+
+func (s *Scheduler) requeueTask(ctx context.Context, task Task, combinationID resource.CombinationID) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), schedulerCleanupTimeout)
+	defer cancel()
+	return s.store.RequeueTask(cleanupCtx, task.ID(), combinationID, task.ClaimGeneration())
+}
+
+func (s *Scheduler) applyRateLimitFeedback(
+	ctx context.Context,
+	admission ratelimit.Admission,
+	scopes []ratelimit.Scope,
+	reason ratelimit.ReasonCode,
+	cooldown time.Duration,
+) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), schedulerCleanupTimeout)
+	defer cancel()
+	return s.admitter.ApplyRateLimitFeedback(cleanupCtx, admission, scopes, reason, cooldown)
+}
+
+func targetReadyAt(target Target, now time.Time) bool {
+	if target.Desired() != DesiredEnabled || target.Recovery() == RecoveryManual {
+		return false
+	}
+	switch target.Actual() {
+	case ActualStarting, ActualRunning:
+		return true
+	case ActualWaiting, ActualBlocked:
+		recheckAt, ok := target.RecheckAt()
+		return ok && !now.Before(recheckAt)
+	default:
+		return false
+	}
 }
 
 type dispositionKind int
 
 const (
 	dispositionRunning dispositionKind = iota
-	dispositionWaiting
 	dispositionBlocked
 	dispositionError
 	dispositionDetached
@@ -704,10 +1627,6 @@ func runningDisposition() disposition {
 	return disposition{kind: dispositionRunning}
 }
 
-func waitingDisposition(reason TargetReason, recheckAt time.Time) disposition {
-	return disposition{kind: dispositionWaiting, reason: reason, recheckAt: recheckAt}
-}
-
 func blockedDisposition(reason TargetReason, recheckAt time.Time) disposition {
 	return disposition{kind: dispositionBlocked, reason: reason, recheckAt: recheckAt}
 }
@@ -720,9 +1639,6 @@ func (s *Scheduler) applyDisposition(ctx context.Context, target Target, disp di
 	switch disp.kind {
 	case dispositionRunning:
 		transition = TargetTransition{State: ActualRunning}
-	case dispositionWaiting:
-		recheck := disp.recheckAt
-		transition = TargetTransition{State: ActualWaiting, Reason: disp.reason, RecheckAt: &recheck}
 	case dispositionBlocked:
 		transition = TargetTransition{State: ActualBlocked, Reason: disp.reason}
 		if !disp.recheckAt.IsZero() {

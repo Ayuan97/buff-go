@@ -428,6 +428,43 @@ ORDER BY c.combination_id`, string(platform))
 	return combinations, nil
 }
 
+// ListCombinationResourcesFor returns one platform's complete worker resources in one query.
+func (s *Store) ListCombinationResourcesFor(ctx context.Context, platform collection.Platform) ([]resource.CombinationResources, error) {
+	if err := s.validateCollectionStore(); err != nil {
+		return nil, err
+	}
+	if platform.Validate() != nil {
+		return nil, ErrCollectionInvalidInput
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT `+combinationResourceReadColumns+`
+FROM account_node_combinations c
+JOIN platform_accounts a ON a.account_id = c.account_id AND a.platform = c.platform
+JOIN access_nodes n ON n.node_id = c.node_id
+WHERE c.platform = $1
+ORDER BY c.combination_id`, string(platform))
+	if err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	defer rows.Close()
+
+	resources := make([]resource.CombinationResources, 0)
+	for rows.Next() {
+		current, err := scanCombinationResources(rows)
+		if err != nil {
+			if errors.Is(err, ErrResourceIntegrity) {
+				return nil, ErrCollectionIntegrity
+			}
+			return nil, collectionStorageError(ctx)
+		}
+		resources = append(resources, current)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	return resources, nil
+}
+
 const collectionInstanceLockKeySQL = `hashtextextended('collection-daemon:' || current_schema(), 0)`
 
 // AcquireInstanceLock takes a session-scoped advisory lock so that only one

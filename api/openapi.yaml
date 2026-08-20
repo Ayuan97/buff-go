@@ -27,8 +27,6 @@ paths:
           $ref: "#/components/responses/Error"
         "405":
           $ref: "#/components/responses/Error"
-        "415":
-          $ref: "#/components/responses/Error"
   /api/capabilities:
     get:
       operationId: getCapabilities
@@ -152,6 +150,10 @@ paths:
       responses:
         "200":
           description: Account deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedResult"
         "404":
           $ref: "#/components/responses/Error"
         "409":
@@ -294,6 +296,10 @@ paths:
       responses:
         "200":
           description: Node deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedResult"
         "404":
           $ref: "#/components/responses/Error"
         "409":
@@ -359,6 +365,10 @@ paths:
       responses:
         "200":
           description: Combination deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedResult"
         "404":
           $ref: "#/components/responses/Error"
         "409":
@@ -368,7 +378,7 @@ paths:
       operationId: listWatermarks
       responses:
         "200":
-          description: Short-pool minimums; usable is current short nodes
+          description: Stored short-pool minimums; usable is zero until automatic proxy provisioning exists
           content:
             application/json:
               schema:
@@ -492,6 +502,10 @@ paths:
       responses:
         "200":
           description: Provider deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedResult"
         "404":
           $ref: "#/components/responses/Error"
   /api/targets:
@@ -575,10 +589,10 @@ paths:
     post:
       operationId: setTargetSortOrder
       description: >-
-        Changes the platform ordering this target collects with. The refill
-        cursor is a list offset, so this advances switch_version, clears the
-        direction queue, and resets the refill cursor. Stored market facts and
-        write_seq are kept.
+        Changes the Steam search ordering for an ask target. Bid targets reject
+        this operation with 400 invalid_collection. The refill cursor is a list
+        offset, so a change advances switch_version, clears the direction queue,
+        and resets the refill cursor. Stored market facts and write_seq are kept.
       security:
         - controlSession: []
           csrfToken: []
@@ -606,9 +620,9 @@ paths:
       operationId: setTargetPriceRange
       description: >-
         Sets the CNY fen bounds sent to Steam search/render as price_min /
-        price_max / price_currency=23. Bid collection has no matching Steam
-        parameter. Changing bounds advances switch_version and clears the
-        direction queue. Stored market facts and write_seq are kept.
+        price_max / price_currency=23. Bid targets reject this operation with
+        400 invalid_collection. Changing bounds advances switch_version and
+        clears the direction queue. Stored market facts and write_seq are kept.
       security:
         - controlSession: []
           csrfToken: []
@@ -636,9 +650,9 @@ paths:
       operationId: setTargetSteamFacets
       description: >-
         Sets Rust category_steamcat / category_itemclass multi-select sent to
-        Steam search/render. Bid collection has no matching Steam parameter.
-        Changing the selection advances switch_version and clears the
-        direction queue. Stored market facts and write_seq are kept.
+        Steam search/render. Bid targets reject this operation with 400
+        invalid_collection. Changing the selection advances switch_version and
+        clears the direction queue. Stored market facts and write_seq are kept.
         Only Rust (appid 252490) accepts a non-empty selection.
       security:
         - controlSession: []
@@ -665,13 +679,19 @@ paths:
       - $ref: "#/components/parameters/TargetID"
     post:
       operationId: deleteTarget
-      description: Only a disabled and stopped target that never ran can be deleted; collection history is never removed
+      description: >-
+        Only a disabled and stopped target with write_seq=0 and no latest page
+        can be deleted; collection history is never removed.
       security:
         - controlSession: []
           csrfToken: []
       responses:
         "200":
           description: Target deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedResult"
         "400":
           $ref: "#/components/responses/Error"
         "404":
@@ -683,7 +703,8 @@ paths:
       operationId: listWorkers
       description: >-
         One row per account-node combination. Idle workers have no claim;
-        busy workers include the current direction and the latest page items.
+        claim describes only the task currently owned by the combination, while
+        last_page independently describes its most recently committed page.
       responses:
         "200":
           description: Account plus egress IP workers
@@ -760,6 +781,7 @@ paths:
                     type: array
                     items: {type: string}
         "400": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
   /api/quotes:
     get:
       operationId: listQuotes
@@ -811,7 +833,7 @@ paths:
           schema: {type: integer, format: int64, minimum: 0}
         - name: dropped
           in: query
-          description: If 1, only quotes whose current present price is below the window high.
+          description: If 1, only quotes whose last present price is below the window high.
           schema: {type: string, enum: ["1", "true"]}
         - name: drop_window
           in: query
@@ -848,6 +870,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Quote"
+        "400": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
   /api/price-ticks:
     get:
       operationId: listPriceTicks
@@ -879,6 +903,7 @@ paths:
                     items:
                       $ref: "#/components/schemas/PriceTick"
         "400": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
 components:
   parameters:
     AccountID:
@@ -1007,10 +1032,8 @@ components:
             - collection_in_use
             - invalid_collection
             - collection_storage_unavailable
+            - market_storage_unavailable
             - collection_error
-            - invalid_run_id
-            - invalid_page_sequence
-            - page_payload_not_found
             - invalid_limit
             - invalid_offset
             - invalid_price_range
@@ -1019,6 +1042,12 @@ components:
             - invalid_product_id
             - invalid_side
             - invalid_price_ticks
+    DeletedResult:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties:
+        deleted: {type: boolean, const: true}
     Capabilities:
       type: object
       additionalProperties: false
@@ -1133,7 +1162,10 @@ components:
       properties:
         region: {type: string, enum: [domestic, foreign, hongkong]}
         min_usable: {type: integer, minimum: 0}
-        usable: {type: integer, minimum: 0}
+        usable:
+          type: integer
+          const: 0
+          description: Reserved count; automatic proxy provisioning is not implemented.
         revision: {type: integer, format: int64, minimum: 1}
     WatermarkSet:
       type: object
@@ -1163,7 +1195,7 @@ components:
       required: [name, priority, regions, credential]
       properties:
         name: {type: string}
-        enabled: {type: boolean}
+        enabled: {type: boolean, default: true}
         priority: {type: integer, minimum: 1, maximum: 10000}
         regions:
           type: array
@@ -1198,7 +1230,20 @@ components:
     Target:
       type: object
       additionalProperties: false
-      required: [id, revision, platform, appid, side, desired, actual, switch_version, changed_at]
+      required:
+        - id
+        - revision
+        - platform
+        - appid
+        - side
+        - desired
+        - actual
+        - switch_version
+        - sort_column
+        - sort_dir
+        - steam_cats
+        - item_classes
+        - changed_at
       properties:
         id: {type: integer, format: int64, minimum: 1}
         revision: {type: integer, format: int64, minimum: 1}
@@ -1213,7 +1258,7 @@ components:
         sort_column:
           type: string
           enum: [price, quantity, name]
-          description: Platform ordering this target collects with.
+          description: Steam search ordering for ask targets; bid targets keep the stored default but do not use it.
         sort_dir: {type: string, enum: [asc, desc]}
         price_min_cents: {type: integer, format: int64, minimum: 0}
         price_max_cents: {type: integer, format: int64, minimum: 0}
@@ -1233,7 +1278,7 @@ components:
         platform: {type: string}
         appid: {type: integer, format: int64, minimum: 1}
         side: {type: string, enum: [bid, ask]}
-        desired: {type: string, enum: [enabled, disabled]}
+        desired: {type: string, enum: [enabled, disabled], default: disabled}
     TargetDesired:
       type: object
       additionalProperties: false
@@ -1255,8 +1300,14 @@ components:
       required: [expected_revision]
       properties:
         expected_revision: {type: integer, format: int64, minimum: 1}
-        min_cents: {type: integer, format: int64, minimum: 0, nullable: true}
-        max_cents: {type: integer, format: int64, minimum: 0, nullable: true}
+        min_cents:
+          anyOf:
+            - {type: integer, format: int64, minimum: 0}
+            - {type: "null"}
+        max_cents:
+          anyOf:
+            - {type: integer, format: int64, minimum: 0}
+            - {type: "null"}
     TargetSteamFacets:
       type: object
       additionalProperties: false
