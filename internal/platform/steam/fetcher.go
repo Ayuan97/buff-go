@@ -2,13 +2,9 @@ package steam
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,9 +18,6 @@ import (
 const (
 	defaultPageSize = 10
 	defaultBidBatch = collection.BidBatchSize
-	maxBodyBytes    = 1 << 20
-	searchPath      = "/market/search/render/"
-	orderbookPath   = "/market/orderbook"
 )
 
 // CatalogSource lists Steam products in product_id order for bid scans.
@@ -84,7 +77,7 @@ func NewFetcher(opt Options) (*Fetcher, error) {
 	}
 	baseURL := strings.TrimRight(opt.BaseURL, "/")
 	if baseURL == "" {
-		baseURL = "https://steamcommunity.com"
+		baseURL = defaultBaseURL
 	}
 	clock := opt.Clock
 	if clock == nil {
@@ -134,58 +127,43 @@ func (f *Fetcher) FetchPage(ctx context.Context, request collection.PageFetch) (
 		return collection.FetchedPage{}, fmt.Errorf("steam HTTP client is missing")
 	}
 	defer client.CloseIdleConnections()
+	steamClient, err := NewClient(ClientOptions{BaseURL: f.baseURL, HTTPClient: client, Cookie: cookie})
+	if err != nil {
+		return collection.FetchedPage{}, err
+	}
 	switch request.Side {
 	case market.SideAsk:
-		return f.fetchAsk(ctx, client, cookie, request)
+		return f.fetchAsk(ctx, steamClient, request)
 	case market.SideBid:
-		return f.fetchBid(ctx, client, cookie, request)
+		return f.fetchBid(ctx, steamClient, request)
 	default:
 		return collection.FetchedPage{}, fmt.Errorf("invalid side")
 	}
 }
 
-func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
+func (f *Fetcher) fetchAsk(ctx context.Context, client *Client, request collection.PageFetch) (collection.FetchedPage, error) {
 	page, err := decodeAskPayload(request)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
-	query := url.Values{}
-	query.Set("query", "")
-	query.Set("start", strconv.Itoa(page.Start))
-	query.Set("count", strconv.Itoa(page.Count))
-	query.Set("search_descriptions", "0")
 	// 顺序由采集目标决定：换了顺序补货游标归零，队列也会被清空
 	sort := request.Sort
 	if sort.Validate() != nil {
 		sort = collection.DefaultSortOrder()
 	}
-	query.Set("sort_column", string(sort.Column))
-	query.Set("sort_dir", string(sort.Direction))
-	query.Set("appid", strconv.FormatInt(request.AppID, 10))
-	query.Set("norender", "1")
-	applySearchPriceRange(query, request.PriceRange)
-	applySearchSteamFacets(query, request.AppID, request.SteamFacets)
-	var collectedAt time.Time
-	admit := func(ctx context.Context) (ratelimit.Admission, error) {
-		admission, err := request.AdmitRequest(ctx)
-		if err == nil {
-			collectedAt = admission.AdmittedAt()
-			if collectedAt.IsZero() {
-				collectedAt = f.now().UTC().Truncate(time.Microsecond)
-			}
-		}
-		return admission, err
+	searchRequest := SearchRequest{
+		AppID: request.AppID, Start: page.Start, Count: page.Count,
+		SortColumn: string(sort.Column), SortDirection: string(sort.Direction), NoRender: true,
 	}
-	body, err := f.get(
-		ctx, client, cookie, request.Lease, admit, request.RequestStarted,
-		searchPath+"?"+query.Encode(), false,
-	)
+	applySearchPriceRange(&searchRequest, request.PriceRange)
+	applySearchSteamFacets(&searchRequest, request.AppID, request.SteamFacets)
+	admission, collectedAt, err := f.admitRequest(ctx, request)
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
-	parsed, err := parseSearchRender(body)
+	parsed, body, err := client.Search(ctx, searchRequest)
 	if err != nil {
-		return collection.FetchedPage{}, err
+		return collection.FetchedPage{}, f.mapClientError(ctx, request.Lease, admission, err)
 	}
 	for _, item := range parsed.Results {
 		if isDollarPrice(item.SellPriceText) || isDollarPrice(item.SalePriceText) {
@@ -211,7 +189,7 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	}, nil
 }
 
-func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
+func (f *Fetcher) fetchBid(ctx context.Context, client *Client, request collection.PageFetch) (collection.FetchedPage, error) {
 	batch, err := decodeBidPayload(request)
 	if err != nil {
 		return collection.FetchedPage{}, err
@@ -226,25 +204,15 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 	attempts := make([]collection.AttemptWrite, 0, len(products))
 	var pageCollectedAt time.Time
 	for _, product := range products {
-		var collectedAt time.Time
-		admit := func(ctx context.Context) (ratelimit.Admission, error) {
-			admission, err := request.AdmitRequest(ctx)
-			if err == nil {
-				collectedAt = admission.AdmittedAt()
-				if collectedAt.IsZero() {
-					collectedAt = f.now().UTC().Truncate(time.Microsecond)
-				}
-			}
-			return admission, err
-		}
-		body, err := f.get(
-			ctx, client, cookie, request.Lease, admit, request.RequestStarted,
-			orderbookQuery(product.AppID, product.Name), false,
-		)
+		admission, collectedAt, err := f.admitRequest(ctx, request)
 		if err != nil {
 			return collection.FetchedPage{}, err
 		}
-		attempt, err := orderbookAttempt(product, market.SideBid, body, collectedAt)
+		book, err := client.OrderBook(ctx, product.AppID, product.Name)
+		if err != nil {
+			return collection.FetchedPage{}, f.mapClientError(ctx, request.Lease, admission, err)
+		}
+		attempt, err := orderbookAttempt(product, market.SideBid, book, collectedAt)
 		if err != nil {
 			if errors.Is(err, errForeignCurrency) {
 				if recordErr := f.recordSession(ctx, request.Lease, false); recordErr != nil {
@@ -265,7 +233,7 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 	return collection.FetchedPage{Attempts: attempts, CollectedAt: pageCollectedAt}, nil
 }
 
-func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (collection.AttemptWrite, error) {
+func searchAttempt(appID int64, item SearchResult, collectedAt time.Time) (collection.AttemptWrite, error) {
 	if item.AssetDescription.AppID != 0 && item.AssetDescription.AppID != appID {
 		return collection.AttemptWrite{}, fmt.Errorf("search result appid mismatch")
 	}
@@ -297,7 +265,7 @@ func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (colle
 }
 
 // searchMedia 提取展示用元数据。这些字段不参与行情判定，取不到就留空。
-func searchMedia(appID int64, name string, item searchResult) catalog.ProductMedia {
+func searchMedia(appID int64, name string, item SearchResult) catalog.ProductMedia {
 	media := catalog.ProductMedia{
 		IconPath:  item.AssetDescription.IconURL,
 		ItemType:  item.AssetDescription.Type,
@@ -314,23 +282,22 @@ func searchMedia(appID int64, name string, item searchResult) catalog.ProductMed
 
 // applySearchSteamFacets 把配置页的 Rust 分类多选原样交给 search/render。
 // 参数名来自 Steam 市场 URL：category_steamcat / category_itemclass。
-func applySearchSteamFacets(query url.Values, appID int64, facets collection.SteamFacets) {
+func applySearchSteamFacets(request *SearchRequest, appID int64, facets collection.SteamFacets) {
 	if appID != catalog.AppIDRust {
 		return
 	}
+	if request.Filters == nil {
+		request.Filters = make(map[string][]string)
+	}
 	for _, slug := range facets.Normalized().Cats {
-		query.Add("category_steamcat", slug)
+		request.Filters["category_steamcat"] = append(request.Filters["category_steamcat"], slug)
 	}
 	for _, slug := range facets.Normalized().Classes {
-		query.Add("category_itemclass", slug)
+		request.Filters["category_itemclass"] = append(request.Filters["category_itemclass"], slug)
 	}
 }
 
-func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byte, collectedAt time.Time) (collection.AttemptWrite, error) {
-	parsed, err := parseOrderbook(body)
-	if err != nil {
-		return collection.AttemptWrite{}, err
-	}
+func orderbookAttempt(product catalog.SteamProduct, side market.Side, parsed OrderBookResponse, collectedAt time.Time) (collection.AttemptWrite, error) {
 	write := collection.AttemptWrite{ProductID: product.ProductID, PlatformItemID: product.Name, ExactName: product.Name}
 	if !parsed.Success || parsed.Data == nil {
 		write.Observation = market.Observation{Side: side, Status: market.StatusUnavailable, CollectedAt: collectedAt}
@@ -352,10 +319,10 @@ func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byt
 	}
 	var count *int64
 	if side == market.SideBid {
-		value := parsed.Data.CBuyOrders
+		value := parsed.Data.BuyOrders
 		count = &value
 	} else {
-		value := parsed.Data.CSellOrders
+		value := parsed.Data.SellOrders
 		count = &value
 	}
 	obs, err := market.NewPresentObservation(market.PresentInput{
@@ -374,102 +341,59 @@ func orderbookAttempt(product catalog.SteamProduct, side market.Side, body []byt
 
 // applySearchPriceRange 把配置页的人民币分区间原样交给 search/render。
 // Steam 市场搜索用 price_min / price_max / price_currency=23，不是事后过滤。
-func applySearchPriceRange(query url.Values, bounds collection.PriceRange) {
+func applySearchPriceRange(request *SearchRequest, bounds collection.PriceRange) {
 	if bounds.MinCents == nil && bounds.MaxCents == nil {
 		return
 	}
-	query.Set("price_currency", strconv.Itoa(evidencedCNYCurrency))
-	if bounds.MinCents != nil {
-		query.Set("price_min", strconv.FormatInt(*bounds.MinCents, 10))
-	}
-	if bounds.MaxCents != nil {
-		query.Set("price_max", strconv.FormatInt(*bounds.MaxCents, 10))
-	}
+	request.PriceCurrency = evidencedCNYCurrency
+	request.PriceMin = bounds.MinCents
+	request.PriceMax = bounds.MaxCents
 }
 
-func orderbookQuery(appID int64, name string) string {
-	qp, _ := json.Marshal([]any{appID, name})
-	query := url.Values{}
-	query.Set("q", "Load")
-	query.Set("qp", string(qp))
-	return orderbookPath + "?" + query.Encode()
-}
-
-// browserUserAgent 需要跟着主流浏览器版本更新：停留在过旧的版本号本身就是一个
-// 可识别特征。这里不带任何自定义标识。
-const browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-
-// setBrowserHeaders 让请求头和浏览器里的同源 XHR 一致。
-// 不设 Accept-Encoding：Go 的 transport 会自己带 gzip 并透明解压，手动指定会拿到未解压的响应体。
-func setBrowserHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", browserUserAgent)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	req.Header.Set("Referer", "https://steamcommunity.com/market/")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="139", "Not(A:Brand";v="24", "Google Chrome";v="139"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
-}
-
-func (f *Fetcher) get(
+func (f *Fetcher) admitRequest(
 	ctx context.Context,
-	client *http.Client,
-	cookie string,
+	request collection.PageFetch,
+) (ratelimit.Admission, time.Time, error) {
+	admission, err := request.AdmitRequest(ctx)
+	if err != nil {
+		return ratelimit.Admission{}, time.Time{}, err
+	}
+	collectedAt := admission.AdmittedAt()
+	if collectedAt.IsZero() {
+		collectedAt = f.now().UTC().Truncate(time.Microsecond)
+	}
+	request.RequestStarted()
+	return admission, collectedAt, nil
+}
+
+func (f *Fetcher) mapClientError(
+	ctx context.Context,
 	lease resource.Lease,
-	admit func(context.Context) (ratelimit.Admission, error),
-	requestStarted func(),
-	pathQuery string,
-	recordValid bool,
-) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.baseURL+pathQuery, nil)
-	if err != nil {
-		return nil, err
-	}
-	setBrowserHeaders(req)
-	req.Header.Set("Cookie", cookie)
-	admission, err := admit(ctx)
-	if err != nil {
-		return nil, err
-	}
-	requestStarted()
-	resp, err := client.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	admission ratelimit.Admission,
+	err error,
+) error {
+	var responseErr *ResponseError
+	if errors.As(err, &responseErr) {
+		if responseErr.StatusCode >= 300 && responseErr.StatusCode < 400 && looksLikeLogin(responseErr.Location) {
+			if recordErr := f.recordSession(ctx, lease, false); recordErr != nil {
+				return fmt.Errorf("record steam session: %w", recordErr)
+			}
+			return collection.ErrFetchSessionInvalid
 		}
-		return nil, fmt.Errorf("%w: %v", collection.ErrFetchNetwork, err)
-	}
-	defer resp.Body.Close()
-	if loc := resp.Header.Get("Location"); resp.StatusCode >= 300 && resp.StatusCode < 400 && looksLikeLogin(loc) {
-		if err := f.recordSession(ctx, lease, false); err != nil {
-			return nil, fmt.Errorf("record steam session: %w", err)
+		if responseErr.StatusCode == http.StatusTooManyRequests {
+			return &collection.RateLimitSignal{
+				Admission: admission,
+				Scopes:    []ratelimit.Scope{ratelimit.ScopeAccountIP},
+				Reason:    ratelimit.ReasonHTTP429,
+			}
 		}
-		return nil, collection.ErrFetchSessionInvalid
+		return err
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, &collection.RateLimitSignal{
-			Admission: admission,
-			Scopes:    []ratelimit.Scope{ratelimit.ScopeAccountIP},
-			Reason:    ratelimit.ReasonHTTP429,
-		}
+	var networkErr *NetworkError
+	if errors.As(err, &networkErr) {
+		return fmt.Errorf("%w: %v", collection.ErrFetchNetwork, networkErr.Err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("steam http %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", collection.ErrFetchNetwork, err)
-	}
-	if recordValid {
-		if err := f.recordSession(ctx, lease, true); err != nil {
-			return nil, fmt.Errorf("record steam session: %w", err)
-		}
-	}
-	return body, nil
+	return err
 }
 
 func (f *Fetcher) recordSession(ctx context.Context, lease resource.Lease, valid bool) error {
