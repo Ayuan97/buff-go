@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 25 {
-		t.Fatalf("migration count = %d, want 25", len(migrations))
+	if len(migrations) != 26 {
+		t.Fatalf("migration count = %d, want 26", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -44,6 +44,7 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000023_collection_claim_generation",
 		"000024_latest_page_switch",
 		"000025_collection_owner_epoch",
+		"000026_reject_documentation_exit",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -56,6 +57,21 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		if len(current.Checksum) != 64 {
 			t.Fatalf("migration %q checksum length = %d", current.Version, len(current.Checksum))
 		}
+	}
+}
+
+func TestDocumentationExitMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000026_reject_documentation_exit")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "set state = 'unavailable'")
+	assertContains(t, compact, "exit_address = null")
+	assertContains(t, compact, "access_nodes_exit_not_documentation")
+	for _, network := range []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32"} {
+		assertContains(t, compact, network)
 	}
 }
 

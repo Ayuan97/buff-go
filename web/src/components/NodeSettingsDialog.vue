@@ -183,7 +183,7 @@ function submitConnection() {
           <div class="grid">
             <div class="field">
               <label>公网 IP</label>
-              <input v-model="exitAddress" placeholder="203.0.113.9" />
+              <input v-model="exitAddress" placeholder="请输入实际公网 IPv4 或 IPv6" />
             </div>
             <div class="field">
               <label>有效期至</label>

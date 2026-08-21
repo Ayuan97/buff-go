@@ -127,7 +127,7 @@ func TestNodeRoutes(t *testing.T) {
 		{name: "create", method: http.MethodPost, path: "/api/nodes", body: createBody, status: http.StatusCreated},
 		{name: "name", method: http.MethodPost, path: "/api/nodes/7/name", body: `{"name":"office"}`, status: http.StatusOK},
 		{name: "connection", method: http.MethodPost, path: "/api/nodes/7/connection", body: `{"expected_egress_revision":2,"kind":"direct","region":"foreign","egress_mode":"static"}`, status: http.StatusOK},
-		{name: "exit", method: http.MethodPost, path: "/api/nodes/7/exit", body: `{"expected_egress_revision":2,"address":"203.0.113.8","valid_until":"2030-01-01T00:00:00Z"}`, status: http.StatusOK},
+		{name: "exit", method: http.MethodPost, path: "/api/nodes/7/exit", body: `{"expected_egress_revision":2,"address":"1.1.1.1","valid_until":"2030-01-01T00:00:00Z"}`, status: http.StatusOK},
 		{name: "delete", method: http.MethodPost, path: "/api/nodes/7/delete", status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {

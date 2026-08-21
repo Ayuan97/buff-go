@@ -194,6 +194,46 @@ SELECT assignment_revision FROM access_nodes WHERE node_id = $1`, existingNodeID
 		t.Fatalf("migrated assignment revision = %d, want 1", assignmentRevision)
 	}
 
+	documentationDB := newTestSchema(t, dsn)
+	for _, current := range migrations[:25] {
+		if err := applyMigration(t.Context(), documentationDB, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var documentationNodeID int64
+	if err := documentationDB.QueryRowContext(t.Context(), `
+INSERT INTO access_nodes (
+    name, kind, region, egress_mode, state, exit_address,
+    exit_verified_revision, exit_verified_at, exit_valid_until
+)
+VALUES (
+    'documentation-exit', 'direct', 'domestic', 'static', 'available',
+    '203.0.113.9'::inet, 1, clock_timestamp(), clock_timestamp() + interval '1 hour'
+)
+RETURNING node_id`).Scan(&documentationNodeID); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyMigration(t.Context(), documentationDB, migrations[25]); err != nil {
+		t.Fatal(err)
+	}
+	var documentationState string
+	var documentationExit *string
+	if err := documentationDB.QueryRowContext(t.Context(), `
+SELECT state, host(exit_address) FROM access_nodes WHERE node_id = $1`, documentationNodeID).Scan(&documentationState, &documentationExit); err != nil {
+		t.Fatal(err)
+	}
+	if documentationState != "unavailable" || documentationExit != nil {
+		t.Fatalf("migrated documentation exit state=%s address=%v", documentationState, documentationExit)
+	}
+	if _, err := documentationDB.ExecContext(t.Context(), `
+UPDATE access_nodes
+SET state = 'available', exit_address = '192.0.2.1'::inet,
+    exit_verified_revision = egress_revision, exit_verified_at = clock_timestamp(),
+    exit_valid_until = clock_timestamp() + interval '1 hour'
+WHERE node_id = $1`, documentationNodeID); err == nil {
+		t.Fatal("documentation exit passed migrated database constraint")
+	}
+
 	legacyDB := newTestSchema(t, dsn)
 	if _, err := legacyDB.ExecContext(t.Context(), `CREATE TABLE items (id BIGINT); CREATE TABLE schema_migrations (version TEXT)`); err != nil {
 		t.Fatal(err)

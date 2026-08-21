@@ -331,8 +331,22 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil || !direct.UsableAt(now.Add(time.Minute)) {
 		t.Fatalf("shared exit address rejected = %+v err=%v", direct, err)
 	}
+	oldDirect := direct
+	if _, err := store.ConfirmNodeExit(ctx, direct.ID, 1, netip.MustParseAddr("203.0.113.9"), now, now.Add(time.Hour)); err == nil {
+		t.Fatal("documentation exit address was accepted")
+	}
+	unchangedDirect, found, err := store.Node(ctx, direct.ID)
+	if err != nil || !found || unchangedDirect.EgressRevision != oldDirect.EgressRevision ||
+		unchangedDirect.ExitVerification == nil || unchangedDirect.ExitVerification.Address != oldDirect.ExitVerification.Address {
+		t.Fatalf("invalid confirmation changed node = %+v found=%v err=%v", unchangedDirect, found, err)
+	}
+	direct, err = store.ConfirmNodeExit(ctx, direct.ID, 1, netip.MustParseAddr("8.8.4.4"), now, now.Add(time.Hour))
+	if err != nil || direct.EgressRevision != 2 || direct.ExitVerification == nil ||
+		direct.ExitVerification.VerifiedRevision != 2 || direct.ExitVerification.Address != netip.MustParseAddr("8.8.4.4") {
+		t.Fatalf("confirmed direct exit = %+v err=%v", direct, err)
+	}
 
-	stickyDeadline := now.Add(time.Hour)
+	stickyDeadline := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
 	sticky, err := store.CreateNode(ctx, "sticky-proxy", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeSticky,
 		StickySessionValidUntil: &stickyDeadline, ProxyCredential: []byte("socks5://synthetic-sticky:proxy-material@proxy.invalid:1080"),
@@ -347,6 +361,14 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if err != nil || sticky.UsableAt(stickyDeadline) {
 		t.Fatalf("sticky bound node = %+v err=%v", sticky, err)
 	}
+	if _, err := store.ConfirmNodeExit(ctx, sticky.ID, 1, netip.MustParseAddr("1.0.0.1"), now, stickyDeadline.Add(time.Second)); !errors.Is(err, ErrResourceRevisionConflict) {
+		t.Fatalf("sticky confirmation overrun error = %v", err)
+	}
+	unchangedSticky, found, err := store.Node(ctx, sticky.ID)
+	if err != nil || !found || unchangedSticky.EgressRevision != 1 || unchangedSticky.ExitVerification == nil ||
+		unchangedSticky.ExitVerification.Address != netip.MustParseAddr("8.8.8.8") {
+		t.Fatalf("sticky overrun changed node = %+v found=%v err=%v", unchangedSticky, found, err)
+	}
 
 	failing, err := store.CreateNode(ctx, "failure-first", resource.NodeConnectionInput{
 		Kind: resource.NodeKindDirect, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
@@ -359,6 +381,11 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	}
 	if _, err := store.RecordNodeExit(ctx, failing.ID, 1, netip.MustParseAddr("9.9.9.9"), now, now.Add(time.Hour)); !errors.Is(err, ErrResourceRevisionConflict) {
 		t.Fatalf("late success after unavailable error = %v", err)
+	}
+	failing, err = store.ConfirmNodeExit(ctx, failing.ID, 1, netip.MustParseAddr("9.9.9.9"), now, now.Add(time.Hour))
+	if err != nil || failing.State != resource.NodeStateAvailable || failing.EgressRevision != 2 ||
+		failing.ExitVerification == nil || failing.ExitVerification.VerifiedRevision != 2 {
+		t.Fatalf("confirmed unavailable node = %+v err=%v", failing, err)
 	}
 
 	terminalRace, err := store.CreateNode(ctx, "terminal-race", resource.NodeConnectionInput{
@@ -399,6 +426,36 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	terminal, found, err := store.Node(ctx, terminalRace.ID)
 	if err != nil || !found || terminal.State != winner.state {
 		t.Fatalf("terminal race node = %+v winner=%s found=%v err=%v", terminal, winner.state, found, err)
+	}
+
+	confirmRace, err := store.CreateNode(ctx, "confirm-race", resource.NodeConnectionInput{
+		Kind: resource.NodeKindDirect, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmStart := make(chan struct{})
+	confirmResults := make(chan error, 2)
+	for _, address := range []netip.Addr{netip.MustParseAddr("1.0.0.1"), netip.MustParseAddr("8.8.4.4")} {
+		address := address
+		go func() {
+			<-confirmStart
+			_, err := store.ConfirmNodeExit(ctx, confirmRace.ID, 1, address, now, now.Add(time.Hour))
+			confirmResults <- err
+		}()
+	}
+	close(confirmStart)
+	firstConfirmErr, secondConfirmErr := <-confirmResults, <-confirmResults
+	if (firstConfirmErr == nil) == (secondConfirmErr == nil) {
+		t.Fatalf("concurrent confirmation errors = %v, %v", firstConfirmErr, secondConfirmErr)
+	}
+	if firstConfirmErr != nil && !errors.Is(firstConfirmErr, ErrResourceRevisionConflict) ||
+		secondConfirmErr != nil && !errors.Is(secondConfirmErr, ErrResourceRevisionConflict) {
+		t.Fatalf("concurrent confirmation errors = %v, %v", firstConfirmErr, secondConfirmErr)
+	}
+	confirmedRace, found, err := store.Node(ctx, confirmRace.ID)
+	if err != nil || !found || confirmedRace.State != resource.NodeStateAvailable || confirmedRace.EgressRevision != 2 {
+		t.Fatalf("concurrent confirmation node = %+v found=%v err=%v", confirmedRace, found, err)
 	}
 
 	swapTarget, err := store.CreateNode(ctx, "swap-target", resource.NodeConnectionInput{

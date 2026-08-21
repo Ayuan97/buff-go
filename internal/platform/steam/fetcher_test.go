@@ -535,7 +535,7 @@ func mustAdmission(t *testing.T, admittedAt time.Time) (resource.Lease, ratelimi
 			ID: 1, Name: "node", Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic,
 			EgressMode: resource.EgressModeStatic, State: resource.NodeStateAvailable, EgressRevision: 1,
 			ExitVerification: &resource.ExitVerification{
-				VerifiedRevision: 1, Address: netip.MustParseAddr("192.0.2.1"),
+				VerifiedRevision: 1, Address: netip.MustParseAddr("1.1.1.1"),
 				VerifiedAt: checkedAt, ValidUntil: admittedAt.Add(time.Hour),
 			},
 		},

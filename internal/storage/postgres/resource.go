@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"time"
 
@@ -476,6 +477,42 @@ RETURNING `+nodeReadColumns, int64(id), expectedRevision, address.String(), veri
 	return node, nil
 }
 
+// ConfirmNodeExit atomically replaces manual evidence and advances the egress
+// revision so concurrent submissions from the same snapshot cannot both win.
+func (s *Store) ConfirmNodeExit(ctx context.Context, id resource.NodeID, expectedRevision int64, address netip.Addr, verifiedAt, validUntil time.Time) (resource.AccessNode, error) {
+	if err := s.validate(); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if err := validateIdentityRevision(id.Validate(), expectedRevision); err != nil {
+		return resource.AccessNode{}, err
+	}
+	if expectedRevision == math.MaxInt64 {
+		return resource.AccessNode{}, fmt.Errorf("egress revision is exhausted")
+	}
+	verifiedAt = normalizePostgresTime(verifiedAt)
+	validUntil = normalizePostgresTime(validUntil)
+	verification := resource.ExitVerification{VerifiedRevision: expectedRevision + 1, Address: address, VerifiedAt: verifiedAt, ValidUntil: validUntil}
+	if err := verification.Validate(); err != nil {
+		return resource.AccessNode{}, err
+	}
+	node, err := scanNode(s.db.QueryRowContext(ctx, `
+UPDATE access_nodes
+SET state = 'available', egress_revision = egress_revision + 1,
+    exit_address = $3, exit_verified_revision = egress_revision + 1,
+    exit_verified_at = $4, exit_valid_until = $5
+WHERE node_id = $1 AND egress_revision = $2
+  AND state IN ('validating', 'available', 'unavailable')
+  AND (sticky_session_valid_until IS NULL OR $5 <= sticky_session_valid_until)
+RETURNING `+nodeReadColumns, int64(id), expectedRevision, address.String(), verifiedAt, validUntil))
+	if errors.Is(err, sql.ErrNoRows) {
+		return resource.AccessNode{}, ErrResourceRevisionConflict
+	}
+	if err != nil {
+		return resource.AccessNode{}, mapResourceReadError(err)
+	}
+	return node, nil
+}
+
 // MarkNodeUnavailable clears evidence for a matching egress revision.
 func (s *Store) MarkNodeUnavailable(ctx context.Context, id resource.NodeID, expectedRevision int64) (resource.AccessNode, error) {
 	return s.updateNodeRevision(ctx, id, expectedRevision, `
@@ -555,6 +592,10 @@ func validateSessionPlaintext(session []byte) error {
 }
 
 func prepareNodeConnection(name string, input resource.NodeConnectionInput) (resource.NodeConnectionInput, error) {
+	return prepareNodeConnectionAt(name, input, time.Now().UTC())
+}
+
+func prepareNodeConnectionAt(name string, input resource.NodeConnectionInput, now time.Time) (resource.NodeConnectionInput, error) {
 	input.StickySessionValidUntil = normalizedTimePointer(input.StickySessionValidUntil)
 	node := resource.AccessNode{
 		ID:                      1,
@@ -569,6 +610,9 @@ func prepareNodeConnection(name string, input resource.NodeConnectionInput) (res
 	}
 	if err := node.Validate(); err != nil {
 		return resource.NodeConnectionInput{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
+	}
+	if input.EgressMode == resource.EgressModeSticky && !input.StickySessionValidUntil.After(now) {
+		return resource.NodeConnectionInput{}, fmt.Errorf("%w: sticky session deadline must be in the future", ErrInvalidResource)
 	}
 	if input.Kind == resource.NodeKindProxy {
 		if err := resource.ValidateProxyCredential(input.ProxyCredential); err != nil {

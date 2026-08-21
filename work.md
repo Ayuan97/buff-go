@@ -439,6 +439,13 @@ Git 边界：当前是旧项目大量 tracked 删除、新项目整体未跟踪�
 - 验收命令与结果：`go test ./internal/resource ./internal/collection ./internal/api ./internal/platform/steam ./internal/app ./internal/webui` 通过；`cd web && npm run typecheck && npm run build` 通过。真机启停未跑。
 - 未确定事项：真机启停由使用者本机验收。
 
+### 2026-08-21 采集恢复与代理出口收口
+
+- 输入与前置条件：账号 × 出口 IP × 接口是 Steam 限频身份；跨平台独立；队列只补任务，实际吞吐由可用组合决定。
+- 变更边界：手工出口改为原子确认，失败保留旧证据且 `unavailable` 可恢复；拒绝并迁移历史文档保留 IP；替换 Cookie 后自动恢复 `session_invalid` 目标；429 首次反馈即展示策略冷却截止；补真实子进程 `SIGKILL`、owner epoch、claim generation 恢复验收；补代理商与水位 PostgreSQL 集成测试并修正冲突映射。
+- 验收命令与结果：`go test -race ./... -count=1`、真实 PostgreSQL `go test -race ./internal/storage/postgres -count=1`、`go vet ./...`、`npm --prefix web run typecheck`、`./build.sh` 全通过；本机新版本已启动，控制台桌面/移动端点验通过，非法出口不会覆盖原证据。
+- 未确定事项：当前有效 Steam Cookie 与精确桶真实 429 尚缺，固定 2 秒 / 60 秒仍是运行参数而非已证明极限；代理商拉号、可信出口探测、长效/短效生命周期等待供应商协议与逻辑代理槽位决策。
+
 ## 历史记录
 
 ### 2026-08-12 Goal 7E（账号管理 API，进行中）

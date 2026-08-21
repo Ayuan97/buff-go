@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"buff-go/internal/resource"
 )
@@ -29,5 +30,27 @@ func TestPrepareNodeConnectionValidatesProxyURL(t *testing.T) {
 	}
 	if err != nil && strings.Contains(err.Error(), "synthetic-secret") {
 		t.Fatalf("prepareNodeConnection() leaked proxy credential: %v", err)
+	}
+}
+
+func TestPrepareNodeConnectionRejectsExpiredStickyDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	deadline := now
+	input := resource.NodeConnectionInput{
+		Kind:                    resource.NodeKindProxy,
+		Region:                  resource.NodeRegionForeign,
+		EgressMode:              resource.EgressModeSticky,
+		StickySessionValidUntil: &deadline,
+		ProxyCredential:         []byte("http://user:pass@proxy.example:8080"),
+	}
+	if _, err := prepareNodeConnectionAt("expired-sticky", input, now); !errors.Is(err, ErrInvalidResource) {
+		t.Fatalf("prepareNodeConnectionAt() error = %v, want %v", err, ErrInvalidResource)
+	}
+
+	deadline = now.Add(time.Second)
+	if _, err := prepareNodeConnectionAt("future-sticky", input, now); err != nil {
+		t.Fatalf("prepareNodeConnectionAt() future error = %v", err)
 	}
 }

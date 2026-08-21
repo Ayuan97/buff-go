@@ -251,6 +251,8 @@ func TestExitVerificationValidate(t *testing.T) {
 		{name: "this network address", mutate: func(verification *ExitVerification) { verification.Address = netip.MustParseAddr("0.1.2.3") }},
 		{name: "carrier grade nat address", mutate: func(verification *ExitVerification) { verification.Address = netip.MustParseAddr("100.64.0.1") }},
 		{name: "reserved high address", mutate: func(verification *ExitVerification) { verification.Address = netip.MustParseAddr("240.0.0.1") }},
+		{name: "documentation ipv4 address", mutate: func(verification *ExitVerification) { verification.Address = netip.MustParseAddr("203.0.113.9") }},
+		{name: "documentation ipv6 address", mutate: func(verification *ExitVerification) { verification.Address = netip.MustParseAddr("2001:db8::1") }},
 		{name: "zero verified time", mutate: func(verification *ExitVerification) { verification.VerifiedAt = time.Time{} }},
 		{name: "zero valid until", mutate: func(verification *ExitVerification) { verification.ValidUntil = time.Time{} }},
 		{name: "equal times", mutate: func(verification *ExitVerification) { verification.ValidUntil = verification.VerifiedAt }},

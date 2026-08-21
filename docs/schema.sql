@@ -5,7 +5,7 @@
 --
 --   pg_dump --schema-only --no-owner --no-privileges "$BUFFGO_DSN" -f docs/schema.sql
 --
--- 导出自已应用到 000025_collection_owner_epoch 的库，不包含业务数据。
+-- 导出自已应用到 000026_reject_documentation_exit 的库，不包含业务数据。
 -- buffgo_storage_migrations 是迁移执行器维护的版本记录表。
 
 --
@@ -81,6 +81,7 @@ CREATE TABLE public.access_nodes (
     CONSTRAINT access_nodes_egress_mode_valid CHECK ((egress_mode = ANY (ARRAY['static'::text, 'sticky'::text]))),
     CONSTRAINT access_nodes_egress_revision_positive CHECK ((egress_revision > 0)),
     CONSTRAINT access_nodes_exit_host_address CHECK (((exit_address IS NULL) OR ((family(exit_address) = 4) AND (masklen(exit_address) = 32)) OR ((family(exit_address) = 6) AND (masklen(exit_address) = 128)))),
+    CONSTRAINT access_nodes_exit_not_documentation CHECK (((exit_address IS NULL) OR (NOT ((exit_address <<= '192.0.2.0/24'::inet) OR (exit_address <<= '198.51.100.0/24'::inet) OR (exit_address <<= '203.0.113.0/24'::inet) OR (exit_address <<= '2001:db8::/32'::inet))))),
     CONSTRAINT access_nodes_exit_public_unicast CHECK (((exit_address IS NULL) OR (NOT ((exit_address <<= '0.0.0.0/8'::inet) OR (exit_address <<= '10.0.0.0/8'::inet) OR (exit_address <<= '100.64.0.0/10'::inet) OR (exit_address <<= '127.0.0.0/8'::inet) OR (exit_address <<= '169.254.0.0/16'::inet) OR (exit_address <<= '172.16.0.0/12'::inet) OR (exit_address <<= '192.168.0.0/16'::inet) OR (exit_address <<= '224.0.0.0/4'::inet) OR (exit_address <<= '240.0.0.0/4'::inet) OR (exit_address <<= '::'::inet) OR (exit_address <<= '::1'::inet) OR (exit_address <<= '::ffff:0.0.0.0/96'::inet) OR (exit_address <<= 'fc00::/7'::inet) OR (exit_address <<= 'fe80::/10'::inet) OR (exit_address <<= 'ff00::/8'::inet))))),
     CONSTRAINT access_nodes_exit_state_consistent CHECK ((((state = 'available'::text) AND (exit_address IS NOT NULL) AND (exit_verified_revision IS NOT NULL) AND (exit_verified_revision = egress_revision) AND (exit_verified_at IS NOT NULL) AND isfinite(exit_verified_at) AND (exit_valid_until IS NOT NULL) AND isfinite(exit_valid_until) AND (exit_valid_until > exit_verified_at)) OR ((state = ANY (ARRAY['validating'::text, 'unavailable'::text])) AND (exit_address IS NULL) AND (exit_verified_revision IS NULL) AND (exit_verified_at IS NULL) AND (exit_valid_until IS NULL)))),
     CONSTRAINT access_nodes_kind_valid CHECK ((kind = ANY (ARRAY['direct'::text, 'proxy'::text]))),

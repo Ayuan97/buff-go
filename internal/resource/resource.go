@@ -260,6 +260,7 @@ func (verification ExitVerification) Validate() error {
 		verification.Address.Is4In6() ||
 		!verification.Address.IsGlobalUnicast() ||
 		verification.Address.IsPrivate() ||
+		isDocumentationAddress(verification.Address) ||
 		isReservedIPv4(verification.Address) ||
 		verification.Address.IsLoopback() ||
 		verification.Address.IsMulticast() ||
@@ -276,6 +277,21 @@ func (verification ExitVerification) Validate() error {
 		return fmt.Errorf("valid_until must be after verified_at")
 	}
 	return nil
+}
+
+func isDocumentationAddress(address netip.Addr) bool {
+	prefixes := [...]netip.Prefix{
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("203.0.113.0/24"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func isReservedIPv4(address netip.Addr) bool {

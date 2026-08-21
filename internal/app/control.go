@@ -89,12 +89,7 @@ func (c nodeControl) RecordNodeExit(ctx context.Context, id resource.NodeID, exp
 	if lease.Snapshot.EgressRevision != expectedEgressRevision {
 		return resource.AccessNode{}, postgres.ErrResourceRevisionConflict
 	}
-	if lease.Snapshot.ExitAddress.IsValid() {
-		if _, err := c.coordinator.BeginNodeRevalidation(ctx, lease.Token, expectedEgressRevision); err != nil {
-			return resource.AccessNode{}, err
-		}
-	}
-	return c.coordinator.RecordNodeExit(ctx, lease.Token, address, time.Now().UTC(), validUntil)
+	return c.coordinator.ConfirmNodeExit(ctx, lease.Token, address, time.Now().UTC(), validUntil)
 }
 
 // combinationControl is the occupancy-guarded combination API facade.

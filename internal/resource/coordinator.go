@@ -42,6 +42,7 @@ type CoordinatorRepository interface {
 	BeginNodeRevalidation(context.Context, NodeID, int64) (AccessNode, error)
 	OpenNodeProxyCredentialAt(context.Context, NodeID, int64) ([]byte, error)
 	RecordNodeExit(context.Context, NodeID, int64, netip.Addr, time.Time, time.Time) (AccessNode, error)
+	ConfirmNodeExit(context.Context, NodeID, int64, netip.Addr, time.Time, time.Time) (AccessNode, error)
 	MarkNodeUnavailable(context.Context, NodeID, int64) (AccessNode, error)
 }
 
@@ -718,6 +719,38 @@ func (coordinator *Coordinator) RecordNodeExit(ctx context.Context, token LeaseT
 		return AccessNode{}, err
 	}
 	if err := coordinator.updateLeaseNodeSnapshot(token, LeaseKindNodeMaintenance, snapshot, node, false); err != nil {
+		return AccessNode{}, err
+	}
+	if cause := context.Cause(operationContext); cause != nil {
+		return node, cause
+	}
+	return node, nil
+}
+
+// ConfirmNodeExit atomically replaces manual exit evidence and advances the
+// occupied node revision, including recovery from unavailable state.
+func (coordinator *Coordinator) ConfirmNodeExit(ctx context.Context, token LeaseToken, address netip.Addr, verifiedAt, validUntil time.Time) (AccessNode, error) {
+	if err := coordinator.lockCoord(ctx); err != nil {
+		return AccessNode{}, err
+	}
+	defer coordinator.coordMu.Unlock()
+	record, operationContext, stop, err := coordinator.leaseOperation(ctx, token, LeaseKindNodeMaintenance)
+	if err != nil {
+		return AccessNode{}, err
+	}
+	defer stop()
+	snapshot := record.lease.Snapshot
+	if snapshot.EgressRevision == math.MaxInt64 {
+		return AccessNode{}, fmt.Errorf("egress revision is exhausted")
+	}
+	node, err := coordinator.repository.ConfirmNodeExit(operationContext, snapshot.NodeID, snapshot.EgressRevision, address, verifiedAt, validUntil)
+	if err != nil {
+		if cause := context.Cause(operationContext); cause != nil {
+			return AccessNode{}, cause
+		}
+		return AccessNode{}, err
+	}
+	if err := coordinator.updateLeaseNodeSnapshot(token, LeaseKindNodeMaintenance, snapshot, node, true); err != nil {
 		return AccessNode{}, err
 	}
 	if cause := context.Cause(operationContext); cause != nil {

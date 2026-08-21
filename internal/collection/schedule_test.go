@@ -229,6 +229,28 @@ func (store *fakeScheduleStore) TransitionTarget(ctx context.Context, id TargetI
 	return next, nil
 }
 
+func (store *fakeScheduleStore) RecoverTarget(_ context.Context, id TargetID, expected, expectedSwitch Revision) (Target, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	target, ok := store.targets[id]
+	if !ok {
+		return Target{}, ErrNotFound
+	}
+	if target.Revision() != expected || target.SwitchVersion() != expectedSwitch || store.conflictTargets[id] {
+		return Target{}, ErrConflict
+	}
+	next, err := target.Recover(scheduleNow())
+	if err != nil {
+		return Target{}, fmt.Errorf("%w: %v", ErrConflict, err)
+	}
+	next, err = rebuildTarget(next, target.RefillCursor(), target.WriteSeq(), target.RefillTotal())
+	if err != nil {
+		return Target{}, err
+	}
+	store.targets[id] = next
+	return next, nil
+}
+
 func (store *fakeScheduleStore) QueueDepth(ctx context.Context, id TargetID) (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -667,6 +689,9 @@ func (repo *stubCoordinatorRepository) OpenNodeProxyCredentialAt(context.Context
 	return nil, errStubUnsupported
 }
 func (repo *stubCoordinatorRepository) RecordNodeExit(context.Context, resource.NodeID, int64, netip.Addr, time.Time, time.Time) (resource.AccessNode, error) {
+	return resource.AccessNode{}, errStubUnsupported
+}
+func (repo *stubCoordinatorRepository) ConfirmNodeExit(context.Context, resource.NodeID, int64, netip.Addr, time.Time, time.Time) (resource.AccessNode, error) {
 	return resource.AccessNode{}, errStubUnsupported
 }
 func (repo *stubCoordinatorRepository) MarkNodeUnavailable(context.Context, resource.NodeID, int64) (resource.AccessNode, error) {
@@ -1688,6 +1713,22 @@ func TestScheduleRejectsInvalidSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonSessionInvalid)
+
+	harness.mutateCombination(1, func(resources *resource.CombinationResources) {
+		resources.Account.SessionState = resource.AccountSessionStateUnverified
+		resources.Account.LastCheckedAt = nil
+	})
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !report.Workers[0].Committed {
+		t.Fatalf("workers after session replacement = %+v", report.Workers)
+	}
 }
 
 func TestScheduleMixedFailuresPreferEgressUnavailable(t *testing.T) {
@@ -1716,10 +1757,11 @@ func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	harness.fetcher.hook = func(request PageFetch) error {
 		if request.Lease.Snapshot.CombinationID == 1 {
-			return &RateLimitSignal{Scopes: []ratelimit.Scope{ratelimit.ScopeAccountIP}, Reason: ratelimit.ReasonHTTP429, Cooldown: time.Minute}
+			return &RateLimitSignal{Scopes: []ratelimit.Scope{ratelimit.ScopeAccountIP}, Reason: ratelimit.ReasonHTTP429}
 		}
 		return nil
 	}
+	startedAt := scheduleNow()
 	report, err := harness.scheduler.RunCycle(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1733,6 +1775,8 @@ func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 			committed++
 		} else if worker.retryReason != WorkerWaitReasonRateLimit {
 			t.Fatalf("rate signal reason = %q", worker.retryReason)
+		} else if worker.RetryAt.Before(startedAt.Add(59 * time.Second)) {
+			t.Fatalf("rate signal retry_at = %s", worker.RetryAt)
 		}
 	}
 	if committed != 1 {

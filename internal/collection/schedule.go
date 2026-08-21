@@ -84,6 +84,7 @@ type ProductCatalog interface {
 type ScheduleStore interface {
 	Targets(ctx context.Context) ([]Target, error)
 	TransitionTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision, transition TargetTransition) (Target, error)
+	RecoverTarget(ctx context.Context, id TargetID, expected, expectedSwitch Revision) (Target, error)
 	QueueDepth(ctx context.Context, id TargetID) (int, error)
 	EnqueueTasksFenced(ctx context.Context, expected Target, specs []EnqueueSpec, cursor Cursor, total int64) error
 	ClearTargetQueue(ctx context.Context, id TargetID) error
@@ -569,7 +570,9 @@ func (s *Scheduler) planTarget(ctx context.Context, target Target, combinationRe
 		Platform: target.Platform(),
 		Target:   target,
 	}
-	if !targetReadyAt(target, s.now()) {
+	manualSessionBlock := target.Desired() == DesiredEnabled && target.Actual() == ActualBlocked &&
+		target.Reason() == TargetReasonSessionInvalid && target.Recovery() == RecoveryManual
+	if !targetReadyAt(target, s.now()) && !manualSessionBlock {
 		return outcome
 	}
 	profile, hasProfile := s.config.Profiles[target.Platform()]
@@ -593,6 +596,19 @@ func (s *Scheduler) planTarget(ctx context.Context, target Target, combinationRe
 		outcome.Target, outcome.Superseded, outcome.Err =
 			s.applyDisposition(ctx, target, blockedDisposition(reason, recheckAt))
 		return outcome
+	}
+	if manualSessionBlock {
+		recovered, err := s.store.RecoverTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion())
+		if errors.Is(err, ErrConflict) {
+			outcome.Superseded = true
+			return outcome
+		}
+		if err != nil {
+			outcome.Err = err
+			return outcome
+		}
+		target = recovered
+		outcome.Target = recovered
 	}
 	depth, err := s.store.QueueDepth(ctx, target.ID())
 	if err != nil {
@@ -1728,7 +1744,7 @@ func (s *Scheduler) mapFetchError(
 			outcome.Err = errors.Join(outcome.Err, err)
 			outcome.RetryAt = s.now().Add(s.config.TransientRetry)
 		} else {
-			outcome.RetryAt = s.workerRetryAt(target.Platform(), time.Time{})
+			outcome.RetryAt = s.rateLimitRetryAt(target.Platform(), signal)
 		}
 	case errors.As(fetchErr, &deferred):
 		// 冷却属于精确工人桶；任务回队即可，不能停止同目标的其他工人。
@@ -1758,6 +1774,24 @@ func (s *Scheduler) mapFetchError(
 	}
 	outcome.Err = errors.Join(outcome.Err, requeueErr)
 	return outcome
+}
+
+func (s *Scheduler) rateLimitRetryAt(platform Platform, signal *RateLimitSignal) time.Time {
+	cooldown := signal.Cooldown
+	if cooldown <= 0 {
+		if rules, err := signal.Admission.FeedbackRules(signal.Scopes); err == nil {
+			for _, rule := range rules {
+				if rule.FallbackCooldown() > cooldown {
+					cooldown = rule.FallbackCooldown()
+				}
+			}
+		}
+	}
+	candidate := time.Time{}
+	if cooldown > 0 {
+		candidate = s.now().Add(cooldown)
+	}
+	return s.workerRetryAt(platform, candidate)
 }
 
 func (s *Scheduler) workerRetryAt(platform Platform, candidate time.Time) time.Time {

@@ -152,7 +152,7 @@ RETURNING `+providerReadColumns,
 		id, name, enabled, priority, credential,
 	))
 	if err != nil {
-		return resource.ProxyProvider{}, mapProviderWriteError(err)
+		return resource.ProxyProvider{}, err
 	}
 	if err := replaceProviderRegions(ctx, tx, provider.ID, regions); err != nil {
 		return resource.ProxyProvider{}, err
@@ -197,7 +197,7 @@ RETURNING `+providerReadColumns,
 		return resource.ProxyProvider{}, providerMissingOrConflict(ctx, tx, id)
 	}
 	if err != nil {
-		return resource.ProxyProvider{}, mapProviderWriteError(err)
+		return resource.ProxyProvider{}, err
 	}
 	if err := replaceProviderRegions(ctx, tx, provider.ID, regions); err != nil {
 		return resource.ProxyProvider{}, err

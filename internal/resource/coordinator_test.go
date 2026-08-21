@@ -268,6 +268,26 @@ func (repository *coordinatorRepositoryStub) RecordNodeExit(ctx context.Context,
 	return node, nil
 }
 
+func (repository *coordinatorRepositoryStub) ConfirmNodeExit(ctx context.Context, id NodeID, expectedRevision int64, address netip.Addr, verifiedAt, validUntil time.Time) (AccessNode, error) {
+	if err := ctx.Err(); err != nil {
+		return AccessNode{}, err
+	}
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.calls["confirm_exit"]++
+	node, found := repository.nodes[id]
+	if !found || node.EgressRevision != expectedRevision {
+		return AccessNode{}, errors.New("node revision conflict")
+	}
+	node.State = NodeStateAvailable
+	node.EgressRevision++
+	node.ExitVerification = &ExitVerification{
+		VerifiedRevision: node.EgressRevision, Address: address, VerifiedAt: verifiedAt, ValidUntil: validUntil,
+	}
+	repository.storeNodeLocked(node)
+	return node, nil
+}
+
 func (repository *coordinatorRepositoryStub) MarkNodeUnavailable(ctx context.Context, id NodeID, expectedRevision int64) (AccessNode, error) {
 	if err := ctx.Err(); err != nil {
 		return AccessNode{}, err
@@ -889,6 +909,38 @@ func TestCoordinatorBeginRevalidationSynchronizesCommittedRevisionAfterCallerCan
 	}
 	if available.EgressRevision != 5 || available.State != NodeStateAvailable {
 		t.Fatalf("RecordNodeExit() node = %+v", available)
+	}
+	if err := coordinator.Release(maintenance.Token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoordinatorConfirmNodeExitAdvancesMaintenanceLease(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	repository := newCoordinatorRepositoryStub(usableCombinationResources(now, 1, 11, 21))
+	coordinator := newTestCoordinator(t, repository)
+	component := registerTestComponents(t, coordinator, 1)[0]
+	maintenance, err := coordinator.AcquireNodeMaintenance(context.Background(), component, 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	confirmed, err := coordinator.ConfirmNodeExit(
+		context.Background(), maintenance.Token, netip.MustParseAddr("8.8.4.4"), now, now.Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("ConfirmNodeExit() error = %v", err)
+	}
+	if confirmed.EgressRevision != 5 || confirmed.State != NodeStateAvailable ||
+		confirmed.ExitVerification == nil || confirmed.ExitVerification.VerifiedRevision != 5 {
+		t.Fatalf("ConfirmNodeExit() node = %+v", confirmed)
+	}
+	if _, err := coordinator.OpenNodeProxyCredential(context.Background(), maintenance.Token); err != nil {
+		t.Fatalf("OpenNodeProxyCredential() after confirmation error = %v", err)
+	}
+	if opened := repository.openedNode(); opened.egressRevision != 5 {
+		t.Fatalf("OpenNodeProxyCredentialAt() revision = %d", opened.egressRevision)
 	}
 	if err := coordinator.Release(maintenance.Token); err != nil {
 		t.Fatal(err)
