@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"buff-go/internal/collection"
 	"buff-go/internal/ratelimit"
 	"buff-go/internal/resource"
 )
@@ -403,6 +404,8 @@ RETURNING policy_id`, platform, ruleKey, scope, endpointClass, kind, minInterval
 func testRateLimitStorage(t *testing.T, dsn string) {
 	t.Run("policy CRUD", func(t *testing.T) { testRateLimitPolicyCRUD(t, dsn) })
 	t.Run("fail closed and concurrent admission", func(t *testing.T) { testRateLimitConcurrentAdmission(t, dsn) })
+	t.Run("subject lock isolation", func(t *testing.T) { testRateLimitSubjectLockIsolation(t, dsn) })
+	t.Run("owner epoch fences admission only", func(t *testing.T) { testRateLimitOwnerEpochFence(t, dsn) })
 	t.Run("delayed exact feedback", func(t *testing.T) { testRateLimitDelayedFeedback(t, dsn) })
 	t.Run("feedback rollback retry", func(t *testing.T) { testRateLimitFeedbackRollbackRetry(t, dsn) })
 	t.Run("replacement reset", func(t *testing.T) { testRateLimitReplacementReset(t, dsn) })
@@ -415,6 +418,45 @@ func testRateLimitStorage(t *testing.T, dsn string) {
 	t.Run("strict rolling boundary", func(t *testing.T) { testRateLimitRollingBoundary(t, dsn) })
 	t.Run("semantic integrity", func(t *testing.T) { testRateLimitSemanticIntegrity(t, dsn) })
 	t.Run("closed storage errors", func(t *testing.T) { testClosedRateLimitErrors(t, dsn) })
+}
+
+func testRateLimitOwnerEpochFence(t *testing.T, dsn string) {
+	store, db := newRateLimitTestStore(t, dsn)
+	ctx := t.Context()
+	oldLock, acquired, err := store.AcquireInstanceLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("old instance lock acquired=%v err=%v", acquired, err)
+	}
+	old := oldLock.(*collectionInstanceLock)
+	oldCtx := collection.WithOwnerEpoch(ctx, old.Epoch())
+
+	fixture := newRateLimitRequestFixture(t, store, "owner-epoch", netip.MustParseAddr("1.1.1.1"))
+	createRequiredEndpointRate(t, store, db, "steam", "summary")
+	decision, err := store.AdmitRateLimit(oldCtx, fixture.request)
+	if err != nil || !decision.Allowed() {
+		t.Fatalf("current owner admission allowed=%v err=%v", decision.Allowed(), err)
+	}
+	if _, err := old.conn.ExecContext(ctx, `SELECT pg_advisory_unlock_all()`); err != nil {
+		t.Fatal(err)
+	}
+	successor, acquired, err := store.AcquireInstanceLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("successor instance lock acquired=%v err=%v", acquired, err)
+	}
+	defer func() { _ = successor.Release(t.Context()) }()
+
+	if _, err := store.AdmitRateLimit(oldCtx, fixture.request); !errors.Is(err, collection.ErrOwnerFence) {
+		t.Fatalf("stale owner admission error = %v, want owner fence", err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		oldCtx, decision.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, time.Minute,
+	); err != nil {
+		t.Fatalf("real feedback from old admission must survive takeover: %v", err)
+	}
+	if err := oldLock.Release(ctx); err == nil {
+		t.Fatal("lost old lock release must report failure")
+	}
 }
 
 func testRateLimitPolicyCRUD(t *testing.T, dsn string) {
@@ -646,6 +688,70 @@ func testRateLimitConcurrentAdmission(t *testing.T, dsn string) {
 	}
 	if _, err := store.AdmitRateLimit(ctx, fixture.request); err != nil {
 		t.Fatalf("disabled legacy interface profile error=%v", err)
+	}
+}
+
+func testRateLimitSubjectLockIsolation(t *testing.T, dsn string) {
+	store, db := newRateLimitTestStore(t, dsn)
+	first := newRateLimitRequestFixture(t, store, "subject-lock-a", netip.MustParseAddr("1.1.1.1"))
+	second := newRateLimitRequestFixture(t, store, "subject-lock-b", netip.MustParseAddr("2.2.2.2"))
+	policy := createRequiredEndpointRate(t, store, db, "steam", "summary")
+	firstSubject, err := first.request.Subject(policy.Spec.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gate, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback() }()
+	if err := lockRateLimitPolicySubject(t.Context(), gate, policy.ID, firstSubject); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	firstResult := make(chan rateLimitAdmissionResult, 1)
+	go func() {
+		decision, err := store.AdmitRateLimit(ctx, first.request)
+		firstResult <- rateLimitAdmissionResult{decision: decision, err: err}
+	}()
+	select {
+	case result := <-firstResult:
+		t.Fatalf("locked identity A returned early: %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	secondResult := make(chan rateLimitAdmissionResult, 1)
+	go func() {
+		decision, err := store.AdmitRateLimit(ctx, second.request)
+		secondResult <- rateLimitAdmissionResult{decision: decision, err: err}
+	}()
+	select {
+	case result := <-secondResult:
+		if result.err != nil || !result.decision.Allowed() {
+			t.Fatalf("independent identity B allowed=%v err=%v", result.decision.Allowed(), result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("independent identity B was serialized behind identity A")
+	}
+	select {
+	case result := <-firstResult:
+		t.Fatalf("identity A stopped blocking before its lock was released: %+v", result)
+	default:
+	}
+
+	if err := gate.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-firstResult:
+		if result.err != nil || !result.decision.Allowed() {
+			t.Fatalf("identity A after unlock allowed=%v err=%v", result.decision.Allowed(), result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("identity A did not resume after its lock was released")
 	}
 }
 
@@ -1327,7 +1433,7 @@ func testRateLimitPlatformIsolation(t *testing.T, dsn string) {
 func testRateLimitPostLockClock(t *testing.T, dsn string) {
 	t.Run("expired exit is rejected", func(t *testing.T) {
 		store, db := newRateLimitTestStore(t, dsn)
-		createRequiredEndpointRate(t, store, db, "steam", "summary")
+		required := createRequiredEndpointRate(t, store, db, "steam", "summary")
 		platform := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
 			Platform: "steam", RuleKey: "platform_total", Scope: ratelimit.ScopePlatform,
 			Kind: ratelimit.KindRollingWindow, Window: time.Minute, MaxRequests: 100,
@@ -1347,9 +1453,11 @@ func testRateLimitPostLockClock(t *testing.T, dsn string) {
 			t.Fatal(err)
 		}
 		defer func() { _ = gate.Rollback() }()
-		var locked int64
-		if err := gate.QueryRowContext(t.Context(), `
-SELECT policy_id FROM rate_limit_policies WHERE policy_id = $1 FOR SHARE`, int64(platform.ID)).Scan(&locked); err != nil {
+		subject, err := fixture.request.Subject(required.Spec.Scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := lockRateLimitPolicySubject(t.Context(), gate, required.ID, subject); err != nil {
 			t.Fatal(err)
 		}
 		result := make(chan error, 1)

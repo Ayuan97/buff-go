@@ -5,20 +5,22 @@
 --
 --   pg_dump --schema-only --no-owner --no-privileges "$BUFFGO_DSN" -f docs/schema.sql
 --
--- 导出自已应用到 000021_tick_platform_side_index 的空库，不包含业务数据。
+-- 导出自已应用到 000025_collection_owner_epoch 的库，不包含业务数据。
 -- buffgo_storage_migrations 是迁移执行器维护的版本记录表。
 
 --
 -- PostgreSQL database dump
 --
 
+\restrict BuffgoSchemaSnapshot000025OwnerEpochFence202608210000000000000000
 
--- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
--- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
+-- Dumped from database version 17.5 (Homebrew)
+-- Dumped by pg_dump version 18.0
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -151,6 +153,18 @@ CREATE TABLE public.buffgo_storage_migrations (
 
 
 --
+-- Name: collection_daemon_ownership; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.collection_daemon_ownership (
+    singleton boolean DEFAULT true NOT NULL,
+    owner_epoch bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT collection_daemon_ownership_epoch_nonnegative CHECK ((owner_epoch >= 0)),
+    CONSTRAINT collection_daemon_ownership_singleton CHECK (singleton)
+);
+
+
+--
 -- Name: collection_latest_pages; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -166,11 +180,13 @@ CREATE TABLE public.collection_latest_pages (
     exit_address inet,
     payload_gzip bytea,
     payload_bytes bigint,
+    switch_version bigint NOT NULL,
     CONSTRAINT collection_latest_pages_account_id_positive CHECK (((account_id IS NULL) OR (account_id > 0))),
     CONSTRAINT collection_latest_pages_cursor_size CHECK (((octet_length(cursor_before) <= 4096) AND (octet_length(cursor_after) <= 4096))),
     CONSTRAINT collection_latest_pages_exit_host_address CHECK (((exit_address IS NULL) OR ((family(exit_address) = 4) AND (masklen(exit_address) = 32)) OR ((family(exit_address) = 6) AND (masklen(exit_address) = 128)))),
     CONSTRAINT collection_latest_pages_payload_digest_canonical CHECK (((octet_length(payload_digest) = 32) AND (payload_digest <> decode(repeat('00'::text, 32), 'hex'::text)))),
     CONSTRAINT collection_latest_pages_payload_shape CHECK ((((payload_gzip IS NULL) AND (payload_bytes IS NULL)) OR ((payload_gzip IS NOT NULL) AND ((octet_length(payload_gzip) >= 1) AND (octet_length(payload_gzip) <= 1048576)) AND (payload_bytes IS NOT NULL) AND (payload_bytes > 0)))),
+    CONSTRAINT collection_latest_pages_switch_version_nonnegative CHECK ((switch_version >= 0)),
     CONSTRAINT collection_latest_pages_times_valid CHECK ((isfinite(collected_at) AND isfinite(committed_at) AND (committed_at >= collected_at))),
     CONSTRAINT collection_latest_pages_write_seq_positive CHECK ((write_seq > 0))
 );
@@ -657,6 +673,14 @@ ALTER TABLE ONLY public.buffgo_storage_migrations
 
 
 --
+-- Name: collection_daemon_ownership collection_daemon_ownership_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.collection_daemon_ownership
+    ADD CONSTRAINT collection_daemon_ownership_pkey PRIMARY KEY (singleton);
+
+
+--
 -- Name: collection_latest_pages collection_latest_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1028,3 +1052,5 @@ ALTER TABLE ONLY public.rate_limit_states
 --
 -- PostgreSQL database dump complete
 --
+
+\unrestrict BuffgoSchemaSnapshot000025OwnerEpochFence202608210000000000000000

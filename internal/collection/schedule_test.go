@@ -30,6 +30,7 @@ type fakeScheduleStore struct {
 	resources          map[resource.CombinationID]resource.CombinationResources
 	resourceListCalls  map[Platform]int
 	products           []catalog.SteamProduct
+	productListCalls   int
 	nextTargetID       int64
 	nextTaskID         int64
 	enqueueSeq         map[TargetID]int64
@@ -593,6 +594,7 @@ func (store *fakeScheduleStore) ListWorkers(ctx context.Context) ([]WorkerSnapsh
 func (store *fakeScheduleStore) ListSteamProductsAfter(ctx context.Context, appID int64, after catalog.ProductID, limit int) ([]catalog.SteamProduct, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.productListCalls++
 	out := make([]catalog.SteamProduct, 0)
 	for _, product := range store.products {
 		if product.AppID != appID || product.ProductID <= after {
@@ -941,6 +943,33 @@ func TestScheduleRefillsAskQueueToWatermark(t *testing.T) {
 	requireTargetState(t, harness.store.target(target.ID()), ActualRunning, TargetReasonNone)
 }
 
+func TestScheduleCommitsFetcherObservationTime(t *testing.T) {
+	now := scheduleNow()
+	observedAt := now.Add(-time.Minute)
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		config.Clock = func() time.Time { return now }
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.result = &FetchedPage{
+		Payload: []byte(`{}`), TotalCount: 1, CollectedAt: observedAt,
+	}
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !report.Workers[0].Committed {
+		t.Fatalf("workers = %+v", report.Workers)
+	}
+	harness.store.mu.Lock()
+	page := harness.store.pages[target.ID()]
+	harness.store.mu.Unlock()
+	if !page.CollectedAt().Equal(observedAt) {
+		t.Fatalf("committed collected_at=%v, want fetch observation time %v", page.CollectedAt(), observedAt)
+	}
+}
+
 func TestScheduleAskWrapsWithoutDedup(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
@@ -958,6 +987,45 @@ func TestScheduleAskWrapsWithoutDedup(t *testing.T) {
 	}
 	if zeros < 2 {
 		t.Fatalf("wrapped pages must reappear, starts=%v", harness.store.askStarts())
+	}
+}
+
+func TestScheduleBidSmallCatalogFillsRequestedDepth(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	for id := int64(1); id <= 20; id++ {
+		harness.addCombination(id, "steam", netip.AddrFrom4([4]byte{2, 2, 2, byte(id)}))
+	}
+	harness.store.mu.Lock()
+	harness.store.products = []catalog.SteamProduct{{ProductID: 1, AppID: 730, Name: "AK-47 | Redline"}}
+	harness.store.mu.Unlock()
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideBid, DesiredEnabled)
+	payload, err := EncodeBidBatch(0, BidBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := make([]EnqueueSpec, QueueWatermark-20)
+	for index := range queued {
+		queued[index] = EnqueueSpec{Kind: TaskKindBidBatch, Payload: payload}
+	}
+	if err := harness.store.EnqueueTasks(t.Context(), target.ID(), target.SwitchVersion(), queued, Cursor{}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	report, _, _, err := harness.scheduler.planCycle(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 || report.Targets[0].Enqueued != 20 {
+		t.Fatalf("planned targets=%+v", report.Targets)
+	}
+	if depth, err := harness.store.QueueDepth(t.Context(), target.ID()); err != nil || depth != QueueWatermark {
+		t.Fatalf("queue depth=%d err=%v", depth, err)
+	}
+	harness.store.mu.Lock()
+	calls := harness.store.productListCalls
+	harness.store.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("catalog batch reads=%d, want 1", calls)
 	}
 }
 
@@ -1067,6 +1135,9 @@ func TestScheduleSessionInvalidRequeuesTask(t *testing.T) {
 	if len(report.Workers) != 1 || report.Workers[0].Committed {
 		t.Fatalf("workers = %+v", report.Workers)
 	}
+	if report.Workers[0].retryKind == workerRetryNode || !report.Workers[0].RetryAt.IsZero() {
+		t.Fatalf("session failure entered node backoff: %+v", report.Workers[0])
+	}
 	if harness.store.queuedCount() != QueueWatermark || harness.store.claimedCount() != 0 {
 		t.Fatalf("queued=%d claimed=%d", harness.store.queuedCount(), harness.store.claimedCount())
 	}
@@ -1095,6 +1166,8 @@ func TestScheduleNetworkFailureDoesNotPauseTarget(t *testing.T) {
 	for _, worker := range report.Workers {
 		if worker.Committed {
 			committed++
+		} else if worker.retryReason != WorkerWaitReasonNetwork {
+			t.Fatalf("network retry reason = %q", worker.retryReason)
 		}
 	}
 	if committed != 1 {
@@ -1107,6 +1180,22 @@ func TestScheduleNetworkFailureDoesNotPauseTarget(t *testing.T) {
 	}
 	if len(harness.admitter.requests) <= requests {
 		t.Fatalf("running target did not continue: admissions=%d fetches=%d", len(harness.admitter.requests), len(harness.fetcher.calls))
+	}
+}
+
+func TestScheduleTimeoutHasDistinctNodeRetryReason(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.hook = func(PageFetch) error { return context.DeadlineExceeded }
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || report.Workers[0].retryKind != workerRetryNode ||
+		report.Workers[0].retryReason != WorkerWaitReasonTimeout {
+		t.Fatalf("timeout worker = %+v", report.Workers)
 	}
 }
 
@@ -1523,7 +1612,49 @@ func TestScheduleRejectsExpiredEgress(t *testing.T) {
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonNoCombination)
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressUnavailable)
+}
+
+func TestScheduleClassifiesUnavailableEgressStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*resource.CombinationResources)
+	}{
+		{
+			name: "region mismatch",
+			mutate: func(resources *resource.CombinationResources) {
+				resources.Node.Region = resource.NodeRegionForeign
+			},
+		},
+		{
+			name: "exit not verified",
+			mutate: func(resources *resource.CombinationResources) {
+				resources.Node.State = resource.NodeStateValidating
+				resources.Node.ExitVerification = nil
+			},
+		},
+		{
+			name: "node unavailable",
+			mutate: func(resources *resource.CombinationResources) {
+				resources.Node.State = resource.NodeStateUnavailable
+				resources.Node.ExitVerification = nil
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			harness := newScheduleHarness(t, nil)
+			harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+			harness.mutateCombination(1, test.mutate)
+			target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+
+			if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressUnavailable)
+		})
+	}
 }
 
 func TestScheduleAllowsUnverifiedSession(t *testing.T) {
@@ -1546,14 +1677,36 @@ func TestScheduleAllowsUnverifiedSession(t *testing.T) {
 func TestScheduleRejectsInvalidSession(t *testing.T) {
 	harness := newScheduleHarness(t, nil)
 	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
-	harness.mutateCombination(1, func(resources *resource.CombinationResources) {
-		resources.Account.SessionState = resource.AccountSessionStateInvalid
-	})
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	for id := resource.CombinationID(1); id <= 2; id++ {
+		harness.mutateCombination(id, func(resources *resource.CombinationResources) {
+			resources.Account.SessionState = resource.AccountSessionStateInvalid
+		})
+	}
 	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonNoCombination)
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonSessionInvalid)
+}
+
+func TestScheduleMixedFailuresPreferEgressUnavailable(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.mutateCombination(1, func(resources *resource.CombinationResources) {
+		resources.Account.SessionState = resource.AccountSessionStateInvalid
+	})
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	harness.mutateCombination(2, func(resources *resource.CombinationResources) {
+		resources.Node.State = resource.NodeStateValidating
+		resources.Node.ExitVerification = nil
+	})
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressUnavailable)
 }
 
 func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
@@ -1578,6 +1731,8 @@ func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 	for _, worker := range report.Workers {
 		if worker.Committed {
 			committed++
+		} else if worker.retryReason != WorkerWaitReasonRateLimit {
+			t.Fatalf("rate signal reason = %q", worker.retryReason)
 		}
 	}
 	if committed != 1 {
@@ -1603,8 +1758,12 @@ func TestScheduleRateLimitDefersWorkerWithoutBlockingTarget(t *testing.T) {
 		return blocked, nil
 	}
 
-	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || report.Workers[0].retryReason != WorkerWaitReasonDeferred {
+		t.Fatalf("deferred workers = %+v", report.Workers)
 	}
 	if len(harness.fetcher.calls) != 0 || harness.store.queuedCount() != QueueWatermark {
 		t.Fatalf("blocked fetches=%d queued=%d", len(harness.fetcher.calls), harness.store.queuedCount())

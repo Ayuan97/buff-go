@@ -29,3 +29,24 @@ func TestCookieHeaderRawString(t *testing.T) {
 		t.Fatalf("got=%q err=%v", got, err)
 	}
 }
+
+func TestNewHTTPClientValidatesProxyBeforeUse(t *testing.T) {
+	for _, proxy := range []string{
+		"http://proxy.example:8080",
+		"https://proxy.example:8443",
+		"socks5://proxy.example:1080",
+		"socks5h://proxy.example:1080",
+	} {
+		client, err := newHTTPClient(proxy)
+		if err != nil {
+			t.Fatalf("newHTTPClient(%q) error = %v", proxy, err)
+		}
+		client.CloseIdleConnections()
+	}
+
+	secret := "synthetic-proxy-password"
+	client, err := newHTTPClient("ftp://user:" + secret + "@proxy.example:21")
+	if client != nil || err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("invalid proxy client=%v error=%v", client, err)
+	}
+}

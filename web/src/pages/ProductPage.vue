@@ -95,10 +95,13 @@ function note(row: Quote | undefined, platform: string, side: 'bid' | 'ask'): st
   if (row.drop_cents) {
     bits.push(`${dropWindowLabel(dropWindow.value)}降 ${fenToYuan(row.drop_cents)}${row.drop_pct_bp ? ` ${dropPctText(row.drop_pct_bp)}` : ''}`)
   }
-  if (row.present_collected_at) bits.push(fmtTime(row.present_collected_at))
+  if (row.status === 'present' && row.present_collected_at) bits.push(fmtTime(row.present_collected_at))
   if (row.status !== 'present') {
     if (row.reason_code) bits.push(quoteReasonText(row.reason_code))
-    if (row.present_cents != null) bits.push(`上次有价 ${fenToYuan(row.present_cents)}`)
+    if (row.present_cents != null) {
+      const collectedAt = row.present_collected_at ? `（${fmtTime(row.present_collected_at)}）` : ''
+      bits.push(`历史有效价 ${fenToYuan(row.present_cents)}${collectedAt}`)
+    }
   }
   return bits.join(' · ')
 }

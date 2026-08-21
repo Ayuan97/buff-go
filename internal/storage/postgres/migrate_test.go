@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 23 {
-		t.Fatalf("migration count = %d, want 23", len(migrations))
+	if len(migrations) != 25 {
+		t.Fatalf("migration count = %d, want 25", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -42,6 +42,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000021_tick_platform_side_index",
 		"000022_endpoint_account_ip_rate_limit",
 		"000023_collection_claim_generation",
+		"000024_latest_page_switch",
+		"000025_collection_owner_epoch",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -55,6 +57,32 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 			t.Fatalf("migration %q checksum length = %d", current.Version, len(current.Checksum))
 		}
 	}
+}
+
+func TestCollectionOwnerEpochMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000025_collection_owner_epoch")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "create table collection_daemon_ownership")
+	assertContains(t, compact, "owner_epoch bigint not null default 0")
+	assertContains(t, compact, "check (singleton)")
+	assertContains(t, compact, "check (owner_epoch >= 0)")
+	assertContains(t, compact, "values (true, 0)")
+}
+
+func TestLatestPageSwitchMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000024_latest_page_switch")
+	compact := compactSQL(current.SQL)
+	assertContains(t, compact, "add column switch_version bigint not null default 0")
+	assertContains(t, compact, "switch_version >= 0")
+	assertContains(t, compact, "alter column switch_version drop default")
 }
 
 func TestCollectionClaimGenerationMigration(t *testing.T) {

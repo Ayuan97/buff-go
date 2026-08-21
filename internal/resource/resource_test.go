@@ -172,6 +172,55 @@ func TestPlatformAccountValidate(t *testing.T) {
 	}
 }
 
+func TestValidateProxyCredential(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string][]byte{
+		"http with port":       []byte("http://user:pass@proxy.example:8080"),
+		"https default port":   []byte("https://proxy.example"),
+		"socks5 with port":     []byte("socks5://127.0.0.1:1080"),
+		"socks5h ipv6 default": []byte("socks5h://user:pass@[2001:db8::1]"),
+		"provider query":       []byte("https://proxy.example:8443?sticky=abc"),
+	}
+	for name, credential := range valid {
+		name, credential := name, credential
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateProxyCredential(credential); err != nil {
+				t.Fatalf("ValidateProxyCredential() error = %v", err)
+			}
+		})
+	}
+
+	invalid := map[string][]byte{
+		"empty":               nil,
+		"invalid utf8":        {0xff},
+		"leading whitespace":  []byte(" http://proxy.example:8080"),
+		"missing scheme":      []byte("proxy.example:8080"),
+		"unsupported scheme":  []byte("ftp://proxy.example:21"),
+		"missing host":        []byte("http:///path"),
+		"zero port":           []byte("http://proxy.example:0"),
+		"oversized port":      []byte("http://proxy.example:65536"),
+		"non-numeric port":    []byte("http://proxy.example:abc"),
+		"explicit empty port": []byte("http://proxy.example:"),
+	}
+	for name, credential := range invalid {
+		name, credential := name, credential
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateProxyCredential(credential); err == nil {
+				t.Fatal("ValidateProxyCredential() succeeded")
+			}
+		})
+	}
+
+	secret := "synthetic-proxy-password"
+	err := ValidateProxyCredential([]byte("http://user:" + secret + "@proxy.example:invalid"))
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("validation error leaked credential or was nil: %v", err)
+	}
+}
+
 func TestExitVerificationValidate(t *testing.T) {
 	t.Parallel()
 

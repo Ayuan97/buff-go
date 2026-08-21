@@ -38,6 +38,8 @@ func TestCollectionStoreIntegration(t *testing.T) {
 	t.Run("claim respects recheck", func(t *testing.T) { testCollectionClaimRespectsRecheck(t, dsn) })
 	t.Run("claim rechecks target state", func(t *testing.T) { testCollectionClaimRechecksTargetState(t, dsn) })
 	t.Run("resident instance lock", func(t *testing.T) { testCollectionInstanceLock(t, dsn) })
+	t.Run("failed owner acquisition releases lock", func(t *testing.T) { testCollectionOwnerAcquireCleanup(t, dsn) })
+	t.Run("resident owner epoch fences stale writes", func(t *testing.T) { testCollectionOwnerEpochFence(t, dsn) })
 	t.Run("scope concurrency", func(t *testing.T) { testCollectionConcurrency(t, dsn) })
 	t.Run("integrity and errors", func(t *testing.T) { testCollectionIntegrityErrors(t, dsn) })
 }
@@ -710,6 +712,10 @@ func testCollectionInstanceLock(t *testing.T, dsn string) {
 	if err != nil || !acquired {
 		t.Fatalf("first instance lock acquired=%v err=%v", acquired, err)
 	}
+	held := lock.(*collectionInstanceLock)
+	if held.Epoch() < 1 {
+		t.Fatalf("first owner epoch = %d, want positive", held.Epoch())
+	}
 	// 同一 schema 的另一个进程（独立连接池）必须被拒绝。
 	var schema string
 	if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
@@ -729,23 +735,78 @@ func testCollectionInstanceLock(t *testing.T, dsn string) {
 	if _, acquired, err := otherStore.AcquireInstanceLock(ctx); err != nil || acquired {
 		t.Fatalf("second instance lock must be refused, acquired=%v err=%v", acquired, err)
 	}
+	var unchangedEpoch int64
+	if err := db.QueryRowContext(ctx, `SELECT owner_epoch FROM collection_daemon_ownership WHERE singleton`).Scan(&unchangedEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if unchangedEpoch != int64(held.Epoch()) {
+		t.Fatalf("failed contender changed epoch to %d, want %d", unchangedEpoch, held.Epoch())
+	}
 	// 持有期间必须可验证，常驻循环据此确认自己仍然独占状态。
 	if err := lock.Verify(ctx); err != nil {
 		t.Fatalf("held instance lock must verify, got %v", err)
 	}
 	// 连接池重置会话会清掉会话级锁而连接依旧可用：可达性不等于仍然持有，
 	// 校验必须回读真实归属。
-	held := lock.(*collectionInstanceLock)
 	if _, err := held.conn.ExecContext(ctx, `SELECT pg_advisory_unlock_all()`); err != nil {
 		t.Fatal(err)
 	}
 	if err := lock.Verify(ctx); err == nil {
 		t.Fatal("a lock lost on a live session must not verify")
 	}
-	// 锁真的丢了：接替进程可以取得，而原持有者的释放必须报错而不是假装成功。
-	successor, acquired, err := otherStore.AcquireInstanceLock(ctx)
-	if err != nil || !acquired {
-		t.Fatalf("the lost lock must be available to a successor, acquired=%v err=%v", acquired, err)
+
+	// 已通过旧 epoch 校验的事务持有共享行锁；继任者必须等它结束后才能发布新 epoch。
+	gate, err := store.beginCollectionOwnerTx(collection.WithOwnerEpoch(ctx, held.Epoch()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback() }()
+	type acquireResult struct {
+		lock     collection.InstanceLock
+		acquired bool
+		err      error
+	}
+	acquiredResult := make(chan acquireResult, 1)
+	go func() {
+		next, ok, acquireErr := otherStore.AcquireInstanceLock(ctx)
+		acquiredResult <- acquireResult{lock: next, acquired: ok, err: acquireErr}
+	}()
+	classID, objID := advisoryLockParts(held.key)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var successorHasLock bool
+		if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_locks
+    WHERE locktype = 'advisory' AND granted AND objsubid = 1
+      AND classid = $1::oid AND objid = $2::oid
+)`, classID, objID).Scan(&successorHasLock); err != nil {
+			t.Fatal(err)
+		}
+		if successorHasLock {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("successor did not acquire the advisory lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case result := <-acquiredResult:
+		t.Fatalf("successor published epoch while old write was in flight: %+v", result)
+	default:
+	}
+	if err := gate.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-acquiredResult
+	if result.err != nil || !result.acquired {
+		t.Fatalf("the lost lock must be available to a successor, acquired=%v err=%v", result.acquired, result.err)
+	}
+	successor := result.lock
+	successorEpoch := successor.(*collectionInstanceLock).Epoch()
+	if successorEpoch != held.Epoch()+1 {
+		t.Fatalf("successor epoch = %d, want %d", successorEpoch, held.Epoch()+1)
 	}
 	if err := lock.Release(ctx); err == nil {
 		t.Fatal("releasing a lock this session no longer holds must fail")
@@ -766,6 +827,105 @@ func testCollectionInstanceLock(t *testing.T, dsn string) {
 	}
 	if err := again.Release(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testCollectionOwnerAcquireCleanup(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(ctx, `DELETE FROM collection_daemon_ownership WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	if _, acquired, err := store.AcquireInstanceLock(ctx); err == nil || acquired {
+		t.Fatalf("acquisition without owner row acquired=%v err=%v", acquired, err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO collection_daemon_ownership (singleton, owner_epoch) VALUES (TRUE, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	lock, acquired, err := store.AcquireInstanceLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("lock leaked by failed acquisition acquired=%v err=%v", acquired, err)
+	}
+	if err := lock.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testCollectionOwnerEpochFence(t *testing.T, dsn string) {
+	store, db := migratedStore(t, dsn)
+	ctx := t.Context()
+	defer func() { _ = db.Close() }()
+
+	oldLock, acquired, err := store.AcquireInstanceLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("old instance lock acquired=%v err=%v", acquired, err)
+	}
+	old := oldLock.(*collectionInstanceLock)
+	oldCtx := collection.WithOwnerEpoch(ctx, old.Epoch())
+	if _, err := old.conn.ExecContext(ctx, `SELECT pg_advisory_unlock_all()`); err != nil {
+		t.Fatal(err)
+	}
+	successor, acquired, err := store.AcquireInstanceLock(ctx)
+	if err != nil || !acquired {
+		t.Fatalf("successor instance lock acquired=%v err=%v", acquired, err)
+	}
+	defer func() { _ = successor.Release(t.Context()) }()
+	currentCtx := collection.WithOwnerEpoch(ctx, successor.(*collectionInstanceLock).Epoch())
+
+	target, combination := queueReadyFixture(t, store, "steam", 730, market.SideAsk)
+	if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 2), mustCollectionCursor(t, nil), 0); err != nil {
+		t.Fatal(err)
+	}
+	task, _, found, err := store.ClaimTask(ctx, combination.ID, "steam")
+	if err != nil || !found {
+		t.Fatalf("fixture claim found=%v err=%v", found, err)
+	}
+	assertOwnerFence := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, collection.ErrOwnerFence) {
+			t.Fatalf("%s error = %v, want owner fence", name, err)
+		}
+	}
+
+	assertOwnerFence("enqueue", store.EnqueueTasksFenced(oldCtx, target, mustAskPageSpecs(t, 1), mustCollectionCursor(t, nil), 0))
+	_, _, _, err = store.ClaimTaskForTargets(oldCtx, combination.ID, "steam", nil)
+	assertOwnerFence("claim", err)
+	_, err = store.ReleaseStaleClaims(oldCtx, time.Second)
+	assertOwnerFence("release stale", err)
+	_, err = store.ReleaseStaleClaimsExcept(oldCtx, time.Second, []collection.TaskID{task.ID()})
+	assertOwnerFence("release stale except", err)
+	_, err = store.ReleaseAllClaims(oldCtx)
+	assertOwnerFence("release all", err)
+	assertOwnerFence("clear queue", store.ClearTargetQueue(oldCtx, target.ID()))
+	_, err = store.TransitionTarget(oldCtx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualRunning})
+	assertOwnerFence("target transition", err)
+	_, _, err = store.CommitSummaryPage(oldCtx, SummaryPageCommit{
+		TargetID: target.ID(), TaskID: task.ID(), CombinationID: combination.ID,
+		ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+		CollectedAt: time.Now().UTC().Truncate(time.Microsecond),
+	})
+	assertOwnerFence("page commit", err)
+	assertOwnerFence("complete", store.CompleteTask(oldCtx, task.ID(), combination.ID, task.ClaimGeneration()))
+	assertOwnerFence("requeue", store.RequeueTask(oldCtx, task.ID(), combination.ID, task.ClaimGeneration()))
+	assertOwnerFence("purge price ticks", store.PurgeExpiredPriceTicks(oldCtx, time.Now().UTC()))
+
+	if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 2 {
+		t.Fatalf("stale writes changed queue depth=%d err=%v", depth, err)
+	}
+	stored, found, err := store.Target(ctx, target.ID())
+	if err != nil || !found || stored.Actual() != collection.ActualStarting || stored.WriteSeq() != 0 {
+		t.Fatalf("stale writes changed target=%+v found=%v err=%v", stored, found, err)
+	}
+	if err := store.RequeueTask(currentCtx, task.ID(), combination.ID, task.ClaimGeneration()); err != nil {
+		t.Fatalf("current owner requeue: %v", err)
+	}
+	if err := store.PurgeExpiredPriceTicks(currentCtx, time.Now().UTC()); err != nil {
+		t.Fatalf("current owner purge price ticks: %v", err)
+	}
+	if err := oldLock.Release(ctx); err == nil {
+		t.Fatal("lost old lock release must report failure")
 	}
 }
 

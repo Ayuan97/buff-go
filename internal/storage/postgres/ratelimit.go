@@ -23,8 +23,8 @@ var (
 )
 
 const (
-	rateLimitAdvisoryNamespace int32 = 0x4252474c
-	rateLimitPolicyColumns           = `
+	rateLimitAdvisorySeed  int64 = 0x4252474c
+	rateLimitPolicyColumns       = `
 policy_id, platform, rule_key, scope, endpoint_class, kind,
 min_interval_microseconds, window_microseconds, max_requests,
 default_cooldown_microseconds, active, revision, changed_at, ready_at`
@@ -384,6 +384,15 @@ func (s *Store) validateRateLimit() error {
 }
 
 func (s *Store) beginRateLimitTx(ctx context.Context, platform resource.Platform) (*sql.Tx, error) {
+	return s.beginRateLimitLockedTx(ctx, platform, false)
+}
+
+// State transactions share the platform gate but exclude policy mutations.
+func (s *Store) beginRateLimitStateTx(ctx context.Context, platform resource.Platform) (*sql.Tx, error) {
+	return s.beginRateLimitLockedTx(ctx, platform, true)
+}
+
+func (s *Store) beginRateLimitLockedTx(ctx context.Context, platform resource.Platform, shared bool) (*sql.Tx, error) {
 	if err := platform.Validate(); err != nil {
 		return nil, err
 	}
@@ -391,7 +400,15 @@ func (s *Store) beginRateLimitTx(ctx context.Context, platform resource.Platform
 	if err != nil {
 		return nil, ErrRateLimitStorage
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`, rateLimitAdvisoryNamespace, string(platform)); err != nil {
+	lockQuery := `SELECT pg_advisory_xact_lock(hashtextextended(
+    'buffgo:rate-limit-platform:' || current_schema() || ':' || $1, $2
+))`
+	if shared {
+		lockQuery = `SELECT pg_advisory_xact_lock_shared(hashtextextended(
+    'buffgo:rate-limit-platform:' || current_schema() || ':' || $1, $2
+))`
+	}
+	if _, err := tx.ExecContext(ctx, lockQuery, string(platform), rateLimitAdvisorySeed); err != nil {
 		_ = tx.Rollback()
 		return nil, ErrRateLimitStorage
 	}

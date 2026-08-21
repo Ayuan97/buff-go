@@ -52,7 +52,11 @@ func (s *Store) PurgeExpiredPriceTicks(ctx context.Context, now time.Time) error
 	}
 	cutoff := now.UTC().Add(-PriceTickRetention)
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		tx, err := s.beginCollectionOwnerTx(ctx)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `
 WITH expired AS (
     SELECT tick_id
     FROM market_price_ticks
@@ -65,10 +69,15 @@ DELETE FROM market_price_ticks ticks
 USING expired
 WHERE ticks.tick_id = expired.tick_id`, cutoff, priceTickPurgeBatchSize)
 		if err != nil {
+			_ = tx.Rollback()
 			return collectionStorageError(ctx)
 		}
 		deleted, err := result.RowsAffected()
 		if err != nil {
+			_ = tx.Rollback()
+			return collectionStorageError(ctx)
+		}
+		if err := tx.Commit(); err != nil {
 			return collectionStorageError(ctx)
 		}
 		if deleted < priceTickPurgeBatchSize {

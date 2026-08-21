@@ -130,6 +130,10 @@ func (f *Fetcher) FetchPage(ctx context.Context, request collection.PageFetch) (
 	if err != nil {
 		return collection.FetchedPage{}, err
 	}
+	if client == nil {
+		return collection.FetchedPage{}, fmt.Errorf("steam HTTP client is missing")
+	}
+	defer client.CloseIdleConnections()
 	switch request.Side {
 	case market.SideAsk:
 		return f.fetchAsk(ctx, client, cookie, request)
@@ -161,8 +165,19 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	query.Set("norender", "1")
 	applySearchPriceRange(query, request.PriceRange)
 	applySearchSteamFacets(query, request.AppID, request.SteamFacets)
+	var collectedAt time.Time
+	admit := func(ctx context.Context) (ratelimit.Admission, error) {
+		admission, err := request.AdmitRequest(ctx)
+		if err == nil {
+			collectedAt = admission.AdmittedAt()
+			if collectedAt.IsZero() {
+				collectedAt = f.now().UTC().Truncate(time.Microsecond)
+			}
+		}
+		return admission, err
+	}
 	body, err := f.get(
-		ctx, client, cookie, request.Lease, request.AdmitRequest, request.RequestStarted,
+		ctx, client, cookie, request.Lease, admit, request.RequestStarted,
 		searchPath+"?"+query.Encode(), false,
 	)
 	if err != nil {
@@ -183,7 +198,6 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 	if err := f.recordSession(ctx, request.Lease, true); err != nil {
 		return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
 	}
-	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(parsed.Results))
 	for _, item := range parsed.Results {
 		attempt, err := searchAttempt(request.AppID, item, collectedAt)
@@ -192,7 +206,9 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *http.Client, cookie stri
 		}
 		attempts = append(attempts, attempt)
 	}
-	return collection.FetchedPage{Attempts: attempts, Payload: body, TotalCount: int64(parsed.TotalCount)}, nil
+	return collection.FetchedPage{
+		Attempts: attempts, Payload: body, TotalCount: int64(parsed.TotalCount), CollectedAt: collectedAt,
+	}, nil
 }
 
 func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie string, request collection.PageFetch) (collection.FetchedPage, error) {
@@ -207,11 +223,22 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 	if len(products) == 0 {
 		return collection.FetchedPage{}, nil
 	}
-	collectedAt := f.now().UTC()
 	attempts := make([]collection.AttemptWrite, 0, len(products))
+	var pageCollectedAt time.Time
 	for _, product := range products {
+		var collectedAt time.Time
+		admit := func(ctx context.Context) (ratelimit.Admission, error) {
+			admission, err := request.AdmitRequest(ctx)
+			if err == nil {
+				collectedAt = admission.AdmittedAt()
+				if collectedAt.IsZero() {
+					collectedAt = f.now().UTC().Truncate(time.Microsecond)
+				}
+			}
+			return admission, err
+		}
 		body, err := f.get(
-			ctx, client, cookie, request.Lease, request.AdmitRequest, request.RequestStarted,
+			ctx, client, cookie, request.Lease, admit, request.RequestStarted,
 			orderbookQuery(product.AppID, product.Name), false,
 		)
 		if err != nil {
@@ -228,11 +255,14 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *http.Client, cookie stri
 			return collection.FetchedPage{}, err
 		}
 		attempts = append(attempts, attempt)
+		if pageCollectedAt.IsZero() {
+			pageCollectedAt = collectedAt
+		}
 	}
 	if err := f.recordSession(ctx, request.Lease, true); err != nil {
 		return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
 	}
-	return collection.FetchedPage{Attempts: attempts}, nil
+	return collection.FetchedPage{Attempts: attempts, CollectedAt: pageCollectedAt}, nil
 }
 
 func searchAttempt(appID int64, item searchResult, collectedAt time.Time) (collection.AttemptWrite, error) {

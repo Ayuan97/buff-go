@@ -80,9 +80,9 @@ func (s *Store) enqueueTasks(
 			return ErrCollectionInvalidInput
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginCollectionOwnerTx(ctx)
 	if err != nil {
-		return collectionStorageError(ctx)
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -145,7 +145,15 @@ func (s *Store) ClearTargetQueue(ctx context.Context, id collection.TargetID) er
 	if id.Validate() != nil {
 		return ErrCollectionInvalidInput
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM collection_tasks WHERE target_id = $1`, int64(id)); err != nil {
+	tx, err := s.beginCollectionOwnerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_tasks WHERE target_id = $1`, int64(id)); err != nil {
+		return collectionStorageError(ctx)
+	}
+	if err := tx.Commit(); err != nil {
 		return collectionStorageError(ctx)
 	}
 	return nil
@@ -196,9 +204,9 @@ func (s *Store) claimTask(
 	if eligibleTargets != nil && len(eligibleIDs) == 0 {
 		return collection.Task{}, collection.Target{}, false, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginCollectionOwnerTx(ctx)
 	if err != nil {
-		return collection.Task{}, collection.Target{}, false, collectionStorageError(ctx)
+		return collection.Task{}, collection.Target{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -321,7 +329,12 @@ func (s *Store) releaseStaleClaims(ctx context.Context, olderThan time.Duration,
 	if olderThan <= 0 {
 		return 0, ErrCollectionInvalidInput
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginCollectionOwnerTx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 UPDATE collection_tasks
 SET state = 'queued', claimed_by = NULL, claimed_at = NULL
 WHERE state = 'claimed'
@@ -335,6 +348,9 @@ WHERE state = 'claimed'
 	if err != nil {
 		return 0, collectionStorageError(ctx)
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, collectionStorageError(ctx)
+	}
 	return int(n), nil
 }
 
@@ -343,7 +359,12 @@ func (s *Store) ReleaseAllClaims(ctx context.Context) (int, error) {
 	if err := s.validateCollectionStore(); err != nil {
 		return 0, err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginCollectionOwnerTx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 UPDATE collection_tasks
 SET state = 'queued', claimed_by = NULL, claimed_at = NULL
 WHERE state = 'claimed'`)
@@ -352,6 +373,9 @@ WHERE state = 'claimed'`)
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
+		return 0, collectionStorageError(ctx)
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, collectionStorageError(ctx)
 	}
 	return int(n), nil
@@ -365,8 +389,13 @@ func (s *Store) CompleteTask(ctx context.Context, id collection.TaskID, combinat
 	if id.Validate() != nil || combinationID.Validate() != nil || claimGeneration < 1 {
 		return ErrCollectionInvalidInput
 	}
+	tx, err := s.beginCollectionOwnerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	var deleted int64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 DELETE FROM collection_tasks
 WHERE task_id = $1 AND state = 'claimed' AND claimed_by = $2 AND claim_generation = $3
 RETURNING task_id`, int64(id), int64(combinationID), claimGeneration).Scan(&deleted)
@@ -374,6 +403,9 @@ RETURNING task_id`, int64(id), int64(combinationID), claimGeneration).Scan(&dele
 		return ErrCollectionConflict
 	}
 	if err != nil {
+		return collectionStorageError(ctx)
+	}
+	if err := tx.Commit(); err != nil {
 		return collectionStorageError(ctx)
 	}
 	return nil
@@ -387,7 +419,12 @@ func (s *Store) RequeueTask(ctx context.Context, id collection.TaskID, combinati
 	if id.Validate() != nil || combinationID.Validate() != nil || claimGeneration < 1 {
 		return ErrCollectionInvalidInput
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginCollectionOwnerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 UPDATE collection_tasks
 SET state = 'queued', claimed_by = NULL, claimed_at = NULL
 WHERE task_id = $1 AND state = 'claimed' AND claimed_by = $2 AND claim_generation = $3`,
@@ -395,12 +432,11 @@ WHERE task_id = $1 AND state = 'claimed' AND claimed_by = $2 AND claim_generatio
 	if err != nil {
 		return collectionStorageError(ctx)
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
+	if _, err := result.RowsAffected(); err != nil {
 		return collectionStorageError(ctx)
 	}
-	if n == 0 {
-		return nil
+	if err := tx.Commit(); err != nil {
+		return collectionStorageError(ctx)
 	}
 	return nil
 }

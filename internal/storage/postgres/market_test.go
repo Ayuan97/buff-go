@@ -166,3 +166,47 @@ func TestValidateLatestRowRejectsZeroSourceTimeForPresent(t *testing.T) {
 		t.Fatal("present latest row with zero source_time was accepted")
 	}
 }
+
+func TestCompareObservationOrderUsesRequestTimeBeforeWriteSequence(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		left    market.WriteOrder
+		leftAt  time.Time
+		right   market.WriteOrder
+		rightAt time.Time
+		want    int
+	}{
+		{
+			name: "later request beats later commit sequence",
+			left: market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, leftAt: base.Add(time.Second),
+			right: market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, rightAt: base,
+			want: 1,
+		},
+		{
+			name: "earlier request loses despite later commit sequence",
+			left: market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, leftAt: base,
+			right: market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, rightAt: base.Add(time.Second),
+			want: -1,
+		},
+		{
+			name: "write sequence breaks equal time",
+			left: market.WriteOrder{SwitchVersion: 1, WriteSequence: 2}, leftAt: base,
+			right: market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, rightAt: base,
+			want: 1,
+		},
+		{
+			name: "new switch remains authoritative",
+			left: market.WriteOrder{SwitchVersion: 2, WriteSequence: 1}, leftAt: base.Add(-time.Hour),
+			right: market.WriteOrder{SwitchVersion: 1, WriteSequence: 99}, rightAt: base,
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := compareObservationOrder(tt.left, tt.leftAt, tt.right, tt.rightAt); got != tt.want {
+				t.Fatalf("compareObservationOrder() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

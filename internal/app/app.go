@@ -78,6 +78,7 @@ func Run(ctx context.Context, opt Options) error {
 	if err != nil {
 		return telemetry.WrapError("collection daemon", err)
 	}
+	targets.runtime = daemon
 	handler := api.NewHandlerForAuthority(webui.Handler(), opt.APIListen, api.ControlServices{
 		Accounts:        accounts,
 		Nodes:           nodes,

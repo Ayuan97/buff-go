@@ -695,12 +695,26 @@ onUnmounted(() => {
             </div>
             <div class="card-foot">
               <div class="listings">
-                {{ q.side === 'bid' ? '求购数量' : '待售数量' }}：{{ q.present_order_count ?? '—' }}
+                <template v-if="q.status === 'present'">
+                  {{ q.side === 'bid' ? '求购数量' : '待售数量' }}：{{ q.present_order_count ?? '—' }}
+                </template>
+                <template v-else>当前挂单数：—</template>
               </div>
-              <div v-if="q.present_cents != null" class="price" :title="fmtTime(q.present_collected_at ?? null)">
+              <div
+                v-if="q.status === 'present' && q.present_cents != null"
+                class="price"
+                :title="fmtTime(q.present_collected_at ?? null)"
+              >
                 {{ fenToYuan(q.present_cents) }}
               </div>
-              <div v-else class="price none">无有效价</div>
+              <div
+                v-else-if="q.status !== 'present' && q.present_cents != null"
+                class="price none"
+                :title="fmtTime(q.present_collected_at ?? null)"
+              >
+                历史有效价 {{ fenToYuan(q.present_cents) }}
+              </div>
+              <div v-else class="price none">{{ q.status === 'present' ? '无有效价' : '无历史有效价' }}</div>
               <div class="state">
                 {{ quoteStatusText(q.status) }}
                 <span class="muted">· {{ fmtAgo(q.collected_at) }}</span>

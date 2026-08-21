@@ -101,13 +101,19 @@ type presentRow struct {
 	latestConsistent bool
 }
 
+type observationSaveResult struct {
+	applied      int
+	skippedStale int
+}
+
 func savePreparedObservationsTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	batch observationBatch,
 	snapshots []attemptSnapshot,
-) (bool, error) {
-	equalCount := 0
+) (observationSaveResult, error) {
+	var result observationSaveResult
+	pending := make([]attemptSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		var storedAppID int64
 		err := tx.QueryRowContext(ctx,
@@ -115,11 +121,11 @@ func savePreparedObservationsTx(
 		).Scan(&storedAppID)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			return false, ErrProductNotFound
+			return observationSaveResult{}, ErrProductNotFound
 		case err != nil:
-			return false, fmt.Errorf("read Steam product scope: %w", err)
+			return observationSaveResult{}, fmt.Errorf("read Steam product scope: %w", err)
 		case storedAppID != batch.AppID:
-			return false, errProductScopeMismatch
+			return observationSaveResult{}, errProductScopeMismatch
 		}
 
 		stored, exists, err := selectLatestForUpdate(ctx, tx, MarketKey{
@@ -128,7 +134,7 @@ func savePreparedObservationsTx(
 			Side:      batch.Side,
 		})
 		if err != nil {
-			return false, err
+			return observationSaveResult{}, err
 		}
 		if !exists {
 			_, found, err := selectPresentForUpdate(ctx, tx, MarketKey{
@@ -137,11 +143,12 @@ func savePreparedObservationsTx(
 				Side:      batch.Side,
 			})
 			if err != nil {
-				return false, err
+				return observationSaveResult{}, err
 			}
 			if found {
-				return false, ErrMarketIntegrity
+				return observationSaveResult{}, ErrMarketIntegrity
 			}
+			pending = append(pending, snapshot)
 			continue
 		}
 		storedPresent, presentExists, err := selectPresentForUpdate(ctx, tx, MarketKey{
@@ -150,57 +157,100 @@ func savePreparedObservationsTx(
 			Side:      batch.Side,
 		})
 		if err != nil {
-			return false, err
+			return observationSaveResult{}, err
 		}
 		if stored.status == market.StatusPresent {
-			if !presentExists || storedPresent.order.Compare(stored.order) != 0 ||
+			if !presentExists || compareObservationOrder(
+				storedPresent.order, storedPresent.collectedAt, stored.order, stored.collectedAt,
+			) != 0 ||
 				!timesEqual(storedPresent.sourceTime, stored.sourceTime) ||
 				!storedPresent.collectedAt.Equal(stored.collectedAt) {
-				return false, ErrMarketIntegrity
+				return observationSaveResult{}, ErrMarketIntegrity
 			}
-		} else if presentExists && storedPresent.order.Compare(stored.order) >= 0 {
-			return false, ErrMarketIntegrity
+		} else if presentExists && compareObservationOrder(
+			storedPresent.order, storedPresent.collectedAt, stored.order, stored.collectedAt,
+		) >= 0 {
+			return observationSaveResult{}, ErrMarketIntegrity
 		}
 
-		switch batch.Order.Compare(stored.order) {
+		switch compareObservationOrder(batch.Order, snapshot.collectedAt, stored.order, stored.collectedAt) {
 		case -1:
-			return false, ErrStaleObservation
+			// A page may finish after a newer request for the same product. The
+			// task still commits, but this product must not roll market state back.
+			if batch.Order.SwitchVersion < stored.order.SwitchVersion {
+				return observationSaveResult{}, ErrStaleObservation
+			}
+			result.skippedStale++
+			continue
 		case 0:
 			if !sameLatest(snapshot, stored) {
-				return false, ErrObservationConflict
+				return observationSaveResult{}, ErrObservationConflict
 			}
 			if snapshot.present != nil {
 				if !presentExists || storedPresent.order.Compare(batch.Order) != 0 {
-					return false, ErrMarketIntegrity
+					return observationSaveResult{}, ErrMarketIntegrity
 				}
 				if !samePresent(snapshot, storedPresent) {
-					return false, ErrObservationConflict
+					return observationSaveResult{}, ErrObservationConflict
 				}
 			}
-			equalCount++
 		case 1:
 			if snapshot.present != nil {
-				if presentExists && storedPresent.order.Compare(batch.Order) >= 0 {
-					return false, ErrMarketIntegrity
+				if presentExists && compareObservationOrder(
+					storedPresent.order, storedPresent.collectedAt, batch.Order, snapshot.collectedAt,
+				) >= 0 {
+					return observationSaveResult{}, ErrMarketIntegrity
 				}
 			}
+			pending = append(pending, snapshot)
 		}
 	}
 
-	if equalCount == len(snapshots) {
-		return false, nil
+	if len(pending) == 0 {
+		return result, nil
 	}
-	for _, snapshot := range snapshots {
+	for _, snapshot := range pending {
 		if err := upsertLatest(ctx, tx, batch, snapshot); err != nil {
-			return false, err
+			return observationSaveResult{}, err
 		}
 		if snapshot.present != nil {
 			if err := upsertPresent(ctx, tx, batch, snapshot); err != nil {
-				return false, err
+				return observationSaveResult{}, err
 			}
 		}
 	}
-	return true, nil
+	result.applied = len(pending)
+	return result, nil
+}
+
+// compareObservationOrder keeps target configuration generations authoritative,
+// then orders observations by the request observation time. write_seq is only a
+// deterministic tie-breaker; commit scheduling must not make an older request win.
+func compareObservationOrder(
+	left market.WriteOrder,
+	leftAt time.Time,
+	right market.WriteOrder,
+	rightAt time.Time,
+) int {
+	if left.SwitchVersion < right.SwitchVersion {
+		return -1
+	}
+	if left.SwitchVersion > right.SwitchVersion {
+		return 1
+	}
+	if leftAt.Before(rightAt) {
+		return -1
+	}
+	if leftAt.After(rightAt) {
+		return 1
+	}
+	if left.WriteSequence < right.WriteSequence {
+		return -1
+	}
+	if left.WriteSequence > right.WriteSequence {
+		return 1
+	}
+	return 0
 }
 
 // LatestAttempt reads the latest explicit state independently of historical price.
@@ -230,8 +280,8 @@ SELECT a.status, a.source_time, a.collected_at, a.reason_code,
                WHERE p.product_id = a.product_id
                  AND p.platform = a.platform
                  AND p.side = a.side
-                 AND (p.switch_version, p.write_seq) >=
-                     (a.switch_version, a.write_seq)
+		         AND (p.switch_version, p.collected_at, p.write_seq) >=
+		             (a.switch_version, a.collected_at, a.write_seq)
            )
        END
 FROM market_latest_attempts a
@@ -273,14 +323,14 @@ SELECT p.price_cny_cents, p.order_count, p.item_count, p.source_time, p.collecte
              AND a.side = p.side
              AND (
                  (
-                     (a.switch_version, a.write_seq) =
-                     (p.switch_version, p.write_seq)
+		             (a.switch_version, a.collected_at, a.write_seq) =
+		             (p.switch_version, p.collected_at, p.write_seq)
                      AND a.status = 'present'
                      AND a.source_time IS NOT DISTINCT FROM p.source_time
                      AND a.collected_at = p.collected_at
                  ) OR (
-                     (a.switch_version, a.write_seq) >
-                     (p.switch_version, p.write_seq)
+		             (a.switch_version, a.collected_at, a.write_seq) >
+		             (p.switch_version, p.collected_at, p.write_seq)
                      AND a.status <> 'present'
                  )
              )

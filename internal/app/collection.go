@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"buff-go/internal/collection"
@@ -84,7 +85,22 @@ func collectionDaemonObservers(recorder telemetry.Recorder) (func(collection.Dae
 			emitFailure("collection.target", target.Err)
 		}
 		for _, worker := range result.Report.Workers {
-			emitFailure("collection.worker", worker.Err)
+			if worker.Err == nil {
+				continue
+			}
+			source := "collection.worker"
+			if worker.Endpoint != "" {
+				source += "." + string(worker.Endpoint)
+			}
+			telemetry.Emit(recorder, telemetry.Event{
+				Kind: telemetry.KindJobFail, Reason: telemetry.ReasonError,
+				Platform: string(worker.Platform), Source: source, AppID: worker.AppID,
+				WorkerID: strconv.FormatInt(int64(worker.CombinationID), 10),
+				Account:  strconv.FormatInt(int64(worker.AccountID), 10),
+				Proxy:    worker.ExitAddress.String(),
+				JobKey:   strconv.FormatInt(int64(worker.TaskID), 10),
+				Detail:   worker.Err.Error(),
+			})
 		}
 	}
 	recovery := func(report collection.RecoveryReport) {

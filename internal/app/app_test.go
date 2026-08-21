@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"buff-go/internal/collection"
+	"buff-go/internal/market"
+	"buff-go/internal/resource"
 	"buff-go/internal/telemetry"
 )
 
@@ -391,7 +394,12 @@ func TestCollectionDaemonObserversRecordSafeFailures(t *testing.T) {
 		Err: errors.New(secret),
 		Report: collection.CycleReport{
 			Targets: []collection.TargetOutcome{{Err: errors.New(secret)}},
-			Workers: []collection.WorkerOutcome{{Err: errors.New(secret)}},
+			Workers: []collection.WorkerOutcome{{
+				CombinationID: 7, AccountID: 8, NodeID: 9,
+				ExitAddress: netip.MustParseAddr("38.175.103.188"),
+				TaskID:      10, AppID: 730, Platform: collection.PlatformSteam,
+				Side: market.SideAsk, Endpoint: "market_summary", Err: errors.New(secret),
+			}},
 		},
 	})
 	recoveryObserver(collection.RecoveryReport{Failures: errors.New(secret)})
@@ -406,5 +414,50 @@ func TestCollectionDaemonObserversRecordSafeFailures(t *testing.T) {
 		if event.Detail == "" || strings.Contains(event.Detail, "password") {
 			t.Fatalf("unsafe daemon event = %+v", event)
 		}
+	}
+	worker := events[2]
+	if worker.Platform != "steam" || worker.Source != "collection.worker.market_summary" || worker.AppID != 730 ||
+		!strings.HasPrefix(worker.WorkerID, "worker_v1_") ||
+		!strings.HasPrefix(worker.Account, "account_v1_") ||
+		!strings.HasPrefix(worker.Proxy, "node_v1_") ||
+		!strings.HasPrefix(worker.JobKey, "job_v1_") {
+		t.Fatalf("worker identity labels = %+v", worker)
+	}
+}
+
+func TestMergeWorkerRuntimeMatchesExactWaitScopes(t *testing.T) {
+	now := time.Date(2026, 8, 21, 1, 0, 0, 0, time.UTC)
+	workers := []collection.WorkerSnapshot{
+		{Combination: resource.AccountNodeCombination{ID: 1, AccountID: 10, NodeID: 20, Platform: "steam"}, ExitAddress: "1.1.1.1", Idle: true},
+		{Combination: resource.AccountNodeCombination{ID: 2, AccountID: 10, NodeID: 21, Platform: "steam"}, ExitAddress: "1.1.1.1", Idle: true},
+		{Combination: resource.AccountNodeCombination{ID: 3, AccountID: 11, NodeID: 20, Platform: "steam"}, ExitAddress: "2.2.2.2", Idle: true},
+		{Combination: resource.AccountNodeCombination{ID: 4, AccountID: 10, NodeID: 20, Platform: "buff"}, ExitAddress: "1.1.1.1", Idle: true},
+	}
+	runtime := collection.WorkerRuntimeSnapshot{
+		Claims: []collection.WorkerRuntimeClaim{{
+			CombinationID: 1, TargetID: 5, TaskID: 6, AppID: 730, Side: market.SideAsk,
+			Platform: "steam", Kind: collection.TaskKindAskPage, Endpoint: "market_summary", ClaimedAt: now,
+		}},
+		Waits: []collection.WorkerWait{
+			{Scope: collection.WorkerWaitScopeNode, Reason: collection.WorkerWaitReasonNetwork, RetryAt: now.Add(time.Minute), Platform: "steam", NodeID: 20},
+			{Scope: collection.WorkerWaitScopeCombination, Reason: collection.WorkerWaitReasonTransient, RetryAt: now.Add(time.Minute), Platform: "steam", CombinationID: 2},
+			{Scope: collection.WorkerWaitScopeRate, Reason: collection.WorkerWaitReasonDeferred, RetryAt: now.Add(time.Minute), Platform: "steam", Endpoint: "market_orderbook", AccountID: 10, ExitAddress: "1.1.1.1"},
+			{Scope: collection.WorkerWaitScopeRate, Reason: collection.WorkerWaitReasonDeferred, RetryAt: now.Add(time.Minute), Platform: "steam", Endpoint: "market_orderbook", AccountID: 10, ExitAddress: "1.1.1.1"},
+		},
+	}
+
+	got := mergeWorkerRuntime(workers, runtime)
+	if got[0].Claim == nil || !got[0].Claim.Active || got[0].Claim.TaskID != 6 || got[0].Idle {
+		t.Fatalf("active claim = %+v", got[0])
+	}
+	if len(got[0].ActiveWaits) != 2 || len(got[1].ActiveWaits) != 2 ||
+		len(got[2].ActiveWaits) != 1 || len(got[3].ActiveWaits) != 0 {
+		t.Fatalf("wait matches = %d/%d/%d/%d", len(got[0].ActiveWaits), len(got[1].ActiveWaits), len(got[2].ActiveWaits), len(got[3].ActiveWaits))
+	}
+	if got[0].ActiveWaits[0].Scope != collection.WorkerWaitScopeRate ||
+		got[0].ActiveWaits[1].Scope != collection.WorkerWaitScopeNode ||
+		got[1].ActiveWaits[0].Scope != collection.WorkerWaitScopeRate ||
+		got[1].ActiveWaits[1].Scope != collection.WorkerWaitScopeCombination {
+		t.Fatalf("unstable wait order = %+v / %+v", got[0].ActiveWaits, got[1].ActiveWaits)
 	}
 }

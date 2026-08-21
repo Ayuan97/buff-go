@@ -272,7 +272,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	if !proxy.HasProxyCredential {
 		t.Fatal("proxy safe model does not report credential presence")
 	}
-	errorMarker := []byte("synthetic-node-storage-error-secret-marker")
+	errorMarker := []byte("http://synthetic-node-storage-error-secret-marker@proxy.invalid:8080")
 	if _, err := store.CreateNode(ctx, "foreign-proxy", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic, ProxyCredential: errorMarker,
 	}); err == nil || bytes.Contains([]byte(err.Error()), errorMarker) {
@@ -298,7 +298,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatalf("New() open proxy = %q err=%v", opened, err)
 	}
 
-	replacedSecret := []byte("synthetic-replaced-proxy-material")
+	replacedSecret := []byte("http://synthetic-replaced:proxy-material@proxy.invalid:8080")
 	proxy, err = store.ReplaceNodeConnection(ctx, proxy.ID, 1, resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeStatic, ProxyCredential: replacedSecret,
 	})
@@ -335,7 +335,7 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 	stickyDeadline := now.Add(time.Hour)
 	sticky, err := store.CreateNode(ctx, "sticky-proxy", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionHongKong, EgressMode: resource.EgressModeSticky,
-		StickySessionValidUntil: &stickyDeadline, ProxyCredential: []byte("synthetic-sticky-proxy-material"),
+		StickySessionValidUntil: &stickyDeadline, ProxyCredential: []byte("socks5://synthetic-sticky:proxy-material@proxy.invalid:1080"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -403,14 +403,14 @@ func testNodeResources(t *testing.T, store *Store, db queryExecer) {
 
 	swapTarget, err := store.CreateNode(ctx, "swap-target", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
-		ProxyCredential: []byte("synthetic-swap-target-material"),
+		ProxyCredential: []byte("http://synthetic-swap:target-material@target.proxy.invalid:8080"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	swapSource, err := store.CreateNode(ctx, "swap-source", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
-		ProxyCredential: []byte("synthetic-swap-source-material"),
+		ProxyCredential: []byte("http://synthetic-swap:source-material@source.proxy.invalid:8080"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +422,7 @@ FROM access_nodes source WHERE target.node_id=$1 AND source.node_id=$2`, int64(s
 		t.Fatal(err)
 	}
 	if opened, err := store.OpenNodeProxyCredentialAt(ctx, swapTarget.ID, swapTarget.EgressRevision); err != nil ||
-		!bytes.Equal(opened, []byte("synthetic-swap-source-material")) {
+		!bytes.Equal(opened, []byte("http://synthetic-swap:source-material@source.proxy.invalid:8080")) {
 		t.Fatalf("plaintext swap open = %q err=%v", opened, err)
 	}
 }
@@ -442,7 +442,7 @@ func testCombinationResources(t *testing.T, store *Store, db queryExecer) {
 		t.Fatal(err)
 	}
 
-	proxyMarker := []byte("synthetic-combination-proxy-marker")
+	proxyMarker := []byte("https://synthetic-combination:proxy-marker@proxy.invalid:8443")
 	nodeOne, err := store.CreateNode(ctx, "combination-node-one", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionHongKong,
 		EgressMode: resource.EgressModeStatic, ProxyCredential: proxyMarker,
@@ -616,7 +616,7 @@ func testClosedResourceErrors(t *testing.T, dsn string) {
 	}
 	node, err := store.CreateNode(t.Context(), "closed-read-node", resource.NodeConnectionInput{
 		Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
-		ProxyCredential: []byte("synthetic-closed-read-node-marker"),
+		ProxyCredential: []byte("http://synthetic-closed:read-node-marker@proxy.invalid:8080"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -668,7 +668,7 @@ func testClosedResourceErrors(t *testing.T, dsn string) {
 		"replace node": func() error {
 			_, err := store.ReplaceNodeConnection(ctx, node.ID, node.EgressRevision, resource.NodeConnectionInput{
 				Kind: resource.NodeKindProxy, Region: resource.NodeRegionForeign, EgressMode: resource.EgressModeStatic,
-				ProxyCredential: []byte("synthetic-closed-replace-node"),
+				ProxyCredential: []byte("http://synthetic-closed:replace-node@proxy.invalid:8080"),
 			})
 			return err
 		},

@@ -204,8 +204,8 @@ FROM collection_latest_pages pg
 JOIN collection_targets t ON t.target_id = pg.target_id
 JOIN market_latest_attempts a
   ON a.platform = t.platform AND a.side = t.side
- AND a.switch_version = t.switch_version AND a.write_seq = pg.write_seq
-JOIN steam_products p ON p.product_id = a.product_id
+ AND a.switch_version = pg.switch_version AND a.write_seq = pg.write_seq
+JOIN steam_products p ON p.product_id = a.product_id AND p.appid = t.appid
 LEFT JOIN market_last_present lp
   ON lp.product_id = a.product_id AND lp.platform = a.platform AND lp.side = a.side
 WHERE pg.target_id = $1 AND t.platform = $2 AND t.side = $3

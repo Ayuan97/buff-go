@@ -97,10 +97,31 @@ export interface WorkerItem {
 
 export interface WorkerClaim {
   target_id: number
+  task_id?: number
   appid: number
   side: Side
   platform: string
+  kind?: 'ask_page' | 'bid_batch'
+  endpoint?: string
+  claimed_at?: string
+  active: boolean
   items: WorkerItem[]
+}
+
+export type WorkerWaitScope = 'account_exit_endpoint' | 'node_platform' | 'combination'
+export type WorkerWaitReason = 'rate_limit' | 'deferred' | 'network' | 'timeout' | 'transient'
+
+export interface WorkerWait {
+  scope: WorkerWaitScope
+  reason: WorkerWaitReason
+  retry_at: string
+  platform: string
+  endpoint?: string
+  side?: Side
+  account_id?: number
+  exit_address?: string
+  node_id?: number
+  combination_id?: number
 }
 
 export interface WorkerPage {
@@ -124,6 +145,7 @@ export interface Worker {
   session_state: string
   idle: boolean
   claim?: WorkerClaim
+  active_waits: WorkerWait[]
   last_page?: WorkerPage
 }
 

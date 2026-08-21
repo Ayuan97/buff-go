@@ -97,9 +97,9 @@ func (s *Store) CommitSummaryPage(ctx context.Context, input SummaryPageCommit) 
 		return collection.Page{}, false, ErrCollectionInvalidInput
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginCollectionOwnerTx(ctx)
 	if err != nil {
-		return collection.Page{}, false, collectionStorageError(ctx)
+		return collection.Page{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -161,7 +161,7 @@ FOR UPDATE`, int64(input.TaskID), int64(input.TargetID), int64(input.Combination
 		return collection.Page{}, false, ErrCollectionInvalidInput
 	}
 	for _, snapshot := range snapshots {
-		if snapshot.collectedAt.After(input.CollectedAt) {
+		if !snapshot.collectedAt.Equal(input.CollectedAt) {
 			return collection.Page{}, false, ErrCollectionInvalidInput
 		}
 	}
@@ -192,12 +192,13 @@ FOR UPDATE`, int64(input.TaskID), int64(input.TargetID), int64(input.Combination
 		return collection.Page{}, false, err
 	}
 	pageDigest := page.PayloadDigest()
-	if _, err := tx.ExecContext(ctx, `
+	latestPageWrite, err := tx.ExecContext(ctx, `
 INSERT INTO collection_latest_pages (
-    target_id, write_seq, cursor_before, cursor_after, payload_digest,
+    target_id, switch_version, write_seq, cursor_before, cursor_after, payload_digest,
     collected_at, committed_at, account_id, exit_address, payload_gzip, payload_bytes
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (target_id) DO UPDATE SET
+    switch_version = EXCLUDED.switch_version,
     write_seq = EXCLUDED.write_seq,
     cursor_before = EXCLUDED.cursor_before,
     cursor_after = EXCLUDED.cursor_after,
@@ -207,24 +208,36 @@ ON CONFLICT (target_id) DO UPDATE SET
     account_id = EXCLUDED.account_id,
     exit_address = EXCLUDED.exit_address,
     payload_gzip = EXCLUDED.payload_gzip,
-    payload_bytes = EXCLUDED.payload_bytes`,
-		int64(page.TargetID()), page.WriteSeq(), collectionCursorBytes(page.CursorBefore()),
+    payload_bytes = EXCLUDED.payload_bytes
+WHERE (EXCLUDED.switch_version, EXCLUDED.collected_at, EXCLUDED.write_seq) >=
+      (collection_latest_pages.switch_version, collection_latest_pages.collected_at, collection_latest_pages.write_seq)`,
+		int64(page.TargetID()), int64(target.SwitchVersion()), page.WriteSeq(), collectionCursorBytes(page.CursorBefore()),
 		collectionCursorBytes(page.CursorAfter()), pageDigest[:], page.CollectedAt(), page.CommittedAt(),
 		nullableAccountID(input.AccountID), nullableAddr(input.ExitAddress),
 		nullableBytes(compressed), nullablePositiveInt64(payloadBytes),
-	); err != nil {
+	)
+	if err != nil {
 		return collection.Page{}, false, mapCollectionWriteError(ctx, err)
 	}
-	marketApplied, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
+	latestPageApplied, err := latestPageWrite.RowsAffected()
+	if err != nil || (latestPageApplied != 0 && latestPageApplied != 1) {
+		return collection.Page{}, false, ErrCollectionIntegrity
+	}
+	marketResult, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
 	if err != nil {
 		return collection.Page{}, false, mapCollectionMarketWriteError(ctx, err)
 	}
-	if len(snapshots) > 0 && !marketApplied {
+	if len(snapshots) != marketResult.applied+marketResult.skippedStale {
 		return collection.Page{}, false, ErrCollectionIntegrity
+	}
+	if latestPageApplied == 1 {
+		if err := refreshAttemptMediaTx(ctx, tx, resolved); err != nil {
+			return collection.Page{}, false, err
+		}
 	}
 	refillTotal := target.RefillTotal()
 	refillCursor := target.RefillCursor()
-	if side == market.SideAsk {
+	if side == market.SideAsk && latestPageApplied == 1 {
 		refillTotal = input.AskTotal
 		if input.AskTotal == 0 {
 			refillCursor, err = collection.EncodeAskRefill(0)
@@ -296,9 +309,6 @@ func resolveAttemptProductID(ctx context.Context, tx *sql.Tx, platform string, a
 			return 0, err
 		}
 		if found {
-			if err := refreshProductMediaTx(ctx, tx, mapped, attempt.Media); err != nil {
-				return 0, err
-			}
 			return mapped, nil
 		}
 	}
@@ -311,10 +321,6 @@ func resolveAttemptProductID(ctx context.Context, tx *sql.Tx, platform string, a
 	}
 	switch len(ids) {
 	case 1:
-		// 商品已存在时也刷新展示元数据，否则本迁移之前建的商品永远没有图标
-		if err := refreshProductMediaTx(ctx, tx, ids[0], attempt.Media); err != nil {
-			return 0, err
-		}
 		return ids[0], nil
 	case 0:
 		created, err := insertSteamProductTx(ctx, tx, appID, attempt.ExactName, attempt.Media)
@@ -330,6 +336,15 @@ func resolveAttemptProductID(ctx context.Context, tx *sql.Tx, platform string, a
 	default:
 		return 0, ErrCollectionInvalidInput
 	}
+}
+
+func refreshAttemptMediaTx(ctx context.Context, tx *sql.Tx, attempts []collection.AttemptWrite) error {
+	for _, attempt := range attempts {
+		if err := refreshProductMediaTx(ctx, tx, attempt.ProductID, attempt.Media); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func platformMappingProductTx(ctx context.Context, tx *sql.Tx, platform string, appID int64, platformItemID string) (catalog.ProductID, bool, error) {

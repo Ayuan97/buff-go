@@ -25,6 +25,7 @@ type DaemonStore interface {
 
 // InstanceLock 是常驻实例锁的持有凭据。
 type InstanceLock interface {
+	Epoch() OwnerEpoch
 	Verify(ctx context.Context) error
 	Release(ctx context.Context) error
 }
@@ -63,9 +64,11 @@ type RecoveryReport struct {
 
 // Daemon 在单进程内常驻执行调度周期，并负责关闭收敛。
 type Daemon struct {
-	scheduler *Scheduler
-	store     DaemonStore
-	config    DaemonConfig
+	scheduler  *Scheduler
+	store      DaemonStore
+	config     DaemonConfig
+	runtimeMu  sync.RWMutex
+	dispatcher *residentDispatcher
 }
 
 type instanceLockWatchdog struct {
@@ -105,6 +108,34 @@ func NewDaemon(scheduler *Scheduler, config DaemonConfig) (*Daemon, error) {
 		return nil, fmt.Errorf("scheduler store does not support resident daemon operations")
 	}
 	return &Daemon{scheduler: scheduler, store: store, config: config}, nil
+}
+
+// WorkerRuntime returns a thread-safe resident snapshot and is empty outside Run.
+func (d *Daemon) WorkerRuntime() WorkerRuntimeSnapshot {
+	if d == nil {
+		return WorkerRuntimeSnapshot{}
+	}
+	d.runtimeMu.RLock()
+	dispatcher := d.dispatcher
+	d.runtimeMu.RUnlock()
+	if dispatcher == nil {
+		return WorkerRuntimeSnapshot{}
+	}
+	return dispatcher.RuntimeSnapshot()
+}
+
+func (d *Daemon) setRuntimeDispatcher(dispatcher *residentDispatcher) {
+	d.runtimeMu.Lock()
+	d.dispatcher = dispatcher
+	d.runtimeMu.Unlock()
+}
+
+func (d *Daemon) clearRuntimeDispatcher(dispatcher *residentDispatcher) {
+	d.runtimeMu.Lock()
+	if d.dispatcher == dispatcher {
+		d.dispatcher = nil
+	}
+	d.runtimeMu.Unlock()
 }
 
 // Run 取得实例锁后先回队全部认领并收敛关闭，再按固定间隔执行调度周期。
@@ -161,9 +192,13 @@ func (d *Daemon) run(ctx context.Context, ready chan<- error) (runErr error) {
 		}
 		return err
 	}
-	runCtx, cancelRun := context.WithCancel(ctx)
+	if lock.Epoch() < 1 {
+		return fmt.Errorf("resident instance lock has no owner epoch")
+	}
+	ownerCtx := WithOwnerEpoch(ctx, lock.Epoch())
+	runCtx, cancelRun := context.WithCancel(ownerCtx)
 	defer cancelRun()
-	guardCtx, cancelGuard := context.WithCancel(context.WithoutCancel(ctx))
+	guardCtx, cancelGuard := context.WithCancel(context.WithoutCancel(ownerCtx))
 	watchdog := &instanceLockWatchdog{done: make(chan struct{})}
 	go d.watchInstanceLock(guardCtx, lock, watchdog, cancelRun, cancelGuard)
 	defer func() {
@@ -195,6 +230,8 @@ func (d *Daemon) run(ctx context.Context, ready chan<- error) (runErr error) {
 	if err != nil {
 		return err
 	}
+	d.setRuntimeDispatcher(dispatcher)
+	defer d.clearRuntimeDispatcher(dispatcher)
 	workersClosed := false
 	closeWorkers := func() error {
 		if workersClosed {
@@ -233,6 +270,9 @@ func (d *Daemon) run(ctx context.Context, ready chan<- error) (runErr error) {
 		cycle.Err = errors.Join(cycle.Err, maintenanceErr)
 		if d.config.Observer != nil {
 			d.config.Observer(cycle)
+		}
+		if err := daemonOwnerFence(cycle); err != nil {
+			return err
 		}
 		advance, err := d.waitResidentInterval(
 			runCtx, dispatcher, d.config.Interval-d.scheduler.now().Sub(startedAt),
@@ -299,6 +339,9 @@ func (d *Daemon) waitResidentInterval(
 			if d.config.Observer != nil {
 				d.config.Observer(cycle)
 			}
+			if err := daemonOwnerFence(cycle); err != nil {
+				return false, err
+			}
 		case <-dispatcher.Wake():
 			timer.Stop()
 			if ctx.Err() != nil {
@@ -308,8 +351,28 @@ func (d *Daemon) waitResidentInterval(
 			if d.config.Observer != nil {
 				d.config.Observer(cycle)
 			}
+			if err := daemonOwnerFence(cycle); err != nil {
+				return false, err
+			}
 		}
 	}
+}
+
+func daemonOwnerFence(cycle DaemonCycle) error {
+	if errors.Is(cycle.Err, ErrOwnerFence) {
+		return fmt.Errorf("resident owner fence: %w", ErrOwnerFence)
+	}
+	for _, target := range cycle.Report.Targets {
+		if errors.Is(target.Err, ErrOwnerFence) {
+			return fmt.Errorf("resident owner fence: %w", ErrOwnerFence)
+		}
+	}
+	for _, worker := range cycle.Report.Workers {
+		if errors.Is(worker.Err, ErrOwnerFence) {
+			return fmt.Errorf("resident owner fence: %w", ErrOwnerFence)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) watchInstanceLock(

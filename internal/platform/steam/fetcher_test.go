@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
@@ -39,6 +40,43 @@ type stubSessionRecorder struct {
 	states []bool
 }
 
+type admissionLeaseRepository struct {
+	resource.CoordinatorRepository
+	resources resource.CombinationResources
+}
+
+func (repository admissionLeaseRepository) CombinationResources(
+	_ context.Context,
+	id resource.CombinationID,
+) (resource.CombinationResources, bool, error) {
+	if repository.resources.Combination.ID != id {
+		return resource.CombinationResources{}, false, nil
+	}
+	return repository.resources, true, nil
+}
+
+type closeTrackingTransport struct {
+	body       string
+	err        error
+	closeCalls int
+}
+
+func (transport *closeTrackingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if transport.err != nil {
+		return nil, transport.err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(transport.body)),
+		Request:    request,
+	}, nil
+}
+
+func (transport *closeTrackingTransport) CloseIdleConnections() {
+	transport.closeCalls++
+}
+
 func (recorder *stubSessionRecorder) Record(_ context.Context, _ resource.Lease, valid bool) error {
 	recorder.states = append(recorder.states, valid)
 	return recorder.err
@@ -56,6 +94,55 @@ func (s stubCatalog) ListSteamProductsAfter(_ context.Context, appID int64, afte
 		}
 	}
 	return out, nil
+}
+
+func TestFetchPageClosesPrivateHTTPTransport(t *testing.T) {
+	payload, err := collection.EncodeAskPage(0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		body     string
+		roundErr error
+		wantErr  error
+	}{
+		{
+			name: "success",
+			body: `{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`,
+		},
+		{
+			name:     "network failure",
+			roundErr: errors.New("synthetic network failure"),
+			wantErr:  collection.ErrFetchNetwork,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			transport := &closeTrackingTransport{body: test.body, err: test.roundErr}
+			fetcher := mustFetcher(t, "https://steamcommunity.invalid", stubCatalog{})
+			fetcher.transport = func(string) (*http.Client, error) {
+				return &http.Client{Transport: transport}, nil
+			}
+			_, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+				TaskType:       collection.TaskTypeSummary,
+				Platform:       collection.PlatformSteam,
+				AppID:          730,
+				Side:           market.SideAsk,
+				Kind:           collection.TaskKindAskPage,
+				Payload:        payload,
+				AdmitRequest:   admitTestRequest,
+				RequestStarted: func() {},
+			})
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("FetchPage() error = %v, want %v", err, test.wantErr)
+			}
+			if transport.closeCalls != 1 {
+				t.Fatalf("CloseIdleConnections() calls = %d, want 1", transport.closeCalls)
+			}
+		})
+	}
 }
 
 func TestFetchAskSendsSteamPriceRange(t *testing.T) {
@@ -153,6 +240,10 @@ func TestFetchAskPageAndEmpty(t *testing.T) {
 	if err != nil || len(page.Attempts) != 1 || page.TotalCount != 11 {
 		t.Fatalf("page=%+v err=%v", page, err)
 	}
+	wantCollectedAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	if !page.CollectedAt.Equal(wantCollectedAt) || !page.Attempts[0].Observation.CollectedAt.Equal(wantCollectedAt) {
+		t.Fatalf("page collected_at=%v attempt collected_at=%v", page.CollectedAt, page.Attempts[0].Observation.CollectedAt)
+	}
 	if page.Attempts[0].ExactName != "Sealed Graffiti | Tilt (Desert Amber)" || page.Attempts[0].Observation.Summary.PriceCents != 21 {
 		t.Fatalf("attempt=%+v", page.Attempts[0])
 	}
@@ -168,6 +259,41 @@ func TestFetchAskPageAndEmpty(t *testing.T) {
 	})
 	if err != nil || len(next.Attempts) != 0 {
 		t.Fatalf("next=%+v err=%v", next, err)
+	}
+	if !next.CollectedAt.Equal(wantCollectedAt) {
+		t.Fatalf("empty page collected_at=%v, want %v", next.CollectedAt, wantCollectedAt)
+	}
+}
+
+func TestFetchAskUsesAdmissionTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"success":true,"start":0,"pagesize":10,"total_count":1,
+			"results":[{
+				"name":"x","hash_name":"Admission Time Item",
+				"sell_listings":1,"sell_price":21,"sell_price_text":"¥ 0.21","sale_price_text":"¥ 0.21",
+				"asset_description":{"appid":730,"market_hash_name":"Admission Time Item"}
+			}]
+		}`)
+	}))
+	t.Cleanup(server.Close)
+	admittedAt := time.Date(2026, 8, 13, 11, 59, 30, 123456000, time.UTC)
+	lease, admission := mustAdmission(t, admittedAt)
+	payload, err := collection.EncodeAskPage(0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage, Payload: payload, Lease: lease,
+		AdmitRequest:   func(context.Context) (ratelimit.Admission, error) { return admission, nil },
+		RequestStarted: func() {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.CollectedAt.Equal(admittedAt) || len(page.Attempts) != 1 || !page.Attempts[0].Observation.CollectedAt.Equal(admittedAt) {
+		t.Fatalf("admission time page=%v attempts=%+v", page.CollectedAt, page.Attempts)
 	}
 }
 
@@ -351,6 +477,9 @@ func TestFetchBidEmptyAndPresent(t *testing.T) {
 		if err != nil || len(page.Attempts) != 1 || page.Attempts[0].Observation.Status != test.status {
 			t.Fatalf("after=%d page=%+v err=%v", test.after, page, err)
 		}
+		if page.CollectedAt.IsZero() || !page.Attempts[0].Observation.CollectedAt.Equal(page.CollectedAt) {
+			t.Fatalf("after=%d page collected_at=%v attempt=%v", test.after, page.CollectedAt, page.Attempts[0].Observation.CollectedAt)
+		}
 		if test.priceCents != 0 && page.Attempts[0].Observation.Summary.PriceCents != test.priceCents {
 			t.Fatalf("after=%d attempts=%+v", test.after, page.Attempts)
 		}
@@ -391,4 +520,61 @@ func mustFetcher(t *testing.T, base string, catalog stubCatalog) *Fetcher {
 		t.Fatal(err)
 	}
 	return fetcher
+}
+
+func mustAdmission(t *testing.T, admittedAt time.Time) (resource.Lease, ratelimit.Admission) {
+	t.Helper()
+	checkedAt := admittedAt.Add(-time.Minute)
+	resources := resource.CombinationResources{
+		Combination: resource.AccountNodeCombination{ID: 1, Platform: resource.Platform("steam"), AccountID: 1, NodeID: 1},
+		Account: resource.PlatformAccount{
+			ID: 1, Platform: resource.Platform("steam"), Alias: "account", SessionState: resource.AccountSessionStateValid,
+			SessionRevision: 1, LastCheckedAt: &checkedAt,
+		},
+		Node: resource.AccessNode{
+			ID: 1, Name: "node", Kind: resource.NodeKindDirect, Region: resource.NodeRegionDomestic,
+			EgressMode: resource.EgressModeStatic, State: resource.NodeStateAvailable, EgressRevision: 1,
+			ExitVerification: &resource.ExitVerification{
+				VerifiedRevision: 1, Address: netip.MustParseAddr("192.0.2.1"),
+				VerifiedAt: checkedAt, ValidUntil: admittedAt.Add(time.Hour),
+			},
+		},
+	}
+	coordinator, err := resource.NewCoordinator(admissionLeaseRepository{resources: resources})
+	if err != nil {
+		t.Fatal(err)
+	}
+	component, err := coordinator.RegisterComponent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.AcquireCombination(context.Background(), component, 1, resource.TargetRegionDomestic, admittedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Release(lease.Token) })
+	request, err := ratelimit.RequestFromLease(lease, "market_summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := ratelimit.Policy{
+		ID: 1, Revision: 1, Enabled: true, ReadyAt: checkedAt,
+		Spec: ratelimit.PolicySpec{
+			Platform: resource.Platform("steam"), RuleKey: "test_account_exit", Scope: ratelimit.ScopeAccountIP,
+			EndpointClass: "market_summary", Kind: ratelimit.KindMinInterval, MinInterval: time.Second,
+		},
+	}
+	rule, err := ratelimit.AppliedRuleFromPolicy(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ratelimit.NewSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := signer.Issue(request, []ratelimit.AppliedRule{rule}, admittedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lease, admission
 }

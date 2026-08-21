@@ -133,6 +133,8 @@ type FetchedPage struct {
 	Attempts   []AttemptWrite
 	Payload    []byte
 	TotalCount int64
+	// CollectedAt is the persistent admission time immediately before HTTP.
+	CollectedAt time.Time
 }
 
 // PageFetcher 由平台适配器实现，必须遵守请求 context 的取消与超时。
@@ -402,17 +404,28 @@ type TargetOutcome struct {
 // WorkerOutcome 记录一个工人在本周期的领取结果。
 type WorkerOutcome struct {
 	CombinationID resource.CombinationID
+	AccountID     resource.AccountID
+	NodeID        resource.NodeID
+	ExitAddress   netip.Addr
 	TaskID        TaskID
 	TargetID      TargetID
+	AppID         int64
+	Platform      Platform
+	Side          market.Side
+	Endpoint      ratelimit.EndpointClass
 	Committed     bool
 	RetryAt       time.Time
 	Err           error
 	retryKind     workerRetryKind
+	retryReason   WorkerWaitReason
 }
 
 type workerRetryKind uint8
 
-const workerRetryRate workerRetryKind = 1
+const (
+	workerRetryRate workerRetryKind = iota + 1
+	workerRetryNode
+)
 
 // CycleReport 汇总一次调度周期。
 type CycleReport struct {
@@ -572,8 +585,13 @@ func (s *Scheduler) planTarget(ctx context.Context, target Target, combinationRe
 	}
 	healthy := s.healthyWorkerCount(resources, profile.TargetRegion)
 	if healthy == 0 {
+		reason := unavailableCombinationReason(resources)
+		recheckAt := time.Time{}
+		if reason != TargetReasonSessionInvalid {
+			recheckAt = s.now().Add(s.config.TransientRetry)
+		}
 		outcome.Target, outcome.Superseded, outcome.Err =
-			s.applyDisposition(ctx, target, blockedDisposition(TargetReasonNoCombination, s.now().Add(s.config.TransientRetry)))
+			s.applyDisposition(ctx, target, blockedDisposition(reason, recheckAt))
 		return outcome
 	}
 	depth, err := s.store.QueueDepth(ctx, target.ID())
@@ -663,33 +681,46 @@ func (s *Scheduler) buildBidRefill(ctx context.Context, target Target, appID int
 	if err != nil {
 		return nil, Cursor{}, 0, err
 	}
+	startAfter := after
 	specs := make([]EnqueueSpec, 0, need)
-	wrapped := false
-	for i := 0; i < need; i++ {
-		products, err := s.catalog.ListSteamProductsAfter(ctx, appID, after, BidBatchSize)
-		if err != nil {
-			return nil, Cursor{}, 0, err
-		}
-		if len(products) == 0 {
-			if after == 0 || wrapped {
+	products, err := s.catalog.ListSteamProductsAfter(ctx, appID, after, need)
+	if err != nil {
+		return nil, Cursor{}, 0, err
+	}
+	appendProducts := func(products []catalog.SteamProduct) error {
+		for _, product := range products {
+			if len(specs) == need {
 				break
 			}
-			after = 0
-			wrapped = true
-			products, err = s.catalog.ListSteamProductsAfter(ctx, appID, 0, BidBatchSize)
+			payload, err := EncodeBidBatch(after, BidBatchSize)
 			if err != nil {
-				return nil, Cursor{}, 0, err
+				return err
 			}
-			if len(products) == 0 {
-				break
-			}
+			specs = append(specs, EnqueueSpec{Kind: TaskKindBidBatch, Payload: payload})
+			after = product.ProductID
 		}
-		payload, err := EncodeBidBatch(after, BidBatchSize)
+		return nil
+	}
+	if err := appendProducts(products); err != nil {
+		return nil, Cursor{}, 0, err
+	}
+
+	cycle := products
+	if len(specs) < need && startAfter != 0 {
+		cycle, err = s.catalog.ListSteamProductsAfter(ctx, appID, 0, need-len(specs))
 		if err != nil {
 			return nil, Cursor{}, 0, err
 		}
-		specs = append(specs, EnqueueSpec{Kind: TaskKindBidBatch, Payload: payload})
-		after = products[len(products)-1].ProductID
+	}
+	// 非空 cycle 每轮都推进 specs，目录再小也会有限填满 need。
+	for len(specs) < need && len(cycle) > 0 {
+		after = 0
+		if err := appendProducts(cycle); err != nil {
+			return nil, Cursor{}, 0, err
+		}
+	}
+	if len(specs) == 0 {
+		after = 0
 	}
 	cursor, err := EncodeBidRefill(after)
 	if err != nil {
@@ -707,6 +738,21 @@ func (s *Scheduler) healthyWorkerCount(resources []resource.CombinationResources
 		}
 	}
 	return len(maximumIndependentCombinations(healthy))
+}
+
+// unavailableCombinationReason reports the furthest prerequisite reached by
+// any combination. A usable session makes egress the remaining blocker.
+func unavailableCombinationReason(resources []resource.CombinationResources) TargetReason {
+	if len(resources) == 0 {
+		return TargetReasonNoCombination
+	}
+	for _, current := range resources {
+		if current.Account.SessionState == resource.AccountSessionStateValid ||
+			current.Account.SessionState == resource.AccountSessionStateUnverified {
+			return TargetReasonEgressUnavailable
+		}
+	}
+	return TargetReasonSessionInvalid
 }
 
 func (s *Scheduler) dispatchWorkers(
@@ -995,8 +1041,13 @@ type residentFlight struct {
 	lane      requestLane
 	accountID resource.AccountID
 	node      workerNodeKey
-	targetID  TargetID
-	taskID    TaskID
+	claim     WorkerRuntimeClaim
+}
+
+type workerRetry struct {
+	retryAt time.Time
+	reason  WorkerWaitReason
+	side    market.Side
 }
 
 // residentDispatcher lets each leased combination finish and refill
@@ -1011,8 +1062,9 @@ type residentDispatcher struct {
 	mu               sync.Mutex
 	closed           bool
 	inFlight         map[resource.CombinationID]residentFlight
-	rateRetryAt      map[workerRateKey]time.Time
-	transientRetryAt map[resource.CombinationID]time.Time
+	rateRetryAt      map[workerRateKey]workerRetry
+	nodeRetryAt      map[workerNodeKey]workerRetry
+	transientRetryAt map[resource.CombinationID]workerRetry
 	lastLanes        map[resource.CombinationID]requestLane
 	targets          []Target
 	resources        *cycleCombinationResources
@@ -1042,8 +1094,9 @@ func (s *Scheduler) newResidentDispatcher(ctx context.Context) (*residentDispatc
 		cancel:           cancel,
 		wake:             make(chan struct{}, 1),
 		inFlight:         make(map[resource.CombinationID]residentFlight),
-		rateRetryAt:      make(map[workerRateKey]time.Time),
-		transientRetryAt: make(map[resource.CombinationID]time.Time),
+		rateRetryAt:      make(map[workerRateKey]workerRetry),
+		nodeRetryAt:      make(map[workerNodeKey]workerRetry),
+		transientRetryAt: make(map[resource.CombinationID]workerRetry),
 		lastLanes:        make(map[resource.CombinationID]requestLane),
 	}, nil
 }
@@ -1066,7 +1119,7 @@ func (dispatcher *residentDispatcher) BusyTargets() map[TargetID]struct{} {
 	defer dispatcher.mu.Unlock()
 	targets := make(map[TargetID]struct{})
 	for _, flight := range dispatcher.inFlight {
-		targets[flight.targetID] = struct{}{}
+		targets[flight.claim.TargetID] = struct{}{}
 	}
 	return targets
 }
@@ -1076,7 +1129,7 @@ func (dispatcher *residentDispatcher) ActiveTasks() []TaskID {
 	defer dispatcher.mu.Unlock()
 	tasks := make([]TaskID, 0, len(dispatcher.inFlight))
 	for _, flight := range dispatcher.inFlight {
-		tasks = append(tasks, flight.taskID)
+		tasks = append(tasks, flight.claim.TaskID)
 	}
 	sort.Slice(tasks, func(left, right int) bool { return tasks[left] < tasks[right] })
 	return tasks
@@ -1086,17 +1139,104 @@ func (dispatcher *residentDispatcher) NextRetryAt() time.Time {
 	dispatcher.mu.Lock()
 	defer dispatcher.mu.Unlock()
 	var next time.Time
-	for _, retryAt := range dispatcher.rateRetryAt {
-		if next.IsZero() || retryAt.Before(next) {
-			next = retryAt
+	for _, retry := range dispatcher.rateRetryAt {
+		if next.IsZero() || retry.retryAt.Before(next) {
+			next = retry.retryAt
 		}
 	}
-	for _, retryAt := range dispatcher.transientRetryAt {
-		if next.IsZero() || retryAt.Before(next) {
-			next = retryAt
+	for _, retry := range dispatcher.nodeRetryAt {
+		if next.IsZero() || retry.retryAt.Before(next) {
+			next = retry.retryAt
+		}
+	}
+	for _, retry := range dispatcher.transientRetryAt {
+		if next.IsZero() || retry.retryAt.Before(next) {
+			next = retry.retryAt
 		}
 	}
 	return next
+}
+
+// RuntimeSnapshot returns active claims and retry fences under one dispatcher lock.
+func (dispatcher *residentDispatcher) RuntimeSnapshot() WorkerRuntimeSnapshot {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	now := dispatcher.scheduler.now()
+	snapshot := WorkerRuntimeSnapshot{
+		Claims: make([]WorkerRuntimeClaim, 0, len(dispatcher.inFlight)),
+		Waits:  make([]WorkerWait, 0, len(dispatcher.rateRetryAt)+len(dispatcher.nodeRetryAt)+len(dispatcher.transientRetryAt)),
+	}
+	for _, flight := range dispatcher.inFlight {
+		snapshot.Claims = append(snapshot.Claims, flight.claim)
+	}
+	for key, retry := range dispatcher.rateRetryAt {
+		if !now.Before(retry.retryAt) {
+			continue
+		}
+		snapshot.Waits = append(snapshot.Waits, WorkerWait{
+			Scope: WorkerWaitScopeRate, Reason: retry.reason, RetryAt: retry.retryAt,
+			Platform: key.lane.platform, Endpoint: key.lane.endpoint, Side: retry.side,
+			AccountID: key.accountID, ExitAddress: key.exitAddress.String(),
+		})
+	}
+	for key, retry := range dispatcher.nodeRetryAt {
+		if !now.Before(retry.retryAt) {
+			continue
+		}
+		snapshot.Waits = append(snapshot.Waits, WorkerWait{
+			Scope: WorkerWaitScopeNode, Reason: retry.reason, RetryAt: retry.retryAt,
+			Platform: Platform(key.platform), Side: retry.side, NodeID: key.nodeID,
+		})
+	}
+	for combinationID, retry := range dispatcher.transientRetryAt {
+		if !now.Before(retry.retryAt) {
+			continue
+		}
+		lane := dispatcher.lastLanes[combinationID]
+		snapshot.Waits = append(snapshot.Waits, WorkerWait{
+			Scope: WorkerWaitScopeCombination, Reason: retry.reason, RetryAt: retry.retryAt,
+			Platform: lane.platform, Endpoint: lane.endpoint, Side: retry.side,
+			CombinationID: combinationID,
+		})
+	}
+	sort.Slice(snapshot.Claims, func(left, right int) bool {
+		return snapshot.Claims[left].CombinationID < snapshot.Claims[right].CombinationID
+	})
+	sort.Slice(snapshot.Waits, func(left, right int) bool {
+		return runtimeWaitLess(snapshot.Waits[left], snapshot.Waits[right])
+	})
+	return snapshot
+}
+
+func runtimeWaitLess(left, right WorkerWait) bool {
+	if left.Scope != right.Scope {
+		return left.Scope < right.Scope
+	}
+	if left.Platform != right.Platform {
+		return left.Platform < right.Platform
+	}
+	if left.Endpoint != right.Endpoint {
+		return left.Endpoint < right.Endpoint
+	}
+	if left.AccountID != right.AccountID {
+		return left.AccountID < right.AccountID
+	}
+	if left.ExitAddress != right.ExitAddress {
+		return left.ExitAddress < right.ExitAddress
+	}
+	if left.NodeID != right.NodeID {
+		return left.NodeID < right.NodeID
+	}
+	if left.CombinationID != right.CombinationID {
+		return left.CombinationID < right.CombinationID
+	}
+	if !left.RetryAt.Equal(right.RetryAt) {
+		return left.RetryAt.Before(right.RetryAt)
+	}
+	if left.Reason != right.Reason {
+		return left.Reason < right.Reason
+	}
+	return left.Side < right.Side
 }
 
 func (dispatcher *residentDispatcher) Dispatch(
@@ -1143,21 +1283,28 @@ func (dispatcher *residentDispatcher) dispatch(
 		rateLanes:    make(map[workerRateKey]struct{}, len(dispatcher.rateRetryAt)),
 		lastLanes:    make(map[resource.CombinationID]requestLane, len(dispatcher.lastLanes)),
 		accounts:     make(map[resource.AccountID]struct{}, len(dispatcher.inFlight)),
-		nodes:        make(map[workerNodeKey]struct{}, len(dispatcher.inFlight)),
+		nodes:        make(map[workerNodeKey]struct{}, len(dispatcher.inFlight)+len(dispatcher.nodeRetryAt)),
 	}
 	now := dispatcher.scheduler.now()
-	for key, retryAt := range dispatcher.rateRetryAt {
-		if now.Before(retryAt) {
+	for key, retry := range dispatcher.rateRetryAt {
+		if now.Before(retry.retryAt) {
 			excluded.rateLanes[key] = struct{}{}
 		} else {
 			delete(dispatcher.rateRetryAt, key)
 		}
 	}
-	for combinationID, retryAt := range dispatcher.transientRetryAt {
-		if now.Before(retryAt) {
+	for combinationID, retry := range dispatcher.transientRetryAt {
+		if now.Before(retry.retryAt) {
 			excluded.combinations[combinationID] = struct{}{}
 		} else {
 			delete(dispatcher.transientRetryAt, combinationID)
+		}
+	}
+	for key, retry := range dispatcher.nodeRetryAt {
+		if now.Before(retry.retryAt) {
+			excluded.nodes[key] = struct{}{}
+		} else {
+			delete(dispatcher.nodeRetryAt, key)
 		}
 	}
 	for combinationID, lane := range dispatcher.lastLanes {
@@ -1191,12 +1338,23 @@ func (dispatcher *residentDispatcher) dispatch(
 	}
 	for _, worker := range prepared {
 		workersByPlatform[worker.target.Platform()]++
+		side, _ := worker.target.Side()
+		appID, _ := worker.target.AppID()
+		claimedAt, ok := worker.task.ClaimedAt()
+		if !ok {
+			claimedAt = dispatcher.scheduler.now()
+		}
 		dispatcher.inFlight[worker.lease.Snapshot.CombinationID] = residentFlight{
 			lane: worker.lane, accountID: worker.lease.Snapshot.AccountID,
 			node: workerNodeKey{
 				nodeID: worker.lease.Snapshot.NodeID, platform: worker.lease.Snapshot.Platform,
 			},
-			targetID: worker.target.ID(), taskID: worker.task.ID(),
+			claim: WorkerRuntimeClaim{
+				CombinationID: worker.lease.Snapshot.CombinationID,
+				TargetID:      worker.target.ID(), TaskID: worker.task.ID(), AppID: appID,
+				Side: side, Platform: worker.target.Platform(), Kind: worker.task.Kind(),
+				Endpoint: worker.lane.endpoint, ClaimedAt: claimedAt,
+			},
 		}
 		dispatcher.lastLanes[worker.lease.Snapshot.CombinationID] = worker.lane
 	}
@@ -1237,17 +1395,29 @@ func (dispatcher *residentDispatcher) execute(worker preparedWorker, activeWorke
 		accountID: worker.lease.Snapshot.AccountID, exitAddress: worker.lease.Snapshot.ExitAddress,
 		lane: worker.lane,
 	}
+	nodeKey := workerNodeKey{
+		nodeID: worker.lease.Snapshot.NodeID, platform: worker.lease.Snapshot.Platform,
+	}
 	if outcome.RetryAt.IsZero() && outcome.Err != nil {
 		outcome.RetryAt = dispatcher.scheduler.now().Add(dispatcher.scheduler.config.TransientRetry)
 	}
+	if outcome.retryReason == "" && outcome.Err != nil {
+		outcome.retryReason = WorkerWaitReasonTransient
+	}
 	if outcome.RetryAt.After(dispatcher.scheduler.now()) {
-		if outcome.retryKind == workerRetryRate {
-			dispatcher.rateRetryAt[rateKey] = outcome.RetryAt
-		} else {
-			dispatcher.transientRetryAt[worker.lease.Snapshot.CombinationID] = outcome.RetryAt
+		side, _ := worker.target.Side()
+		retry := workerRetry{retryAt: outcome.RetryAt, reason: outcome.retryReason, side: side}
+		switch outcome.retryKind {
+		case workerRetryRate:
+			dispatcher.rateRetryAt[rateKey] = retry
+		case workerRetryNode:
+			dispatcher.nodeRetryAt[nodeKey] = retry
+		default:
+			dispatcher.transientRetryAt[worker.lease.Snapshot.CombinationID] = retry
 		}
 	} else {
 		delete(dispatcher.rateRetryAt, rateKey)
+		delete(dispatcher.nodeRetryAt, nodeKey)
 		delete(dispatcher.transientRetryAt, worker.lease.Snapshot.CombinationID)
 	}
 	dispatcher.completed = append(dispatcher.completed, outcome)
@@ -1296,6 +1466,10 @@ func (s *Scheduler) prepareWorker(
 		}
 		return preparedWorker{}, outcome, false
 	}
+	outcome.AccountID = lease.Snapshot.AccountID
+	outcome.NodeID = lease.Snapshot.NodeID
+	outcome.ExitAddress = lease.Snapshot.ExitAddress
+	outcome.Platform = Platform(lease.Snapshot.Platform)
 	eligibleTargets, fallbackTargets := s.eligibleWorkerTargets(targets, lease, blockedRateLanes, lastLanes)
 	if eligibleTargets != nil && len(eligibleTargets) == 0 {
 		_ = s.coordinator.Release(lease.Token)
@@ -1321,6 +1495,10 @@ func (s *Scheduler) prepareWorker(
 	}
 	outcome.TaskID = task.ID()
 	outcome.TargetID = target.ID()
+	outcome.AppID, _ = target.AppID()
+	outcome.Side, _ = target.Side()
+	outcome.Platform = target.Platform()
+	outcome.Endpoint = s.requestLane(target).endpoint
 	return preparedWorker{
 		slot: slot, lane: s.requestLane(target),
 		lease: lease, task: task, target: target, outcome: outcome,
@@ -1398,6 +1576,11 @@ func (s *Scheduler) executeTask(
 	if fetchContextErr != nil || leaseContextErr != nil || ctx.Err() != nil {
 		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
 		outcome.Err = errors.Join(fetchContextErr, leaseContextErr, ctx.Err(), requeueErr)
+		if errors.Is(fetchContextErr, context.DeadlineExceeded) {
+			outcome.retryKind = workerRetryNode
+			outcome.retryReason = WorkerWaitReasonTimeout
+			outcome.RetryAt = s.now().Add(s.config.TransientRetry)
+		}
 		return outcome
 	}
 
@@ -1407,7 +1590,10 @@ func (s *Scheduler) executeTask(
 		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
-	collectedAt := s.now()
+	collectedAt := fetched.CollectedAt
+	if collectedAt.IsZero() {
+		collectedAt = s.now()
+	}
 	_, _, err = s.store.CommitSummaryPage(ctx, SummaryPageCommit{
 		TargetID:        target.ID(),
 		TaskID:          task.ID(),
@@ -1537,6 +1723,7 @@ func (s *Scheduler) mapFetchError(
 	switch {
 	case errors.As(fetchErr, &signal):
 		outcome.retryKind = workerRetryRate
+		outcome.retryReason = WorkerWaitReasonRateLimit
 		if err := s.applyRateLimitFeedback(ctx, signal.Admission, signal.Scopes, signal.Reason, signal.Cooldown); err != nil {
 			outcome.Err = errors.Join(outcome.Err, err)
 			outcome.RetryAt = s.now().Add(s.config.TransientRetry)
@@ -1546,16 +1733,26 @@ func (s *Scheduler) mapFetchError(
 	case errors.As(fetchErr, &deferred):
 		// 冷却属于精确工人桶；任务回队即可，不能停止同目标的其他工人。
 		outcome.retryKind = workerRetryRate
+		outcome.retryReason = WorkerWaitReasonDeferred
 		outcome.RetryAt = s.workerRetryAt(target.Platform(), deferred.RetryAt)
 	case errors.Is(fetchErr, ratelimit.ErrPolicyUnavailable):
 		apply(blockedDisposition(TargetReasonMissingRatePolicy, time.Time{}))
 	case errors.Is(fetchErr, ErrFetchSessionInvalid):
 		// 账号失效由适配器落库；任务已回队，本工人本周期停领。
-	case deadlineHit, errors.Is(fetchErr, context.DeadlineExceeded), errors.Is(fetchErr, ErrFetchNetwork):
-		// 单个请求或代理失败只影响当前工人，不能暂停同目标的其他独立工人。
+	case deadlineHit, errors.Is(fetchErr, context.DeadlineExceeded):
+		// 请求超时按节点与平台退避，但保留独立原因便于诊断。
+		outcome.retryKind = workerRetryNode
+		outcome.retryReason = WorkerWaitReasonTimeout
+		outcome.Err = errors.Join(outcome.Err, fetchErr)
+		outcome.RetryAt = s.now().Add(s.config.TransientRetry)
+	case errors.Is(fetchErr, ErrFetchNetwork):
+		// 网络故障按节点与平台退避，避免同一出口上的其他账号立即重试。
+		outcome.retryKind = workerRetryNode
+		outcome.retryReason = WorkerWaitReasonNetwork
 		outcome.Err = errors.Join(outcome.Err, fetchErr)
 		outcome.RetryAt = s.now().Add(s.config.TransientRetry)
 	default:
+		outcome.retryReason = WorkerWaitReasonTransient
 		outcome.Err = errors.Join(outcome.Err, fetchErr)
 		outcome.RetryAt = s.now().Add(s.config.TransientRetry)
 	}

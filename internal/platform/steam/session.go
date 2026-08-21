@@ -111,11 +111,16 @@ func cookieHeader(raw []byte) (string, error) {
 }
 
 func newHTTPClient(proxy string) (*http.Client, error) {
+	if proxy != "" {
+		if err := resource.ValidateProxyCredential([]byte(proxy)); err != nil {
+			return nil, fmt.Errorf("proxy URL: %w", err)
+		}
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if proxy != "" {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
-			return nil, fmt.Errorf("proxy url: %w", err)
+			return nil, fmt.Errorf("proxy URL is invalid")
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}

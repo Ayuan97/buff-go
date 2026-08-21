@@ -4,6 +4,8 @@ package resource
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -309,6 +311,44 @@ type NodeConnectionInput struct {
 	EgressMode              EgressMode
 	StickySessionValidUntil *time.Time
 	ProxyCredential         []byte
+}
+
+// ValidateProxyCredential checks a proxy URL supported by net/http.Transport.
+// The scheme must be explicit; Transport supplies the port when it is omitted.
+func ValidateProxyCredential(credential []byte) error {
+	if len(credential) == 0 {
+		return fmt.Errorf("proxy URL is required")
+	}
+	if !utf8.Valid(credential) {
+		return fmt.Errorf("proxy URL must be valid UTF-8")
+	}
+	raw := string(credential)
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("proxy URL must not have leading or trailing whitespace")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("proxy URL is invalid")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("proxy URL scheme must be http, https, socks5, or socks5h")
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("proxy URL host is required")
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return fmt.Errorf("proxy URL port must be between 1 and 65535")
+	}
+	if parsed.Port() == "" {
+		return nil
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("proxy URL port must be between 1 and 65535")
+	}
+	return nil
 }
 
 // Validate checks node configuration and current exit evidence invariants.

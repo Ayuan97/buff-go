@@ -130,7 +130,7 @@ const combosByNode = computed(() => {
   return map
 })
 
-// 限频按「平台 + 出口 IP」计，同一个 IP 上的多个节点共用预算，必须让使用者看见。
+// 同出口节点可能命中同一限频键，但只有接口和账号也相同时才会共用预算。
 const exitPeers = computed(() => {
   const byAddress = new Map<string, string[]>()
   for (const node of nodes.value ?? []) {
@@ -422,6 +422,7 @@ async function submitBind() {
         <button class="btn sm" @click="showAddNode = true">新增节点</button>
       </div>
       <div class="panel-body">
+        <p class="note">限频按「接口 + 账号 + 出口 IP」计算：三者都相同才共用预算，不同接口、账号或平台相互独立。</p>
         <EmptyState v-if="!nodes" kind="empty" text="读取中" />
         <p v-else-if="!nodes.length" class="note">还没有节点。组合就是账号绑到节点。</p>
         <table v-else class="data">
@@ -437,7 +438,7 @@ async function submitBind() {
                 <span class="num">{{ node.exit?.address ?? '未填' }}</span>
                 <div v-if="node.exit" class="muted">有效期至 {{ fmtTime(node.exit.valid_until) }}</div>
                 <div v-if="exitPeers.get(node.id)" class="muted">
-                  与 {{ exitPeers.get(node.id)!.join('、') }} 同出口，共用该平台 IP 预算
+                  与 {{ exitPeers.get(node.id)!.join('、') }} 同出口；仅同一平台的同一接口、同一账号会共用预算
                 </div>
               </td>
               <td>

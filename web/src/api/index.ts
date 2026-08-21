@@ -48,6 +48,9 @@ export type {
   Worker,
   WorkerClaim,
   WorkerItem,
+  WorkerWait,
+  WorkerWaitReason,
+  WorkerWaitScope,
 } from './types'
 export { APIError } from './types'
 

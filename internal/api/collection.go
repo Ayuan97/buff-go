@@ -76,11 +76,16 @@ type workerItemResponse struct {
 }
 
 type workerClaimResponse struct {
-	TargetID collection.TargetID  `json:"target_id"`
-	AppID    int64                `json:"appid"`
-	Side     market.Side          `json:"side"`
-	Platform collection.Platform  `json:"platform"`
-	Items    []workerItemResponse `json:"items"`
+	TargetID  collection.TargetID  `json:"target_id"`
+	TaskID    collection.TaskID    `json:"task_id,omitempty"`
+	AppID     int64                `json:"appid"`
+	Side      market.Side          `json:"side"`
+	Platform  collection.Platform  `json:"platform"`
+	Kind      collection.TaskKind  `json:"kind,omitempty"`
+	Endpoint  string               `json:"endpoint,omitempty"`
+	ClaimedAt *time.Time           `json:"claimed_at,omitempty"`
+	Active    bool                 `json:"active"`
+	Items     []workerItemResponse `json:"items"`
 }
 
 type workerPageResponse struct {
@@ -104,7 +109,21 @@ type workerResponse struct {
 	SessionState  string               `json:"session_state"`
 	Idle          bool                 `json:"idle"`
 	Claim         *workerClaimResponse `json:"claim,omitempty"`
+	ActiveWaits   []workerWaitResponse `json:"active_waits"`
 	LastPage      *workerPageResponse  `json:"last_page,omitempty"`
+}
+
+type workerWaitResponse struct {
+	Scope         collection.WorkerWaitScope  `json:"scope"`
+	Reason        collection.WorkerWaitReason `json:"reason"`
+	RetryAt       time.Time                   `json:"retry_at"`
+	Platform      collection.Platform         `json:"platform"`
+	Endpoint      string                      `json:"endpoint,omitempty"`
+	Side          market.Side                 `json:"side,omitempty"`
+	AccountID     int64                       `json:"account_id,omitempty"`
+	ExitAddress   string                      `json:"exit_address,omitempty"`
+	NodeID        int64                       `json:"node_id,omitempty"`
+	CombinationID int64                       `json:"combination_id,omitempty"`
 }
 
 func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
@@ -268,15 +287,33 @@ func toWorkerResponse(worker collection.WorkerSnapshot) workerResponse {
 		Region:        string(worker.Region),
 		SessionState:  string(worker.SessionState),
 		Idle:          worker.Idle,
+		ActiveWaits:   make([]workerWaitResponse, 0, len(worker.ActiveWaits)),
 	}
 	if worker.Claim != nil {
-		out.Claim = &workerClaimResponse{
+		claim := &workerClaimResponse{
 			TargetID: worker.Claim.TargetID,
+			TaskID:   worker.Claim.TaskID,
 			AppID:    worker.Claim.AppID,
 			Side:     worker.Claim.Side,
 			Platform: worker.Claim.Platform,
+			Kind:     worker.Claim.Kind,
+			Endpoint: string(worker.Claim.Endpoint),
+			Active:   worker.Claim.Active,
 			Items:    toWorkerItemResponses(worker.Claim.Items),
 		}
+		if !worker.Claim.ClaimedAt.IsZero() {
+			claimedAt := worker.Claim.ClaimedAt
+			claim.ClaimedAt = &claimedAt
+		}
+		out.Claim = claim
+	}
+	for _, wait := range worker.ActiveWaits {
+		out.ActiveWaits = append(out.ActiveWaits, workerWaitResponse{
+			Scope: wait.Scope, Reason: wait.Reason, RetryAt: wait.RetryAt,
+			Platform: wait.Platform, Endpoint: string(wait.Endpoint), Side: wait.Side,
+			AccountID: int64(wait.AccountID), ExitAddress: wait.ExitAddress,
+			NodeID: int64(wait.NodeID), CombinationID: int64(wait.CombinationID),
+		})
 	}
 	if worker.LastPage != nil {
 		out.LastPage = &workerPageResponse{

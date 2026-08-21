@@ -89,7 +89,7 @@ function note(row: Quote | undefined, platform: string, side: 'bid' | 'ask'): st
   }
   if (row.status !== 'present') {
     if (row.reason_code) bits.push(quoteReasonText(row.reason_code))
-    if (row.present_cents != null) bits.push(`上次有价 ${fenToYuan(row.present_cents)}`)
+    if (row.present_cents != null) bits.push(`历史有效价 ${fenToYuan(row.present_cents)}`)
   }
   return bits.join(' · ')
 }

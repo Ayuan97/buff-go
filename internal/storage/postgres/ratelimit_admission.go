@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
+	"buff-go/internal/collection"
 	"buff-go/internal/ratelimit"
 )
 
@@ -19,11 +21,17 @@ func (s *Store) AdmitRateLimit(ctx context.Context, request ratelimit.Request) (
 	if err := request.Validate(); err != nil {
 		return ratelimit.Decision{}, err
 	}
-	tx, err := s.beginRateLimitTx(ctx, request.Platform())
+	tx, err := s.beginRateLimitStateTx(ctx, request.Platform())
 	if err != nil {
 		return ratelimit.Decision{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireCollectionOwner(ctx, tx); err != nil {
+		if errors.Is(err, collection.ErrOwnerFence) {
+			return ratelimit.Decision{}, err
+		}
+		return ratelimit.Decision{}, ErrRateLimitStorage
+	}
 
 	policies, err := selectApplicableRateLimitPolicies(ctx, tx, request)
 	if err != nil {
@@ -121,7 +129,7 @@ func (s *Store) ApplyRateLimitFeedback(
 		return err
 	}
 	request := admission.Request()
-	tx, err := s.beginRateLimitTx(ctx, request.Platform())
+	tx, err := s.beginRateLimitStateTx(ctx, request.Platform())
 	if err != nil {
 		return err
 	}
@@ -129,12 +137,15 @@ func (s *Store) ApplyRateLimitFeedback(
 
 	policies := make([]ratelimit.Policy, len(rules))
 	states := make([]RateLimitState, len(rules))
+	// Lock every policy row before taking policy-ordered subject locks.
 	for index, rule := range rules {
 		policy, err := selectRateLimitPolicyForFeedback(ctx, tx, rule)
 		if err != nil {
 			return err
 		}
 		policies[index] = policy
+	}
+	for index, policy := range policies {
 		state, err := selectRateLimitStateForUpdate(ctx, tx, policy, request, true)
 		if err != nil {
 			return err
@@ -185,7 +196,7 @@ WHERE active = TRUE
       (scope = 'account_ip' AND (endpoint_class = '' OR endpoint_class = $2))
   )
 ORDER BY policy_id
-FOR UPDATE`, string(request.Platform()), string(request.EndpointClass()))
+FOR SHARE`, string(request.Platform()), string(request.EndpointClass()))
 	if err != nil {
 		return nil, ErrRateLimitStorage
 	}
@@ -229,6 +240,9 @@ func selectRateLimitStateForUpdate(
 	if err != nil {
 		return RateLimitState{}, err
 	}
+	if err := lockRateLimitPolicySubject(ctx, tx, policy.ID, subject); err != nil {
+		return RateLimitState{}, err
+	}
 	query, args, err := rateLimitStateSelect(policy, subject)
 	if err != nil {
 		return RateLimitState{}, err
@@ -252,6 +266,32 @@ func selectRateLimitStateForUpdate(
 		Subject:        subject,
 		Kind:           policy.Spec.Kind,
 	}, nil
+}
+
+func lockRateLimitPolicySubject(
+	ctx context.Context,
+	tx *sql.Tx,
+	policyID ratelimit.PolicyID,
+	subject ratelimit.Subject,
+) error {
+	if err := policyID.Validate(); err != nil {
+		return ErrRateLimitIntegrity
+	}
+	if err := subject.Validate(); err != nil {
+		return ErrRateLimitIntegrity
+	}
+	key := fmt.Sprintf(
+		"%s|%s|%s|%d|%s",
+		subject.Scope, subject.Platform, subject.EndpointClass,
+		subject.AccountID, subject.ExitAddress,
+	)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(
+    'buffgo:rate-limit-subject:' || current_schema() || ':' || ($1::BIGINT)::TEXT || ':' || $2,
+    $3
+))`, int64(policyID), key, rateLimitAdvisorySeed); err != nil {
+		return ErrRateLimitStorage
+	}
+	return nil
 }
 
 func rateLimitStateSelect(policy ratelimit.Policy, subject ratelimit.Subject) (string, []any, error) {
@@ -452,7 +492,14 @@ RETURNING `+rateLimitStateColumns,
 }
 
 func selectedRateLimitRules(admission ratelimit.Admission, scopes []ratelimit.Scope) ([]ratelimit.AppliedRule, error) {
-	return admission.FeedbackRules(scopes)
+	rules, err := admission.FeedbackRules(scopes)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(rules, func(left, right int) bool {
+		return rules[left].PolicyID() < rules[right].PolicyID()
+	})
+	return rules, nil
 }
 
 func selectRateLimitPolicyForFeedback(ctx context.Context, tx *sql.Tx, rule ratelimit.AppliedRule) (ratelimit.Policy, error) {
@@ -460,7 +507,7 @@ func selectRateLimitPolicyForFeedback(ctx context.Context, tx *sql.Tx, rule rate
 SELECT `+rateLimitPolicyColumns+`
 FROM rate_limit_policies
 WHERE policy_id = $1
-FOR UPDATE`, int64(rule.PolicyID())))
+FOR SHARE`, int64(rule.PolicyID())))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ratelimit.Policy{}, ErrRateLimitIntegrity
 	}

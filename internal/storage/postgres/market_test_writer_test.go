@@ -26,12 +26,12 @@ func (s *Store) saveObservations(ctx context.Context, batch observationBatch) (b
 	); err != nil {
 		return false, fmt.Errorf("lock market batch: %w", err)
 	}
-	applied, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
+	result, err := savePreparedObservationsTx(ctx, tx, batch, snapshots)
 	if err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit market batch: %w", err)
 	}
-	return applied, nil
+	return result.applied > 0, nil
 }

@@ -570,6 +570,11 @@ func prepareNodeConnection(name string, input resource.NodeConnectionInput) (res
 	if err := node.Validate(); err != nil {
 		return resource.NodeConnectionInput{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
 	}
+	if input.Kind == resource.NodeKindProxy {
+		if err := resource.ValidateProxyCredential(input.ProxyCredential); err != nil {
+			return resource.NodeConnectionInput{}, fmt.Errorf("%w: %s", ErrInvalidResource, err.Error())
+		}
+	}
 	input.ProxyCredential = append([]byte(nil), input.ProxyCredential...)
 	return input, nil
 }

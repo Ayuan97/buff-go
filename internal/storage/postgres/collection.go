@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"math"
@@ -25,6 +26,7 @@ var (
 	ErrCollectionConflict       = collection.ErrConflict
 	ErrCollectionIntegrity      = collection.ErrIntegrity
 	ErrCollectionStorage        = collection.ErrStorage
+	ErrCollectionOwnerFence     = collection.ErrOwnerFence
 )
 
 // 删除目标只是控制面撤销手段，采集历史一律保留，所以下面两个条件是唯一的拒绝理由。
@@ -316,9 +318,9 @@ func (s *Store) mutateCollectionTarget(
 	if id.Validate() != nil || expected.Validate() != nil || (expectedSwitch != nil && expectedSwitch.Validate() != nil) {
 		return collection.Target{}, ErrCollectionInvalidInput
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginCollectionOwnerTx(ctx)
 	if err != nil {
-		return collection.Target{}, collectionStorageError(ctx)
+		return collection.Target{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -467,6 +469,8 @@ ORDER BY c.combination_id`, string(platform))
 
 const collectionInstanceLockKeySQL = `hashtextextended('collection-daemon:' || current_schema(), 0)`
 
+const collectionInstanceCleanupTimeout = 3 * time.Second
+
 // AcquireInstanceLock takes a session-scoped advisory lock so that only one
 // resident scheduler owns this schema's collection state.
 func (s *Store) AcquireInstanceLock(ctx context.Context) (collection.InstanceLock, bool, error) {
@@ -478,24 +482,56 @@ func (s *Store) AcquireInstanceLock(ctx context.Context) (collection.InstanceLoc
 		return nil, false, collectionStorageError(ctx)
 	}
 	var key int64
-	var acquired bool
-	query := `SELECT lock_key, pg_try_advisory_lock(lock_key) FROM (SELECT ` +
-		collectionInstanceLockKeySQL + ` AS lock_key) resolved`
-	if err := conn.QueryRowContext(ctx, query).Scan(&key, &acquired); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT `+collectionInstanceLockKeySQL).Scan(&key); err != nil {
 		_ = conn.Close()
 		return nil, false, collectionStorageError(ctx)
 	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, false, collectionStorageError(ctx)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var acquired bool
+	if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&acquired); err != nil {
+		_ = tx.Rollback()
+		cleanupCollectionInstanceConn(conn, key)
+		return nil, false, collectionStorageError(ctx)
+	}
 	if !acquired {
+		_ = tx.Rollback()
 		_ = conn.Close()
 		return nil, false, nil
 	}
-	return &collectionInstanceLock{conn: conn, key: key}, true, nil
+	var epoch int64
+	if err := tx.QueryRowContext(ctx, `
+UPDATE collection_daemon_ownership
+SET owner_epoch = owner_epoch + 1
+WHERE singleton AND owner_epoch < 9223372036854775807
+RETURNING owner_epoch`).Scan(&epoch); err != nil {
+		_ = tx.Rollback()
+		cleanupCollectionInstanceConn(conn, key)
+		return nil, false, collectionStorageError(ctx)
+	}
+	if epoch < 1 {
+		_ = tx.Rollback()
+		cleanupCollectionInstanceConn(conn, key)
+		return nil, false, ErrCollectionIntegrity
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		cleanupCollectionInstanceConn(conn, key)
+		return nil, false, collectionStorageError(ctx)
+	}
+	return &collectionInstanceLock{conn: conn, key: key, epoch: collection.OwnerEpoch(epoch)}, true, nil
 }
 
 type collectionInstanceLock struct {
-	mu   sync.Mutex
-	conn *sql.Conn
-	key  int64
+	mu    sync.Mutex
+	conn  *sql.Conn
+	key   int64
+	epoch collection.OwnerEpoch
 }
 
 const collectionInstanceLockHeldSQL = `
@@ -508,7 +544,16 @@ SELECT EXISTS (
       AND objsubid = 1
       AND classid = $1::oid
       AND objid = $2::oid
-)`
+), owner_epoch
+FROM collection_daemon_ownership
+WHERE singleton`
+
+func (lock *collectionInstanceLock) Epoch() collection.OwnerEpoch {
+	if lock == nil {
+		return 0
+	}
+	return lock.epoch
+}
 
 func (lock *collectionInstanceLock) Verify(ctx context.Context) error {
 	lock.mu.Lock()
@@ -517,11 +562,12 @@ func (lock *collectionInstanceLock) Verify(ctx context.Context) error {
 		return ErrCollectionStorage
 	}
 	var held bool
+	var epoch int64
 	classID, objID := advisoryLockParts(lock.key)
-	if err := lock.conn.QueryRowContext(ctx, collectionInstanceLockHeldSQL, classID, objID).Scan(&held); err != nil {
+	if err := lock.conn.QueryRowContext(ctx, collectionInstanceLockHeldSQL, classID, objID).Scan(&held, &epoch); err != nil {
 		return collectionStorageError(ctx)
 	}
-	if !held {
+	if !held || collection.OwnerEpoch(epoch) != lock.epoch {
 		return ErrCollectionStorage
 	}
 	return nil
@@ -541,12 +587,76 @@ func (lock *collectionInstanceLock) Release(ctx context.Context) error {
 	lock.conn = nil
 	var released bool
 	unlockErr := conn.QueryRowContext(ctx, `SELECT pg_advisory_unlock($1)`, lock.key).Scan(&released)
+	if unlockErr != nil {
+		discardSQLConn(conn)
+		return ErrCollectionStorage
+	}
 	closeErr := conn.Close()
 	if unlockErr != nil || !released {
 		return ErrCollectionStorage
 	}
 	if closeErr != nil {
 		return ErrCollectionStorage
+	}
+	return nil
+}
+
+// cleanupCollectionInstanceConn never returns a possibly locked session to the pool.
+func cleanupCollectionInstanceConn(conn *sql.Conn, key int64) {
+	if conn == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), collectionInstanceCleanupTimeout)
+	defer cancel()
+	var released bool
+	if err := conn.QueryRowContext(cleanupCtx, `SELECT pg_advisory_unlock($1)`, key).Scan(&released); err != nil {
+		discardSQLConn(conn)
+		return
+	}
+	_ = conn.Close()
+}
+
+func discardSQLConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+}
+
+func (s *Store) beginCollectionOwnerTx(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, collectionStorageError(ctx)
+	}
+	if err := requireCollectionOwner(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// requireCollectionOwner holds a shared owner row lock until the caller commits.
+// A successor cannot publish a new epoch while an already admitted write is in flight.
+func requireCollectionOwner(ctx context.Context, tx *sql.Tx) error {
+	expected, required := collection.OwnerEpochFromContext(ctx)
+	if !required {
+		return nil
+	}
+	var actual int64
+	err := tx.QueryRowContext(ctx, `
+SELECT owner_epoch
+FROM collection_daemon_ownership
+WHERE singleton
+FOR SHARE`).Scan(&actual)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCollectionIntegrity
+	}
+	if err != nil {
+		return collectionStorageError(ctx)
+	}
+	if collection.OwnerEpoch(actual) != expected {
+		return ErrCollectionOwnerFence
 	}
 	return nil
 }

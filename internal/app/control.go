@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"sort"
 	"time"
 
 	"buff-go/internal/collection"
@@ -119,7 +120,8 @@ func (c combinationControl) DeleteCombination(ctx context.Context, id resource.C
 }
 
 type collectionControl struct {
-	store *postgres.Store
+	store   *postgres.Store
+	runtime collection.WorkerRuntimeReader
 }
 
 func (c collectionControl) ListTargets(ctx context.Context) ([]collection.Target, error) {
@@ -155,7 +157,112 @@ func (c collectionControl) DeleteTarget(ctx context.Context, id collection.Targe
 }
 
 func (c collectionControl) ListWorkers(ctx context.Context) ([]collection.WorkerSnapshot, error) {
-	return c.store.ListWorkers(ctx)
+	workers, err := c.store.ListWorkers(ctx)
+	if err != nil || c.runtime == nil {
+		return workers, err
+	}
+	return mergeWorkerRuntime(workers, c.runtime.WorkerRuntime()), nil
+}
+
+func mergeWorkerRuntime(
+	workers []collection.WorkerSnapshot,
+	runtime collection.WorkerRuntimeSnapshot,
+) []collection.WorkerSnapshot {
+	byCombination := make(map[resource.CombinationID]int, len(workers))
+	seenWaits := make([]map[collection.WorkerWait]struct{}, len(workers))
+	for index := range workers {
+		byCombination[workers[index].Combination.ID] = index
+		seenWaits[index] = make(map[collection.WorkerWait]struct{}, len(workers[index].ActiveWaits))
+		unique := workers[index].ActiveWaits[:0]
+		for _, wait := range workers[index].ActiveWaits {
+			if _, found := seenWaits[index][wait]; found {
+				continue
+			}
+			seenWaits[index][wait] = struct{}{}
+			unique = append(unique, wait)
+		}
+		workers[index].ActiveWaits = unique
+	}
+	for _, active := range runtime.Claims {
+		index, found := byCombination[active.CombinationID]
+		if !found {
+			continue
+		}
+		claim := workers[index].Claim
+		if claim == nil || claim.TargetID != active.TargetID {
+			claim = &collection.WorkerClaim{
+				TargetID: active.TargetID, AppID: active.AppID,
+				Side: active.Side, Platform: active.Platform,
+			}
+			workers[index].Claim = claim
+		}
+		claim.TaskID = active.TaskID
+		claim.Kind = active.Kind
+		claim.Endpoint = active.Endpoint
+		claim.ClaimedAt = active.ClaimedAt
+		claim.Active = true
+		workers[index].Idle = false
+	}
+	for _, wait := range runtime.Waits {
+		for index := range workers {
+			worker := workers[index]
+			matches := false
+			switch wait.Scope {
+			case collection.WorkerWaitScopeRate:
+				matches = collection.Platform(worker.Combination.Platform) == wait.Platform &&
+					worker.Combination.AccountID == wait.AccountID && worker.ExitAddress == wait.ExitAddress
+			case collection.WorkerWaitScopeNode:
+				matches = collection.Platform(worker.Combination.Platform) == wait.Platform &&
+					worker.Combination.NodeID == wait.NodeID
+			case collection.WorkerWaitScopeCombination:
+				matches = worker.Combination.ID == wait.CombinationID
+			}
+			if matches {
+				if _, found := seenWaits[index][wait]; found {
+					continue
+				}
+				seenWaits[index][wait] = struct{}{}
+				workers[index].ActiveWaits = append(workers[index].ActiveWaits, wait)
+			}
+		}
+	}
+	for index := range workers {
+		sort.Slice(workers[index].ActiveWaits, func(left, right int) bool {
+			return workerWaitLess(workers[index].ActiveWaits[left], workers[index].ActiveWaits[right])
+		})
+	}
+	return workers
+}
+
+func workerWaitLess(left, right collection.WorkerWait) bool {
+	if left.Scope != right.Scope {
+		return left.Scope < right.Scope
+	}
+	if left.Platform != right.Platform {
+		return left.Platform < right.Platform
+	}
+	if left.Endpoint != right.Endpoint {
+		return left.Endpoint < right.Endpoint
+	}
+	if left.AccountID != right.AccountID {
+		return left.AccountID < right.AccountID
+	}
+	if left.ExitAddress != right.ExitAddress {
+		return left.ExitAddress < right.ExitAddress
+	}
+	if left.NodeID != right.NodeID {
+		return left.NodeID < right.NodeID
+	}
+	if left.CombinationID != right.CombinationID {
+		return left.CombinationID < right.CombinationID
+	}
+	if !left.RetryAt.Equal(right.RetryAt) {
+		return left.RetryAt.Before(right.RetryAt)
+	}
+	if left.Reason != right.Reason {
+		return left.Reason < right.Reason
+	}
+	return left.Side < right.Side
 }
 
 type marketControl struct {

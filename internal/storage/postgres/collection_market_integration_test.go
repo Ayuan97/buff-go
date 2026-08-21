@@ -13,6 +13,34 @@ import (
 )
 
 func testCollectionSummaryPages(t *testing.T, dsn string) {
+	t.Run("worker page items stay within target app", func(t *testing.T) {
+		store, _ := migratedStore(t, dsn)
+		ctx := t.Context()
+		const platform = "page-app-scope"
+		targetA, taskA, _, productsA := summaryPageFixture(t, store, 730, platform, 1)
+		targetB, taskB, _, productsB := summaryPageFixture(t, store, 252490, platform, 1)
+		collectedAt := time.Now().UTC().Truncate(time.Microsecond)
+		commit := func(target collection.Target, task collection.Task, product catalog.SteamProduct, price market.CNYCents) {
+			t.Helper()
+			observation := makePresent(t, market.SideAsk, price, nil, nil, nil, collectedAt)
+			page, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+				TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task),
+				ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(), CollectedAt: collectedAt,
+				Attempts: []AttemptWrite{{ProductID: product.ProductID, Observation: observation}},
+			})
+			if err != nil || !applied || page.WriteSeq() != 1 {
+				t.Fatalf("CommitSummaryPage() page=%+v applied=%v err=%v", page, applied, err)
+			}
+		}
+		commit(targetA, taskA, productsA[0], 100)
+		commit(targetB, taskB, productsB[0], 200)
+
+		items, err := store.latestPageItems(ctx, targetA.ID(), collection.Platform(platform), market.SideAsk)
+		if err != nil || len(items) != 1 || items[0].ProductID != int64(productsA[0].ProductID) {
+			t.Fatalf("target A items = %+v err=%v", items, err)
+		}
+	})
+
 	t.Run("atomic page and market lifecycle", func(t *testing.T) {
 		store, db := migratedStore(t, dsn)
 		ctx := t.Context()
@@ -65,6 +93,139 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 		}
 	})
 
+	t.Run("late older page cannot roll market state back", func(t *testing.T) {
+		store, db := migratedStore(t, dsn)
+		ctx := t.Context()
+		target, olderTask, _, products := summaryPageFixture(t, store, 730, "page-request-order", 1)
+		if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 2), mustCollectionCursor(t, nil), 0); err != nil {
+			t.Fatal(err)
+		}
+		_, newerCombination := mustQueueCombination(t, store, "page-request-order")
+		newerTask, _, claimed, err := store.ClaimTask(ctx, newerCombination.ID, "page-request-order")
+		if err != nil || !claimed {
+			t.Fatalf("newer ClaimTask() task=%+v claimed=%v err=%v", newerTask, claimed, err)
+		}
+
+		olderAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+		newerAt := olderAt.Add(time.Second)
+		olderObservation := makePresent(t, market.SideAsk, 100, nil, nil, nil, olderAt)
+		newerObservation := makePresent(t, market.SideAsk, 200, nil, nil, nil, newerAt)
+		commit := func(task collection.Task, combinationID resource.CombinationID, at time.Time, observation market.Observation, media catalog.ProductMedia, payload string, askTotal int64) collection.Page {
+			t.Helper()
+			page, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+				TargetID: target.ID(), TaskID: task.ID(), CombinationID: combinationID,
+				ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+				CollectedAt: at, Payload: []byte(payload), AskTotal: askTotal,
+				Attempts: []AttemptWrite{{ProductID: products[0].ProductID, Observation: observation, Media: media}},
+			})
+			if err != nil || !applied {
+				t.Fatalf("CommitSummaryPage(%q) page=%+v applied=%v err=%v", payload, page, applied, err)
+			}
+			return page
+		}
+
+		newerMedia := catalog.ProductMedia{IconPath: "newerIcon"}
+		olderMedia := catalog.ProductMedia{IconPath: "olderIcon"}
+		newerPage := commit(newerTask, newerCombination.ID, newerAt, newerObservation, newerMedia, "newer-page", 200)
+		olderPage := commit(olderTask, claimedCombination(t, olderTask), olderAt, olderObservation, olderMedia, "older-page", 0)
+		if newerPage.WriteSeq() != 1 || olderPage.WriteSeq() != 2 {
+			t.Fatalf("commit order write_seq newer=%d older=%d", newerPage.WriteSeq(), olderPage.WriteSeq())
+		}
+
+		key := MarketKey{ProductID: products[0].ProductID, Platform: "page-request-order", Side: market.SideAsk}
+		latest, found, err := store.LatestAttempt(ctx, key)
+		if err != nil || !found || latest.Order.WriteSequence != newerPage.WriteSeq() || !latest.CollectedAt.Equal(newerAt) {
+			t.Fatalf("latest after late older page = %+v found=%v err=%v", latest, found, err)
+		}
+		last, found, err := store.LastPresent(ctx, key)
+		if err != nil || !found || last.Observation.Summary == nil || last.Observation.Summary.PriceCents != 200 || !last.Observation.CollectedAt.Equal(newerAt) {
+			t.Fatalf("last present after late older page = %+v found=%v err=%v", last, found, err)
+		}
+		payload, _ := mustLatestPagePayload(t, store, target.ID())
+		if string(payload) != "newer-page" {
+			t.Fatalf("latest page payload = %q, want newer-page", payload)
+		}
+		var tickCount int
+		if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM market_price_ticks
+WHERE product_id = $1 AND platform = $2 AND side = $3`,
+			int64(products[0].ProductID), "page-request-order", string(market.SideAsk),
+		).Scan(&tickCount); err != nil || tickCount != 1 {
+			t.Fatalf("price tick count = %d err=%v", tickCount, err)
+		}
+		stored, found, err := store.Target(ctx, target.ID())
+		if err != nil || !found || stored.WriteSeq() != 2 || stored.RefillTotal() != 200 {
+			t.Fatalf("target after both commits = %+v found=%v err=%v", stored, found, err)
+		}
+		if depth, err := store.QueueDepth(ctx, target.ID()); err != nil || depth != 3 {
+			t.Fatalf("late zero-total page changed queue depth=%d err=%v", depth, err)
+		}
+		quotes, err := store.ListMarketQuotes(ctx, MarketQuoteFilter{AppID: 730, Platform: "page-request-order", Limit: 10})
+		if err != nil || len(quotes.Quotes) != 1 || quotes.Quotes[0].Media != newerMedia {
+			t.Fatalf("product media after late older page = %+v err=%v", quotes.Quotes, err)
+		}
+	})
+
+	t.Run("new switch replaces latest page after clock rollback", func(t *testing.T) {
+		store, _ := migratedStore(t, dsn)
+		ctx := t.Context()
+		target, task, combination, products := summaryPageFixture(t, store, 730, "page-switch-order", 1)
+		firstAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+		firstObservation := makePresent(t, market.SideAsk, 100, nil, nil, nil, firstAt)
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: combination.ID,
+			ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+			CollectedAt: firstAt, Payload: []byte("first-switch"), AskTotal: 10,
+			Attempts: []AttemptWrite{{ProductID: products[0].ProductID, Observation: firstObservation}},
+		}); err != nil || !applied {
+			t.Fatalf("first switch commit applied=%v err=%v", applied, err)
+		}
+		if err := store.CompleteTask(ctx, task.ID(), combination.ID, task.ClaimGeneration()); err != nil {
+			t.Fatal(err)
+		}
+		target, _, err := store.Target(ctx, target.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredDisabled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualStopped})
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err = store.SetTargetDesired(ctx, target.ID(), target.Revision(), collection.DesiredEnabled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err = store.TransitionTarget(ctx, target.ID(), target.Revision(), target.SwitchVersion(), TargetTransition{State: collection.ActualRunning})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EnqueueTasks(ctx, target.ID(), target.SwitchVersion(), mustAskPageSpecs(t, 1), target.RefillCursor(), target.RefillTotal()); err != nil {
+			t.Fatal(err)
+		}
+		secondTask, _, claimed, err := store.ClaimTask(ctx, combination.ID, "page-switch-order")
+		if err != nil || !claimed {
+			t.Fatalf("second switch claim=%v err=%v", claimed, err)
+		}
+		secondAt := firstAt.Add(-time.Minute)
+		secondObservation := makePresent(t, market.SideAsk, 200, nil, nil, nil, secondAt)
+		if _, applied, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: secondTask.ID(), CombinationID: combination.ID,
+			ClaimGeneration: secondTask.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+			CollectedAt: secondAt, Payload: []byte("second-switch"), AskTotal: 20,
+			Attempts: []AttemptWrite{{ProductID: products[0].ProductID, Observation: secondObservation}},
+		}); err != nil || !applied {
+			t.Fatalf("second switch commit applied=%v err=%v", applied, err)
+		}
+		payload, _ := mustLatestPagePayload(t, store, target.ID())
+		if string(payload) != "second-switch" {
+			t.Fatalf("latest page payload after new switch = %q", payload)
+		}
+	})
+
 	t.Run("fence and transaction rollback", func(t *testing.T) {
 		store, _ := migratedStore(t, dsn)
 		ctx := t.Context()
@@ -104,6 +265,17 @@ func testCollectionSummaryPages(t *testing.T, dsn string) {
 			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: lateAttempt}},
 		}); !errors.Is(err, ErrCollectionInvalidInput) {
 			t.Fatalf("attempt after page error = %v", err)
+		}
+		assertNoCommittedSummaryPage(t, store, target, products[0].ProductID)
+
+		earlyAttempt := valid
+		earlyAttempt.CollectedAt = collectedAt.Add(-time.Microsecond)
+		if _, _, err := store.CommitSummaryPage(ctx, SummaryPageCommit{
+			TargetID: target.ID(), TaskID: task.ID(), CombinationID: claimedCombination(t, task), ClaimGeneration: task.ClaimGeneration(), ExpectedSwitch: target.SwitchVersion(),
+			CollectedAt: collectedAt,
+			Attempts:    []AttemptWrite{{ProductID: products[0].ProductID, Observation: earlyAttempt}},
+		}); !errors.Is(err, ErrCollectionInvalidInput) {
+			t.Fatalf("attempt before page error = %v", err)
 		}
 		assertNoCommittedSummaryPage(t, store, target, products[0].ProductID)
 

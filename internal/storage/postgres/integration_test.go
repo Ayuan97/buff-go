@@ -85,6 +85,7 @@ SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = current_schema()`)
 		"access_nodes",
 		"account_node_combinations",
 		"buffgo_storage_migrations",
+		"collection_daemon_ownership",
 		"collection_latest_pages",
 		"collection_targets",
 		"collection_tasks",
@@ -394,36 +395,39 @@ VALUES ($1,10,$2,'ask_page','{}','queued',-1)`, summaryTarget, createdAt)
 	digest[0] = 1
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO collection_latest_pages (
-    target_id, write_seq, cursor_before, cursor_after, payload_digest,
+    target_id, switch_version, write_seq, cursor_before, cursor_after, payload_digest,
     collected_at, committed_at
-) VALUES ($1, 1, $2, $3, $4, $5, $5)`,
+) VALUES ($1, 1, 1, $2, $3, $4, $5, $5)`,
 		summaryTarget, emptyCursor, []byte("next"), digest, createdAt); err != nil {
 		t.Fatal(err)
 	}
 	reject("duplicate latest page", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,2,$2,$2,$3,$4,$4)`, summaryTarget, emptyCursor, digest, createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,2,$2,$2,$3,$4,$4)`, summaryTarget, emptyCursor, digest, createdAt)
 	reject("orphan latest page", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES (9223372036854775807,1,$1,$1,$2,$3,$3)`, emptyCursor, digest, createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES (9223372036854775807,1,1,$1,$1,$2,$3,$3)`, emptyCursor, digest, createdAt)
 	reject("zero write_seq page", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,0,$2,$2,$3,$4,$4)`, summaryProbe, emptyCursor, digest, createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,0,$2,$2,$3,$4,$4)`, summaryProbe, emptyCursor, digest, createdAt)
 	reject("oversize page cursor", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$3,$4,$5,$5)`, summaryProbe, make([]byte, 4097), emptyCursor, digest, createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,1,$2,$3,$4,$5,$5)`, summaryProbe, make([]byte, 4097), emptyCursor, digest, createdAt)
 	reject("noncanonical page digest", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 31), createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 31), createdAt)
 	reject("zero page digest", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 32), createdAt)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, make([]byte, 32), createdAt)
 	reject("page commit before collection", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$2,$3,$4,$5)`, summaryOther, emptyCursor, digest, createdAt, createdAt.Add(-time.Second))
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,1,$2,$2,$3,$4,$5)`, summaryOther, emptyCursor, digest, createdAt, createdAt.Add(-time.Second))
 	reject("infinite page time", `
-INSERT INTO collection_latest_pages(target_id,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
-VALUES ($1,1,$2,$2,$3,'infinity','infinity')`, summaryOther, emptyCursor, digest)
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,1,1,$2,$2,$3,'infinity','infinity')`, summaryOther, emptyCursor, digest)
+	reject("negative page switch", `
+INSERT INTO collection_latest_pages(target_id,switch_version,write_seq,cursor_before,cursor_after,payload_digest,collected_at,committed_at)
+VALUES ($1,-1,1,$2,$2,$3,$4,$4)`, summaryOther, emptyCursor, digest, createdAt)
 }
 
 func testCatalogStorage(t *testing.T, dsn string) {
@@ -625,18 +629,19 @@ func testMarketOrdering(t *testing.T, dsn string) {
 	if _, err := store.saveObservations(ctx, oneAttemptBatch(first, "buff", originalBatch.Order, changed, "")); !errors.Is(err, ErrObservationConflict) {
 		t.Fatalf("equal changed payload error = %v", err)
 	}
-	stale := makePresent(t, market.SideAsk, 9999, nil, nil, nil, base.Add(24*time.Hour))
-	if _, err := store.saveObservations(ctx, oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, stale, "")); !errors.Is(err, ErrStaleObservation) {
-		t.Fatalf("stale observation error = %v", err)
+	laterRequest := makePresent(t, market.SideAsk, 9999, nil, nil, nil, base.Add(24*time.Hour))
+	laterBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, laterRequest, "")
+	if applied, err := store.saveObservations(ctx, laterBatch); err != nil || !applied {
+		t.Fatalf("later request with lower write sequence applied=%v err=%v", applied, err)
 	}
 
-	newerButEarlierTime := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base.Add(-time.Hour)}
-	newerBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 3}, newerButEarlierTime, "http.timeout")
-	if _, err := store.saveObservations(ctx, newerBatch); err != nil {
-		t.Fatal(err)
+	earlierRequest := market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base.Add(-time.Hour)}
+	earlierBatch := oneAttemptBatch(first, "buff", market.WriteOrder{SwitchVersion: 1, WriteSequence: 3}, earlierRequest, "http.timeout")
+	if applied, err := store.saveObservations(ctx, earlierBatch); err != nil || applied {
+		t.Fatalf("earlier request with higher write sequence applied=%v err=%v", applied, err)
 	}
 	latest, _, err := store.LatestAttempt(ctx, MarketKey{ProductID: first.ProductID, Platform: "buff", Side: market.SideAsk})
-	if err != nil || latest.Order != newerBatch.Order || !latest.CollectedAt.Equal(base.Add(-time.Hour)) {
+	if err != nil || latest.Order != laterBatch.Order || !latest.CollectedAt.Equal(base.Add(24*time.Hour)) {
 		t.Fatalf("latest = %+v err=%v", latest, err)
 	}
 
@@ -650,11 +655,15 @@ func testMarketOrdering(t *testing.T, dsn string) {
 			{ProductID: third.ProductID, Observation: original},
 		},
 	}
-	if _, err := store.saveObservations(ctx, mixed); !errors.Is(err, ErrStaleObservation) {
-		t.Fatalf("mixed retry error = %v", err)
+	if applied, err := store.saveObservations(ctx, mixed); err != nil || !applied {
+		t.Fatalf("mixed retry applied=%v err=%v", applied, err)
 	}
-	if _, found, err := store.LatestAttempt(ctx, MarketKey{ProductID: third.ProductID, Platform: "buff", Side: market.SideAsk}); err != nil || found {
-		t.Fatalf("stale batch partially wrote third product found=%v err=%v", found, err)
+	if thirdLatest, found, err := store.LatestAttempt(ctx, MarketKey{ProductID: third.ProductID, Platform: "buff", Side: market.SideAsk}); err != nil || !found || thirdLatest.Order != mixed.Order {
+		t.Fatalf("mixed batch new product latest=%+v found=%v err=%v", thirdLatest, found, err)
+	}
+	latest, _, err = store.LatestAttempt(ctx, MarketKey{ProductID: first.ProductID, Platform: "buff", Side: market.SideAsk})
+	if err != nil || latest.Order != laterBatch.Order || !latest.CollectedAt.Equal(base.Add(24*time.Hour)) {
+		t.Fatalf("mixed batch rolled first product back: latest=%+v err=%v", latest, err)
 	}
 
 	low := oneAttemptBatch(second, "steam", market.WriteOrder{SwitchVersion: 1, WriteSequence: 1}, market.Observation{Side: market.SideAsk, Status: market.StatusFailed, CollectedAt: base}, "http.low")

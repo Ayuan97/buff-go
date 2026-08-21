@@ -138,9 +138,17 @@ func (s *collectionServiceStub) ListWorkers(context.Context) ([]collection.Worke
 		Region:       resource.NodeRegionHongKong,
 		Idle:         false,
 		Claim: &collection.WorkerClaim{
-			TargetID: 4, AppID: 730, Side: market.SideAsk, Platform: "steam",
+			TargetID: 4, TaskID: 9, AppID: 730, Side: market.SideAsk, Platform: "steam",
+			Kind: collection.TaskKindAskPage, Endpoint: "market_summary",
+			ClaimedAt: time.Date(2026, 8, 15, 0, 59, 0, 0, time.UTC), Active: true,
 			Items: []collection.WorkerItem{{ProductID: 3, Name: "Sealed Graffiti | GLHF (SWAT Blue)", Status: "present", PriceCents: &cents}},
 		},
+		ActiveWaits: []collection.WorkerWait{{
+			Scope: collection.WorkerWaitScopeRate, Reason: collection.WorkerWaitReasonDeferred,
+			RetryAt: time.Date(2026, 8, 15, 1, 1, 0, 0, time.UTC), Platform: "steam",
+			Endpoint: "market_orderbook", Side: market.SideBid, AccountID: 2,
+			ExitAddress: "38.175.103.188",
+		}},
 		LastPage: &collection.WorkerPage{
 			TargetID: 4, AppID: 730, Side: market.SideAsk, Platform: "steam",
 			CommittedAt: time.Date(2026, 8, 15, 1, 0, 0, 0, time.UTC),
@@ -401,6 +409,19 @@ func TestWorkersJSON(t *testing.T) {
 	}
 	if _, ok := payload[0]["last_page"].(map[string]any); !ok {
 		t.Fatalf("last_page missing: %v", payload[0])
+	}
+	claim, ok := payload[0]["claim"].(map[string]any)
+	if !ok || claim["active"] != true || claim["endpoint"] != "market_summary" || claim["task_id"] != float64(9) {
+		t.Fatalf("active claim = %v", payload[0]["claim"])
+	}
+	waits, ok := payload[0]["active_waits"].([]any)
+	if !ok || len(waits) != 1 {
+		t.Fatalf("active_waits = %v", payload[0]["active_waits"])
+	}
+	wait, ok := waits[0].(map[string]any)
+	if !ok || wait["scope"] != "account_exit_endpoint" || wait["reason"] != "deferred" ||
+		wait["endpoint"] != "market_orderbook" || wait["side"] != "bid" {
+		t.Fatalf("wait = %v", waits[0])
 	}
 }
 

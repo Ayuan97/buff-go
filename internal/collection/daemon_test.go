@@ -17,6 +17,7 @@ import (
 type fakeInstanceGuard struct {
 	mu           sync.Mutex
 	held         bool
+	epoch        OwnerEpoch
 	releases     int
 	verifies     int
 	verifyFailed int
@@ -92,7 +93,8 @@ func (guard *fakeInstanceGuard) AcquireInstanceLock(ctx context.Context) (Instan
 		return nil, false, nil
 	}
 	guard.held = true
-	return &fakeInstanceLock{guard: guard}, true, nil
+	guard.epoch++
+	return &fakeInstanceLock{guard: guard, epoch: guard.epoch}, true, nil
 }
 
 func (guard *fakeInstanceGuard) releaseCount() int {
@@ -109,7 +111,10 @@ func (guard *fakeInstanceGuard) verifyFailureCount() int {
 
 type fakeInstanceLock struct {
 	guard *fakeInstanceGuard
+	epoch OwnerEpoch
 }
+
+func (lock *fakeInstanceLock) Epoch() OwnerEpoch { return lock.epoch }
 
 func (lock *fakeInstanceLock) Verify(ctx context.Context) error {
 	lock.guard.mu.Lock()
@@ -254,6 +259,51 @@ func TestDaemonRunsRepeatedCyclesUntilCanceled(t *testing.T) {
 	}
 }
 
+func TestDaemonPassesOwnerEpochToScheduler(t *testing.T) {
+	harness := newDaemonHarness(t, time.Hour, nil)
+	observed := make(chan OwnerEpoch, 1)
+	harness.maintenance.mu.Lock()
+	harness.maintenance.targetsHook = func(ctx context.Context) error {
+		epoch, ok := OwnerEpochFromContext(ctx)
+		if !ok {
+			return errors.New("scheduler context has no owner epoch")
+		}
+		select {
+		case observed <- epoch:
+		default:
+		}
+		return nil
+	}
+	harness.maintenance.mu.Unlock()
+	stop := harness.start(t)
+	defer stop()
+	select {
+	case epoch := <-observed:
+		if epoch != 1 {
+			t.Fatalf("scheduler owner epoch = %d, want 1", epoch)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler did not receive owner epoch")
+	}
+}
+
+func TestDaemonDetectsOwnerFenceInCycle(t *testing.T) {
+	for name, cycle := range map[string]DaemonCycle{
+		"cycle":  {Err: ErrOwnerFence},
+		"target": {Report: CycleReport{Targets: []TargetOutcome{{Err: ErrOwnerFence}}}},
+		"worker": {Report: CycleReport{Workers: []WorkerOutcome{{Err: ErrOwnerFence}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := daemonOwnerFence(cycle); !errors.Is(err, ErrOwnerFence) {
+				t.Fatalf("daemonOwnerFence() error = %v", err)
+			}
+		})
+	}
+	if err := daemonOwnerFence(DaemonCycle{}); err != nil {
+		t.Fatalf("clean cycle error = %v", err)
+	}
+}
+
 func TestDaemonFastWorkerRefillsWhileAnotherWorkerIsSlow(t *testing.T) {
 	harness := newDaemonHarness(t, time.Hour, nil)
 	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
@@ -379,6 +429,19 @@ func TestDaemonCooldownLeavesOtherEndpointRunnable(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("ask cooldown stopped the independent bid lane")
 	}
+	waitFor(t, "exact ask wait", func() bool {
+		snapshot := harness.daemon.WorkerRuntime()
+		for _, wait := range snapshot.Waits {
+			if wait.Scope == WorkerWaitScopeRate && wait.Reason == WorkerWaitReasonDeferred &&
+				wait.Endpoint == "market_summary" && wait.Side == market.SideAsk {
+				return true
+			}
+			if wait.Endpoint == "market_orderbook" {
+				t.Fatalf("ask cooldown leaked into bid wait: %+v", snapshot.Waits)
+			}
+		}
+		return false
+	})
 }
 
 func TestDaemonWakesWhenExactCooldownExpires(t *testing.T) {
@@ -418,6 +481,91 @@ func TestDaemonWakesWhenExactCooldownExpires(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expired cooldown waited for the one-hour planning interval")
 	}
+}
+
+func TestDaemonNetworkBackoffCoversNodeAccountsAndExpires(t *testing.T) {
+	const retry = 250 * time.Millisecond
+	harness := newDaemonHarness(t, time.Hour, func(config *SchedulerConfig) {
+		config.TransientRetry = retry
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.1"))
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.1"))
+	harness.addCombination(3, "steam", netip.MustParseAddr("2.2.2.3"))
+	harness.store.mu.Lock()
+	sharedNode := harness.store.resources[1].Node
+	harness.store.mu.Unlock()
+	harness.mutateCombination(2, func(resources *resource.CombinationResources) {
+		resources.Combination.NodeID = sharedNode.ID
+		resources.Node = sharedNode
+	})
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+
+	firstFailure := make(chan struct{}, 1)
+	otherNodeStarted := make(chan struct{}, 1)
+	sameNodeRecovered := make(chan struct{}, 1)
+	releaseOtherNode := make(chan struct{})
+	var sharedMu sync.Mutex
+	sharedCalls := 0
+	harness.fetcher.hook = func(request PageFetch) error {
+		if request.Lease.Snapshot.NodeID == sharedNode.ID {
+			sharedMu.Lock()
+			sharedCalls++
+			call := sharedCalls
+			sharedMu.Unlock()
+			if call == 1 {
+				firstFailure <- struct{}{}
+				return ErrFetchNetwork
+			}
+			select {
+			case sameNodeRecovered <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		select {
+		case otherNodeStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseOtherNode:
+			return nil
+		case <-request.Lease.Context().Done():
+			return request.Lease.Context().Err()
+		}
+	}
+
+	released := false
+	stop := harness.start(t)
+	defer func() {
+		if !released {
+			close(releaseOtherNode)
+		}
+		stop()
+	}()
+	for name, signal := range map[string]<-chan struct{}{
+		"shared-node failure": firstFailure,
+		"other-node request":  otherNodeStarted,
+	} {
+		select {
+		case <-signal:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", name)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	sharedMu.Lock()
+	earlyCalls := sharedCalls
+	sharedMu.Unlock()
+	if earlyCalls != 1 {
+		t.Fatalf("shared node made %d calls during node backoff, want 1", earlyCalls)
+	}
+	select {
+	case <-sameNodeRecovered:
+	case <-time.After(time.Second):
+		t.Fatal("shared node did not resume when transient backoff expired")
+	}
+	close(releaseOtherNode)
+	released = true
 }
 
 func TestDaemonCancelRequeuesInFlightTaskAndReleasesLease(t *testing.T) {
@@ -1136,6 +1284,124 @@ func TestDaemonFailsWhenInstanceLockErrors(t *testing.T) {
 	harness.guard.failErr = errors.New("lock store is unavailable")
 	if err := harness.daemon.Run(context.Background()); err == nil {
 		t.Fatal("daemon must not start when the instance lock cannot be evaluated")
+	}
+}
+
+func TestResidentRuntimeSnapshotClassifiesExactWaits(t *testing.T) {
+	now := time.Date(2026, 8, 21, 1, 0, 0, 0, time.UTC)
+	dispatcher := &residentDispatcher{
+		scheduler: &Scheduler{config: SchedulerConfig{Clock: func() time.Time { return now }}},
+		inFlight: map[resource.CombinationID]residentFlight{
+			1: {claim: WorkerRuntimeClaim{
+				CombinationID: 1, TargetID: 2, TaskID: 3, AppID: 730,
+				Side: market.SideAsk, Platform: PlatformSteam, Kind: TaskKindAskPage,
+				Endpoint: "market_summary", ClaimedAt: now.Add(-time.Second),
+			}},
+		},
+		rateRetryAt: map[workerRateKey]workerRetry{
+			{accountID: 11, exitAddress: netip.MustParseAddr("1.1.1.1"), lane: requestLane{platform: PlatformSteam, endpoint: "market_summary"}}: {
+				retryAt: now.Add(time.Minute), reason: WorkerWaitReasonDeferred, side: market.SideAsk,
+			},
+			{accountID: 12, exitAddress: netip.MustParseAddr("1.1.1.2"), lane: requestLane{platform: PlatformSteam, endpoint: "market_orderbook"}}: {
+				retryAt: now, reason: WorkerWaitReasonRateLimit, side: market.SideBid,
+			},
+		},
+		nodeRetryAt: map[workerNodeKey]workerRetry{
+			{nodeID: 22, platform: "steam"}: {
+				retryAt: now.Add(2 * time.Minute), reason: WorkerWaitReasonNetwork, side: market.SideAsk,
+			},
+		},
+		transientRetryAt: map[resource.CombinationID]workerRetry{
+			33: {retryAt: now.Add(3 * time.Minute), reason: WorkerWaitReasonTransient, side: market.SideBid},
+		},
+		lastLanes: map[resource.CombinationID]requestLane{
+			33: {platform: PlatformSteam, endpoint: "market_orderbook"},
+		},
+	}
+
+	snapshot := dispatcher.RuntimeSnapshot()
+	if len(snapshot.Claims) != 1 || !snapshot.Claims[0].ClaimedAt.Equal(now.Add(-time.Second)) {
+		t.Fatalf("claims = %+v", snapshot.Claims)
+	}
+	if len(snapshot.Waits) != 3 {
+		t.Fatalf("waits = %+v", snapshot.Waits)
+	}
+	byScope := make(map[WorkerWaitScope]WorkerWait, len(snapshot.Waits))
+	for _, wait := range snapshot.Waits {
+		byScope[wait.Scope] = wait
+	}
+	rate := byScope[WorkerWaitScopeRate]
+	if rate.Reason != WorkerWaitReasonDeferred || rate.AccountID != 11 || rate.ExitAddress != "1.1.1.1" ||
+		rate.Endpoint != "market_summary" || rate.Side != market.SideAsk {
+		t.Fatalf("rate wait = %+v", rate)
+	}
+	node := byScope[WorkerWaitScopeNode]
+	if node.Reason != WorkerWaitReasonNetwork || node.NodeID != 22 || node.Platform != PlatformSteam {
+		t.Fatalf("node wait = %+v", node)
+	}
+	transient := byScope[WorkerWaitScopeCombination]
+	if transient.Reason != WorkerWaitReasonTransient || transient.CombinationID != 33 ||
+		transient.Endpoint != "market_orderbook" {
+		t.Fatalf("combination wait = %+v", transient)
+	}
+}
+
+func TestDaemonWorkerRuntimeIsRaceSafeAcrossShutdown(t *testing.T) {
+	harness := newDaemonHarness(t, time.Hour, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	harness.fetcher.hook = func(PageFetch) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}
+	stop := harness.start(t)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resident worker did not start")
+	}
+	waitFor(t, "active runtime claim", func() bool {
+		snapshot := harness.daemon.WorkerRuntime()
+		return len(snapshot.Claims) == 1 && snapshot.Claims[0].CombinationID == 1
+	})
+	snapshot := harness.daemon.WorkerRuntime()
+	harness.store.mu.Lock()
+	var storedClaimedAt time.Time
+	for _, task := range harness.store.tasks {
+		if task.State() == TaskClaimed {
+			storedClaimedAt, _ = task.ClaimedAt()
+			break
+		}
+	}
+	harness.store.mu.Unlock()
+	if storedClaimedAt.IsZero() || !snapshot.Claims[0].ClaimedAt.Equal(storedClaimedAt) {
+		t.Fatalf("runtime claimed_at=%v, stored=%v", snapshot.Claims[0].ClaimedAt, storedClaimedAt)
+	}
+
+	pollDone := make(chan struct{})
+	var poll sync.WaitGroup
+	poll.Add(1)
+	go func() {
+		defer poll.Done()
+		for {
+			select {
+			case <-pollDone:
+				return
+			default:
+				_ = harness.daemon.WorkerRuntime()
+			}
+		}
+	}()
+	close(release)
+	stop()
+	close(pollDone)
+	poll.Wait()
+	if snapshot := harness.daemon.WorkerRuntime(); len(snapshot.Claims) != 0 || len(snapshot.Waits) != 0 {
+		t.Fatalf("runtime survived shutdown: %+v", snapshot)
 	}
 }
 

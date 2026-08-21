@@ -178,7 +178,7 @@ function submitConnection() {
           <h3>出口 IP</h3>
           <p class="note">
             节点必须有一个已填写的公网出口 IP 才能参与采集，本机直连也一样。
-            限频按「平台 + 出口 IP」计，多个节点填同一个 IP 会共用同一份预算。
+            限频按「接口 + 账号 + 出口 IP」计算：三者都相同才共用预算，不同接口、账号或平台相互独立。
           </p>
           <div class="grid">
             <div class="field">
