@@ -117,6 +117,7 @@ type workerWaitResponse struct {
 	Scope         collection.WorkerWaitScope  `json:"scope"`
 	Reason        collection.WorkerWaitReason `json:"reason"`
 	RetryAt       time.Time                   `json:"retry_at"`
+	RetryAfterSec *int64                      `json:"retry_after_sec,omitempty"`
 	Platform      collection.Platform         `json:"platform"`
 	Endpoint      string                      `json:"endpoint,omitempty"`
 	Side          market.Side                 `json:"side,omitempty"`
@@ -308,12 +309,20 @@ func toWorkerResponse(worker collection.WorkerSnapshot) workerResponse {
 		out.Claim = claim
 	}
 	for _, wait := range worker.ActiveWaits {
-		out.ActiveWaits = append(out.ActiveWaits, workerWaitResponse{
+		item := workerWaitResponse{
 			Scope: wait.Scope, Reason: wait.Reason, RetryAt: wait.RetryAt,
 			Platform: wait.Platform, Endpoint: string(wait.Endpoint), Side: wait.Side,
 			AccountID: int64(wait.AccountID), ExitAddress: wait.ExitAddress,
 			NodeID: int64(wait.NodeID), CombinationID: int64(wait.CombinationID),
-		})
+		}
+		if !wait.RetryAt.IsZero() {
+			sec := int64(time.Until(wait.RetryAt) / time.Second)
+			if sec < 0 {
+				sec = 0
+			}
+			item.RetryAfterSec = &sec
+		}
+		out.ActiveWaits = append(out.ActiveWaits, item)
 	}
 	if worker.LastPage != nil {
 		out.LastPage = &workerPageResponse{

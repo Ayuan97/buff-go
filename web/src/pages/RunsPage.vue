@@ -6,12 +6,13 @@ import {
   apiErrorText,
   fenToYuan,
   fmtAgo,
-  fmtUntil,
   gameName,
   platformLabel,
+  fmtWaitRetry,
   regionText,
   sessionStateText,
   sideText,
+  waitCategoryText,
 } from '../utils/format'
 
 const workers = ref<Worker[] | null>(null)
@@ -50,7 +51,7 @@ function idleWhy(worker: Worker): string {
   if (worker.session_state === 'invalid') return '会话失效，不会领任务'
   if (worker.session_state === 'unverified') return '会话未验证'
   const wait = worker.active_waits[0]
-  if (wait) return `${waitLabel(wait)} · ${fmtUntil(wait.retry_at)}`
+  if (wait) return `${waitCategoryText(wait.reason)} · ${fmtWaitRetry(wait.retry_after_sec, wait.retry_at)}`
   if (worker.claim && !worker.claim.active) return '任务已认领，等待执行'
   if (worker.last_page) return '两枪之间空闲'
   return '还没写下过页'
@@ -63,15 +64,12 @@ function endpointLabel(endpoint?: string, side?: 'bid' | 'ask'): string {
 }
 
 function waitLabel(wait: WorkerWait): string {
+  const category = waitCategoryText(wait.reason)
   if (wait.scope === 'account_exit_endpoint') {
-    return wait.reason === 'rate_limit'
-      ? `${endpointLabel(wait.endpoint, wait.side)}限频`
-      : `${endpointLabel(wait.endpoint, wait.side)}等待准入`
+    return `${category} · ${endpointLabel(wait.endpoint, wait.side)}`
   }
-  if (wait.scope === 'node_platform') {
-    return wait.reason === 'timeout' ? '节点请求超时' : '节点网络退避'
-  }
-  return '组合临时退避'
+  if (wait.scope === 'node_platform') return `${category} · 节点`
+  return `${category} · 组合`
 }
 
 async function reload() {
@@ -164,7 +162,7 @@ onUnmounted(() => {
                   <div v-for="wait in worker.active_waits" :key="`${wait.scope}:${wait.endpoint || wait.node_id || wait.combination_id}`" class="wait-row">
                     <span class="wait-mark">等待</span>
                     <span>{{ waitLabel(wait) }}</span>
-                    <span class="muted" :title="wait.retry_at">{{ fmtUntil(wait.retry_at) }}</span>
+                    <span class="muted" :title="wait.retry_at">{{ fmtWaitRetry(wait.retry_after_sec, wait.retry_at) }}</span>
                   </div>
                 </div>
                 <div v-if="pageItems(worker).length" class="items">

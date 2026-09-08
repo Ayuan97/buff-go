@@ -27,7 +27,8 @@ import {
   KNOWN_GAMES,
   platformLabel,
   sideText,
-  targetReasonText,
+  targetReasonHint,
+  type ReasonAction,
 } from '../utils/format'
 import { nodeAllowsPlatform, nodeIsUsableAt } from '../utils/platformRegion'
 
@@ -263,6 +264,20 @@ function sideOf(p: PlatInGame, side: Side) {
 
 function sideLabel(g: GameDraft, p: PlatInGame, side: Side) {
   return `${g.shortName} · ${platformLabel(p.platform)} ${sideText(side)}`
+}
+
+// 阻塞/等待方向固定三层：状态徽标 → 短句 → 行动入口。节拍冷却不当阻塞。
+function sideBlockHint(s: SideDraft): { text: string; action?: ReasonAction } | null {
+  if (!s.enabled || isPacingBeat(s.reason, s.recheckAt)) return null
+  if (s.actual !== 'blocked' && s.actual !== 'error' && s.actual !== 'waiting') return null
+  const hint = targetReasonHint(s.reason)
+  if (!hint.text && s.actual !== 'blocked' && s.actual !== 'error') return null
+  return {
+    text: hint.text || '采集受阻',
+    action: hint.action ?? (s.actual === 'blocked' || s.actual === 'error'
+      ? { label: '去资源页', to: '/resources' }
+      : undefined),
+  }
 }
 
 // 后端只允许移除已停用且已停止的目标。跑过没跑过前端看不出来，那种情况按后端返回的原因提示。
@@ -507,16 +522,23 @@ function onConfirm() {
                     <div v-else class="muted sm">
                       {{ sideOf(p, side).nodeIds.length ? '暂无可用节点' : '未分节点' }}
                     </div>
-                    <div
-                      v-if="sideOf(p, side).reason && !isPacingBeat(sideOf(p, side).reason, sideOf(p, side).recheckAt)"
-                      class="reason"
-                      :title="fmtTime(sideOf(p, side).recheckAt)"
-                    >
-                      {{ targetReasonText(sideOf(p, side).reason) }}
-                      <span v-if="fmtUntil(sideOf(p, side).recheckAt)" class="muted">
-                        · {{ fmtUntil(sideOf(p, side).recheckAt) }}
-                      </span>
-                    </div>
+                    <template v-for="hint in [sideBlockHint(sideOf(p, side))]" :key="`${side}-hint`">
+                      <div
+                        v-if="hint"
+                        class="reason"
+                        :title="fmtTime(sideOf(p, side).recheckAt)"
+                      >
+                        <span>{{ hint.text }}</span>
+                        <RouterLink
+                          v-if="hint.action"
+                          class="reason-act"
+                          :to="hint.action.to"
+                        >{{ hint.action.label }}</RouterLink>
+                        <span v-if="fmtUntil(sideOf(p, side).recheckAt)" class="muted">
+                          · {{ fmtUntil(sideOf(p, side).recheckAt) }}
+                        </span>
+                      </div>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -711,7 +733,8 @@ function onConfirm() {
 }
 .ntag.sm { font-size: 9px; padding: 2px 5px; }
 .freq { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
-.reason { font-size: 12px; color: var(--warn); word-break: break-word; }
+.reason { font-size: 12px; color: var(--warn); word-break: break-word; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.reason-act { color: var(--warn); border-bottom-color: color-mix(in srgb, var(--warn) 50%, transparent); font-size: 12px; }
 .muted { color: var(--text-3); }
 .sm { font-size: 11px; }
 
