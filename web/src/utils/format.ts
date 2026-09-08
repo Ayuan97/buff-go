@@ -63,9 +63,13 @@ export function fmtUntil(iso: string | null): string {
   if (!iso) return ''
   const diff = new Date(iso).getTime() - Date.now()
   if (diff <= 0) return '即将重试'
-  const seconds = Math.round(diff / 1000)
-  if (seconds < 60) return `约 ${seconds} 秒后恢复`
-  const minutes = Math.round(seconds / 60)
+  return fmtRetryAfter(Math.round(diff / 1000))
+}
+
+export function fmtRetryAfter(sec: number | null | undefined): string {
+  if (sec == null || sec <= 0) return ''
+  if (sec < 60) return `约 ${sec} 秒后恢复`
+  const minutes = Math.round(sec / 60)
   if (minutes < 60) return `约 ${minutes} 分钟后恢复`
   return `约 ${Math.round(minutes / 60)} 小时后恢复`
 }
@@ -202,8 +206,16 @@ export const targetReasonText = (reason: string | null): string => {
   if (!reason) return ''
   const map: Record<string, string> = {
     no_combination: '没有可用组合',
+    resource_incomplete: '资源不完整',
     egress_unavailable: '出口不可用或地域不符',
+    egress_cn_blocked: '国内出口被拦',
     session_invalid: '会话失效，请更换 Cookie',
+    lease_held: '租约被占用',
+    http_429: '平台限频',
+    http_5xx: '平台 5xx',
+    auth_fail: '认证失败',
+    parse_fail: '响应解析失败',
+    timeout: '请求超时',
     cooldown: '限流冷却中',
     missing_rate_policy: '缺少限频策略',
     next_cycle: '等待下一轮',

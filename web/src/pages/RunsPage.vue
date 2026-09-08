@@ -6,7 +6,9 @@ import {
   apiErrorText,
   fenToYuan,
   fmtAgo,
+  fmtRetryAfter,
   fmtUntil,
+  targetReasonText,
   gameName,
   platformLabel,
   regionText,
@@ -50,7 +52,10 @@ function idleWhy(worker: Worker): string {
   if (worker.session_state === 'invalid') return '会话失效，不会领任务'
   if (worker.session_state === 'unverified') return '会话未验证'
   const wait = worker.active_waits[0]
-  if (wait) return `${waitLabel(wait)} · ${fmtUntil(wait.retry_at)}`
+  if (wait) {
+    const until = fmtRetryAfter(wait.retry_after_sec) || fmtUntil(wait.retry_at)
+    return `${waitLabel(wait)} · ${until}`
+  }
   if (worker.claim && !worker.claim.active) return '任务已认领，等待执行'
   if (worker.last_page) return '两枪之间空闲'
   return '还没写下过页'
@@ -63,6 +68,11 @@ function endpointLabel(endpoint?: string, side?: 'bid' | 'ask'): string {
 }
 
 function waitLabel(wait: WorkerWait): string {
+  const code = wait.block_or_err || wait.block_reason
+  if (code) {
+    const text = targetReasonText(code)
+    if (text && text !== code) return text
+  }
   if (wait.scope === 'account_exit_endpoint') {
     return wait.reason === 'rate_limit'
       ? `${endpointLabel(wait.endpoint, wait.side)}限频`
@@ -164,7 +174,7 @@ onUnmounted(() => {
                   <div v-for="wait in worker.active_waits" :key="`${wait.scope}:${wait.endpoint || wait.node_id || wait.combination_id}`" class="wait-row">
                     <span class="wait-mark">等待</span>
                     <span>{{ waitLabel(wait) }}</span>
-                    <span class="muted" :title="wait.retry_at">{{ fmtUntil(wait.retry_at) }}</span>
+                    <span class="muted" :title="wait.retry_at">{{ fmtRetryAfter(wait.retry_after_sec) || fmtUntil(wait.retry_at) }}</span>
                   </div>
                 </div>
                 <div v-if="pageItems(worker).length" class="items">

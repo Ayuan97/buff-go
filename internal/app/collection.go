@@ -80,17 +80,38 @@ func collectionDaemonObservers(recorder telemetry.Recorder) (func(collection.Dae
 		})
 	}
 	cycle := func(result collection.DaemonCycle) {
+		now := time.Now()
 		emitFailure("collection.daemon", result.Err)
 		for _, target := range result.Report.Targets {
 			emitFailure("collection.target", target.Err)
+			if target.Target.ID() == 0 {
+				continue
+			}
+			code := collection.TargetBlockOrErr(target.Target)
+			if code == "" {
+				continue
+			}
+			side, _ := target.Target.Side()
+			appID, _ := target.Target.AppID()
+			recheck, _ := target.Target.RecheckAt()
+			telemetry.Emit(recorder, telemetry.Event{
+				Kind: telemetry.KindJobFail, Reason: telemetry.ReasonError,
+				Platform: string(target.Platform), Source: "collection.target", AppID: appID,
+				Direction: collection.ObserveDirection(side), BlockOrErr: string(code),
+				RetryAfterSec: collection.RetryAfterSec(recheck, now),
+			})
 		}
 		for _, worker := range result.Report.Workers {
-			if worker.Err == nil {
+			if worker.Err == nil && worker.BlockOrErr == "" {
 				continue
 			}
 			source := "collection.worker"
 			if worker.Endpoint != "" {
 				source += "." + string(worker.Endpoint)
+			}
+			detail := ""
+			if worker.Err != nil {
+				detail = worker.Err.Error()
 			}
 			telemetry.Emit(recorder, telemetry.Event{
 				Kind: telemetry.KindJobFail, Reason: telemetry.ReasonError,
@@ -99,7 +120,11 @@ func collectionDaemonObservers(recorder telemetry.Recorder) (func(collection.Dae
 				Account:  strconv.FormatInt(int64(worker.AccountID), 10),
 				Proxy:    worker.ExitAddress.String(),
 				JobKey:   strconv.FormatInt(int64(worker.TaskID), 10),
-				Detail:   worker.Err.Error(),
+				TaskID:   int64(worker.TaskID), AccountID: int64(worker.AccountID),
+				NodeID: int64(worker.NodeID), Direction: collection.ObserveDirection(worker.Side),
+				BlockOrErr: string(worker.BlockOrErr),
+				RetryAfterSec: collection.RetryAfterSec(worker.RetryAt, now),
+				Detail:        detail,
 			})
 		}
 	}

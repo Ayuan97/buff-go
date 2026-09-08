@@ -109,6 +109,8 @@ func TestTargetReasonStateMatrix(t *testing.T) {
 		{"blocked combination", ActualBlocked, TargetReasonNoCombination, RecoveryAutomatic, &autoRecheck, false},
 		{"blocked cooldown", ActualBlocked, TargetReasonCooldown, RecoveryAutomatic, &autoRecheck, false},
 		{"blocked egress", ActualBlocked, TargetReasonEgressUnavailable, RecoveryAutomatic, &autoRecheck, false},
+		{"blocked cn egress", ActualBlocked, TargetReasonEgressCNBlocked, RecoveryAutomatic, &autoRecheck, false},
+		{"blocked incomplete", ActualBlocked, TargetReasonResourceIncomplete, RecoveryAutomatic, &autoRecheck, false},
 		{"blocked policy", ActualBlocked, TargetReasonMissingRatePolicy, RecoveryManual, nil, false},
 		{"blocked session", ActualBlocked, TargetReasonSessionInvalid, RecoveryManual, nil, false},
 		{"blocked config", ActualBlocked, TargetReasonInvalidConfig, RecoveryManual, nil, false},

@@ -137,6 +137,11 @@ func TestLog_StructuredLine(t *testing.T) {
 		Proxy:    "1.2.3.4:8080",
 		Detail:   "proxy platform is cooling",
 	})
+	Emit(lg, Event{
+		Kind: KindJobFail, Reason: ReasonError, Platform: "steam",
+		TaskID: 9, AccountID: 8, NodeID: 7, Direction: "sell",
+		BlockOrErr: "http_429", RetryAfterSec: 12,
+	})
 	line := buf.String()
 	for _, want := range []string{
 		"buffgo observ:",
@@ -146,6 +151,12 @@ func TestLog_StructuredLine(t *testing.T) {
 		"appid=252490",
 		"worker_ref=worker_",
 		"node_ref=node_",
+		"task_id=9",
+		"account_id=8",
+		"direction=sell",
+		"block_or_err=http_429",
+		"node_id=7",
+		"retry_after_sec=12",
 	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log missing %q in %q", want, line)

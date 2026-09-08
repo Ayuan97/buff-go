@@ -393,7 +393,8 @@ func isWaitingReason(reason TargetReason) bool {
 
 func blockedRecovery(reason TargetReason) (RecoveryMode, bool) {
 	switch reason {
-	case TargetReasonNoCombination, TargetReasonCooldown, TargetReasonEgressUnavailable:
+	case TargetReasonNoCombination, TargetReasonCooldown, TargetReasonEgressUnavailable,
+		TargetReasonEgressCNBlocked, TargetReasonResourceIncomplete:
 		return RecoveryAutomatic, true
 	case TargetReasonMissingRatePolicy,
 		TargetReasonSessionInvalid,

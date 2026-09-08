@@ -78,6 +78,7 @@ const (
 type WorkerWait struct {
 	Scope         WorkerWaitScope
 	Reason        WorkerWaitReason
+	BlockOrErr    BlockOrErr
 	RetryAt       time.Time
 	Platform      Platform
 	Endpoint      ratelimit.EndpointClass
