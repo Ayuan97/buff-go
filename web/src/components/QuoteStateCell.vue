@@ -5,6 +5,7 @@ import { fenToYuan, fmtAgo, fmtTime } from '../utils/format'
 
 const props = defineProps<{ quote: Quote | undefined }>()
 
+// 主行是这次尝试；失败/空/不可用不能盖掉历史有效价，那是另一条线。
 const view = computed(() => {
   const q = props.quote
   if (!q) return { kind: 'none' as const }

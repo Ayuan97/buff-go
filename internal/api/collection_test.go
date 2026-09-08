@@ -423,6 +423,9 @@ func TestWorkersJSON(t *testing.T) {
 		wait["endpoint"] != "market_orderbook" || wait["side"] != "bid" {
 		t.Fatalf("wait = %v", waits[0])
 	}
+	if _, ok := wait["retry_after_sec"].(float64); !ok {
+		t.Fatalf("retry_after_sec missing: %v", wait)
+	}
 }
 
 func TestSteamFacetsVocab(t *testing.T) {

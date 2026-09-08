@@ -115,6 +115,7 @@ export interface WorkerWait {
   scope: WorkerWaitScope
   reason: WorkerWaitReason
   retry_at: string
+  retry_after_sec?: number
   platform: string
   endpoint?: string
   side?: Side

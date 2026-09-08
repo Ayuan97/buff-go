@@ -198,21 +198,72 @@ export const apiErrorText = (code: string): string => {
   return map[code] ?? code
 }
 
+export type ReasonAction = {
+  label: string
+  to: string
+}
+
+export type ReasonHint = {
+  text: string
+  action?: ReasonAction
+}
+
+const RESOURCES: ReasonAction = { label: '去资源页', to: '/resources' }
+
+// API 只回稳定码，短句和行动入口都在前端。阻塞态要让人看见：状态 → 原因 → 下一步。
+const TARGET_REASON_HINTS: Record<string, ReasonHint> = {
+  session_invalid: { text: '会话失效', action: { label: '去资源页换 Cookie', to: '/resources' } },
+  egress_cn_blocked: { text: '国内节点不能采 Steam', action: { label: '换国外/香港', to: '/resources' } },
+  egress_unavailable: { text: '出口不可用或过期', action: { label: '去资源页重填', to: '/resources' } },
+  resource_incomplete: { text: '缺账号/节点/绑定', action: { label: '去资源页补齐', to: '/resources' } },
+  no_combination: { text: '没有可用组合', action: { label: '去资源页补齐', to: '/resources' } },
+  cooldown: { text: '限流冷却中' },
+  missing_rate_policy: { text: '缺少限频策略' },
+  next_cycle: { text: '等待下一轮' },
+  scheduler_opportunity: { text: '等待调度空档' },
+  transient_failure: { text: '暂时失败，将重试' },
+  invalid_config: { text: '配置无效' },
+  interface_unverified: { text: '接口未验证' },
+  scheduler_failure: { text: '调度失败' },
+  state_integrity: { text: '状态不一致' },
+}
+
+export function targetReasonHint(reason: string | null | undefined): ReasonHint {
+  if (!reason) return { text: '' }
+  return TARGET_REASON_HINTS[reason] ?? { text: reason, action: RESOURCES }
+}
+
 export const targetReasonText = (reason: string | null): string => {
-  if (!reason) return ''
-  const map: Record<string, string> = {
-    no_combination: '没有可用组合',
-    egress_unavailable: '出口不可用或地域不符',
-    session_invalid: '会话失效，请更换 Cookie',
-    cooldown: '限流冷却中',
-    missing_rate_policy: '缺少限频策略',
-    next_cycle: '等待下一轮',
-    scheduler_opportunity: '等待调度空档',
-    transient_failure: '暂时失败，将重试',
-    invalid_config: '配置无效',
-    interface_unverified: '接口未验证',
-    scheduler_failure: '调度失败',
-    state_integrity: '状态不一致',
-  }
-  return map[reason] ?? reason
+  const hint = targetReasonHint(reason)
+  if (!hint.text) return ''
+  return hint.action ? `${hint.text}，${hint.action.label}` : hint.text
+}
+
+export const targetReasonAction = (reason: string | null | undefined): ReasonAction | undefined =>
+  targetReasonHint(reason).action
+
+// 运行页等待只分三类，细节留给 title。
+export function waitCategoryText(reason: string | null | undefined): string {
+  if (reason === 'rate_limit') return '限流'
+  if (reason === 'network' || reason === 'timeout') return '网络'
+  if (reason === 'deferred' || reason === 'transient') return '退避'
+  return '等待'
+}
+
+export function fmtRetryAfterSec(sec: number | null | undefined): string {
+  if (sec == null || !Number.isFinite(sec)) return ''
+  const seconds = Math.max(0, Math.round(sec))
+  if (seconds <= 0) return '即将重试'
+  if (seconds < 60) return `约 ${seconds}s 后重试`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `约 ${minutes} 分钟后重试`
+  return `约 ${Math.round(minutes / 60)} 小时后重试`
+}
+
+// 优先用接口给的剩余秒数；没有就按 retry_at 推算，避免空等。
+export function fmtWaitRetry(retryAfterSec?: number | null, retryAt?: string | null): string {
+  if (retryAfterSec != null && Number.isFinite(retryAfterSec)) return fmtRetryAfterSec(retryAfterSec)
+  if (!retryAt) return ''
+  const diff = new Date(retryAt).getTime() - Date.now()
+  return fmtRetryAfterSec(Math.round(diff / 1000))
 }

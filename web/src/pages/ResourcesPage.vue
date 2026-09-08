@@ -34,6 +34,7 @@ import {
   platformLabel,
   regionText,
   sessionStateText,
+  targetReasonText,
 } from '../utils/format'
 import { nodeAllowsPlatform, nodeIsUsableAt } from '../utils/platformRegion'
 
@@ -192,6 +193,20 @@ function nodeStateLabel(node: AccessNode): string {
 function sessionClass(account: Account): string {
   if (account.session_state === 'valid') return 'ok'
   return account.session_state === 'invalid' ? 'danger' : 'info'
+}
+
+function accountBlockText(account: Account): string {
+  if (account.session_state === 'invalid') return targetReasonText('session_invalid')
+  return ''
+}
+
+function nodeBlockText(node: AccessNode): string {
+  if (node.state === 'unavailable' || node.state === 'validating' || !nodeIsUsableAt(node, now.value)) {
+    return targetReasonText('egress_unavailable')
+  }
+  if (node.region === 'domestic') return targetReasonText('egress_cn_blocked')
+  if (!accountsOfNode(node).length) return targetReasonText('resource_incomplete')
+  return ''
 }
 
 interface Gap {
@@ -397,7 +412,10 @@ async function submitBind() {
             <tr v-for="account in accounts" :key="account.id">
               <td>{{ account.alias }}</td>
               <td>{{ platformLabel(account.platform) }}</td>
-              <td><span class="badge" :class="sessionClass(account)">{{ sessionStateText(account.session_state) }}</span></td>
+              <td>
+                <span class="badge" :class="sessionClass(account)">{{ sessionStateText(account.session_state) }}</span>
+                <div v-if="accountBlockText(account)" class="block-hint">{{ accountBlockText(account) }}</div>
+              </td>
               <td class="num">{{ fmtAgo(account.last_checked_at ?? null) }}</td>
               <td class="ops">
                 <button class="btn sm" @click="accountEdit = { account, alias: account.alias, session: '' }">编辑</button>
@@ -433,7 +451,10 @@ async function submitBind() {
             <tr v-for="node in nodes" :key="node.id">
               <td>{{ node.name }}</td>
               <td>{{ lineOf(node) }}</td>
-              <td><span class="badge" :class="stateClass(node)">{{ nodeStateLabel(node) }}</span></td>
+              <td>
+                <span class="badge" :class="stateClass(node)">{{ nodeStateLabel(node) }}</span>
+                <div v-if="nodeBlockText(node)" class="block-hint">{{ nodeBlockText(node) }}</div>
+              </td>
               <td>
                 <span class="num">{{ node.exit?.address ?? '未填' }}</span>
                 <div v-if="node.exit" class="muted">有效期至 {{ fmtTime(node.exit.valid_until) }}</div>
@@ -652,4 +673,5 @@ async function submitBind() {
 }
 .link-x:hover { color: var(--danger); }
 table.data td { white-space: normal; }
+.block-hint { margin-top: 4px; font-size: 11px; color: var(--warn); font-family: var(--sans); }
 </style>
