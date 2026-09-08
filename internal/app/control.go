@@ -257,6 +257,9 @@ func workerWaitLess(left, right collection.WorkerWait) bool {
 	if left.Reason != right.Reason {
 		return left.Reason < right.Reason
 	}
+	if left.BlockOrErr != right.BlockOrErr {
+		return left.BlockOrErr < right.BlockOrErr
+	}
 	return left.Side < right.Side
 }
 

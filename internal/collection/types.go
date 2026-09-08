@@ -173,6 +173,8 @@ const (
 	TargetReasonNoCombination        TargetReason = "no_combination"
 	TargetReasonCooldown             TargetReason = "cooldown"
 	TargetReasonEgressUnavailable    TargetReason = "egress_unavailable"
+	TargetReasonEgressCNBlocked      TargetReason = "egress_cn_blocked"
+	TargetReasonResourceIncomplete   TargetReason = "resource_incomplete"
 	TargetReasonMissingRatePolicy    TargetReason = "missing_rate_policy"
 	TargetReasonSessionInvalid       TargetReason = "session_invalid"
 	TargetReasonInvalidConfig        TargetReason = "invalid_config"
@@ -191,6 +193,8 @@ func (reason TargetReason) Validate() error {
 		TargetReasonNoCombination,
 		TargetReasonCooldown,
 		TargetReasonEgressUnavailable,
+		TargetReasonEgressCNBlocked,
+		TargetReasonResourceIncomplete,
 		TargetReasonMissingRatePolicy,
 		TargetReasonSessionInvalid,
 		TargetReasonInvalidConfig,

@@ -24,8 +24,11 @@ type targetResponse struct {
 	Actual        collection.ActualState  `json:"actual"`
 	SwitchVersion collection.Revision     `json:"switch_version"`
 	Reason        collection.TargetReason `json:"reason,omitempty"`
+	BlockOrErr    collection.BlockOrErr   `json:"block_or_err,omitempty"`
+	BlockReason   collection.BlockOrErr   `json:"block_reason,omitempty"`
 	Recovery      collection.RecoveryMode `json:"recovery,omitempty"`
 	RecheckAt     *time.Time              `json:"recheck_at,omitempty"`
+	RetryAfterSec int                     `json:"retry_after_sec,omitempty"`
 	ChangedAt     time.Time               `json:"changed_at"`
 	// 采集顺序决定补货从哪一头开始，改它会清空该方向队列。
 	SortColumn collection.SortColumn    `json:"sort_column"`
@@ -116,7 +119,10 @@ type workerResponse struct {
 type workerWaitResponse struct {
 	Scope         collection.WorkerWaitScope  `json:"scope"`
 	Reason        collection.WorkerWaitReason `json:"reason"`
+	BlockOrErr    collection.BlockOrErr       `json:"block_or_err,omitempty"`
+	BlockReason   collection.BlockOrErr       `json:"block_reason,omitempty"`
 	RetryAt       time.Time                   `json:"retry_at"`
+	RetryAfterSec int                         `json:"retry_after_sec,omitempty"`
 	Platform      collection.Platform         `json:"platform"`
 	Endpoint      string                      `json:"endpoint,omitempty"`
 	Side          market.Side                 `json:"side,omitempty"`
@@ -308,8 +314,10 @@ func toWorkerResponse(worker collection.WorkerSnapshot) workerResponse {
 		out.Claim = claim
 	}
 	for _, wait := range worker.ActiveWaits {
+		code := wait.EffectiveBlock()
 		out.ActiveWaits = append(out.ActiveWaits, workerWaitResponse{
-			Scope: wait.Scope, Reason: wait.Reason, RetryAt: wait.RetryAt,
+			Scope: wait.Scope, Reason: wait.Reason, BlockOrErr: code, BlockReason: code,
+			RetryAt: wait.RetryAt, RetryAfterSec: collection.RetryAfterSec(wait.RetryAt, time.Now()),
 			Platform: wait.Platform, Endpoint: string(wait.Endpoint), Side: wait.Side,
 			AccountID: int64(wait.AccountID), ExitAddress: wait.ExitAddress,
 			NodeID: int64(wait.NodeID), CombinationID: int64(wait.CombinationID),
@@ -361,8 +369,13 @@ func toTargetResponse(target collection.Target) targetResponse {
 		SteamCats:     jsonStrings(target.SteamFacets().Cats),
 		ItemClasses:   jsonStrings(target.SteamFacets().Classes),
 	}
+	if code := collection.TargetBlockOrErr(target); code != "" {
+		out.BlockOrErr = code
+		out.BlockReason = code
+	}
 	if hasRecheck {
 		out.RecheckAt = &recheck
+		out.RetryAfterSec = collection.RetryAfterSec(recheck, time.Now())
 	}
 	return out
 }

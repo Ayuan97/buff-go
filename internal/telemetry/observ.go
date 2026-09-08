@@ -77,6 +77,14 @@ type Event struct {
 	Account  string
 	JobKey   string
 	LeaseID  string
+	// TaskID / AccountID / NodeID are numeric identities and are logged as-is.
+	TaskID    int64
+	AccountID int64
+	NodeID    int64
+	// Direction is sell|buy. BlockOrErr is the stable control-plane code.
+	Direction     string
+	BlockOrErr    string
+	RetryAfterSec int
 	// Count is a non-negative payload (offers fetched, quotes written, etc.).
 	Count int64
 	// Extra free-form note (error text, cooldown duration, etc.).
@@ -340,6 +348,26 @@ func (l *Log) Record(e Event) {
 	if e.LeaseID != "" {
 		b.WriteString(" lease_ref=")
 		b.WriteString(e.LeaseID)
+	}
+	if e.TaskID != 0 {
+		fmt.Fprintf(&b, " task_id=%d", e.TaskID)
+	}
+	if e.AccountID != 0 {
+		fmt.Fprintf(&b, " account_id=%d", e.AccountID)
+	}
+	if e.Direction != "" {
+		b.WriteString(" direction=")
+		b.WriteString(quoteField(e.Direction))
+	}
+	if e.BlockOrErr != "" {
+		b.WriteString(" block_or_err=")
+		b.WriteString(quoteField(e.BlockOrErr))
+	}
+	if e.NodeID != 0 {
+		fmt.Fprintf(&b, " node_id=%d", e.NodeID)
+	}
+	if e.RetryAfterSec != 0 {
+		fmt.Fprintf(&b, " retry_after_sec=%d", e.RetryAfterSec)
 	}
 	if e.Count != 0 {
 		fmt.Fprintf(&b, " count=%d", e.Count)

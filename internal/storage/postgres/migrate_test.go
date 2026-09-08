@@ -15,8 +15,8 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 26 {
-		t.Fatalf("migration count = %d, want 26", len(migrations))
+	if len(migrations) != 27 {
+		t.Fatalf("migration count = %d, want 27", len(migrations))
 	}
 	wantVersions := []string{
 		"000001_catalog_market",
@@ -45,6 +45,7 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		"000024_latest_page_switch",
 		"000025_collection_owner_epoch",
 		"000026_reject_documentation_exit",
+		"000027_target_block_codes",
 	}
 	for index, current := range migrations {
 		if current.Version != wantVersions[index] {
@@ -57,6 +58,24 @@ func TestEmbeddedMigrationManifest(t *testing.T) {
 		if len(current.Checksum) != 64 {
 			t.Fatalf("migration %q checksum length = %d", current.Version, len(current.Checksum))
 		}
+	}
+}
+
+func TestTargetBlockCodesMigration(t *testing.T) {
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := migrationByVersion(t, migrations, "000027_target_block_codes")
+	compact := compactSQL(current.SQL)
+	for _, required := range []string{
+		"drop constraint collection_targets_reason_valid",
+		"drop constraint collection_targets_diagnostic_shape",
+		"egress_cn_blocked",
+		"resource_incomplete",
+		"reason_code in ('no_combination', 'cooldown', 'egress_unavailable', 'egress_cn_blocked', 'resource_incomplete')",
+	} {
+		assertContains(t, compact, required)
 	}
 }
 

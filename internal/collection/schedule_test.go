@@ -1219,8 +1219,63 @@ func TestScheduleTimeoutHasDistinctNodeRetryReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(report.Workers) != 1 || report.Workers[0].retryKind != workerRetryNode ||
-		report.Workers[0].retryReason != WorkerWaitReasonTimeout {
+		report.Workers[0].retryReason != WorkerWaitReasonTimeout ||
+		report.Workers[0].BlockOrErr != BlockTimeout {
 		t.Fatalf("timeout worker = %+v", report.Workers)
+	}
+}
+
+func TestScheduleCollectErrorCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code BlockOrErr
+	}{
+		{name: "http 5xx", err: ErrFetchHTTP5xx, code: BlockHTTP5xx},
+		{name: "parse", err: ErrFetchParse, code: BlockParseFail},
+		{name: "auth", err: ErrFetchAuth, code: BlockAuthFail},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newScheduleHarness(t, nil)
+			harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+			harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+			harness.fetcher.hook = func(PageFetch) error { return test.err }
+			report, err := harness.scheduler.RunCycle(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Workers) != 1 || report.Workers[0].BlockOrErr != test.code {
+				t.Fatalf("workers=%+v want %q", report.Workers, test.code)
+			}
+		})
+	}
+}
+
+func TestScheduleReportsLeaseHeld(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.addCombination(2, "steam", netip.MustParseAddr("2.2.2.3"))
+	harness.store.mu.Lock()
+	first := harness.store.resources[1]
+	harness.store.mu.Unlock()
+	harness.mutateCombination(2, func(resources *resource.CombinationResources) {
+		resources.Combination.NodeID = first.Node.ID
+		resources.Node = first.Node
+	})
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := 0
+	for _, worker := range report.Workers {
+		if worker.BlockOrErr == BlockLeaseHeld {
+			held++
+		}
+	}
+	if held != 1 {
+		t.Fatalf("lease_held workers=%+v", report.Workers)
 	}
 }
 
@@ -1643,23 +1698,27 @@ func TestScheduleRejectsExpiredEgress(t *testing.T) {
 func TestScheduleClassifiesUnavailableEgressStates(t *testing.T) {
 	tests := []struct {
 		name   string
+		reason TargetReason
 		mutate func(*resource.CombinationResources)
 	}{
 		{
-			name: "region mismatch",
+			name:   "region mismatch",
+			reason: TargetReasonEgressUnavailable,
 			mutate: func(resources *resource.CombinationResources) {
 				resources.Node.Region = resource.NodeRegionForeign
 			},
 		},
 		{
-			name: "exit not verified",
+			name:   "exit not verified",
+			reason: TargetReasonResourceIncomplete,
 			mutate: func(resources *resource.CombinationResources) {
 				resources.Node.State = resource.NodeStateValidating
 				resources.Node.ExitVerification = nil
 			},
 		},
 		{
-			name: "node unavailable",
+			name:   "node unavailable",
+			reason: TargetReasonResourceIncomplete,
 			mutate: func(resources *resource.CombinationResources) {
 				resources.Node.State = resource.NodeStateUnavailable
 				resources.Node.ExitVerification = nil
@@ -1677,9 +1736,23 @@ func TestScheduleClassifiesUnavailableEgressStates(t *testing.T) {
 			if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressUnavailable)
+			requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, test.reason)
 		})
 	}
+}
+
+func TestScheduleBlocksDomesticEgressForForeignSteam(t *testing.T) {
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		profile := config.Profiles[PlatformSteam]
+		profile.TargetRegion = resource.TargetRegionForeign
+		config.Profiles[PlatformSteam] = profile
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressCNBlocked)
 }
 
 func TestScheduleAllowsUnverifiedSession(t *testing.T) {
@@ -1747,7 +1820,7 @@ func TestScheduleMixedFailuresPreferEgressUnavailable(t *testing.T) {
 	if _, err := harness.scheduler.RunCycle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonEgressUnavailable)
+	requireTargetState(t, harness.store.target(target.ID()), ActualBlocked, TargetReasonResourceIncomplete)
 }
 
 func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
@@ -1773,8 +1846,8 @@ func TestScheduleRateLimitSignalFeedsBack(t *testing.T) {
 	for _, worker := range report.Workers {
 		if worker.Committed {
 			committed++
-		} else if worker.retryReason != WorkerWaitReasonRateLimit {
-			t.Fatalf("rate signal reason = %q", worker.retryReason)
+		} else if worker.retryReason != WorkerWaitReasonRateLimit || worker.BlockOrErr != BlockHTTP429 {
+			t.Fatalf("rate signal reason = %q block=%q", worker.retryReason, worker.BlockOrErr)
 		} else if worker.RetryAt.Before(startedAt.Add(59 * time.Second)) {
 			t.Fatalf("rate signal retry_at = %s", worker.RetryAt)
 		}
@@ -1806,7 +1879,8 @@ func TestScheduleRateLimitDefersWorkerWithoutBlockingTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Workers) != 1 || report.Workers[0].retryReason != WorkerWaitReasonDeferred {
+	if len(report.Workers) != 1 || report.Workers[0].retryReason != WorkerWaitReasonDeferred ||
+		report.Workers[0].BlockOrErr != BlockHTTP429 {
 		t.Fatalf("deferred workers = %+v", report.Workers)
 	}
 	if len(harness.fetcher.calls) != 0 || harness.store.queuedCount() != QueueWatermark {

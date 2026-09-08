@@ -77,6 +77,8 @@ export interface Target {
   actual: ActualState
   switch_version: number
   reason?: string
+  block_or_err?: string
+  block_reason?: string
   recovery?: string
   sort_column: SortColumn
   sort_dir: SortDirection
@@ -85,6 +87,7 @@ export interface Target {
   steam_cats: string[]
   item_classes: string[]
   recheck_at?: string
+  retry_after_sec?: number
   changed_at: string
 }
 
@@ -114,7 +117,10 @@ export type WorkerWaitReason = 'rate_limit' | 'deferred' | 'network' | 'timeout'
 export interface WorkerWait {
   scope: WorkerWaitScope
   reason: WorkerWaitReason
+  block_or_err?: string
+  block_reason?: string
   retry_at: string
+  retry_after_sec?: number
   platform: string
   endpoint?: string
   side?: Side

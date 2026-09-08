@@ -19,6 +19,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
 import {
   apiErrorText,
+  fmtRetryAfter,
   fmtTime,
   fmtUntil,
   gameFullName,
@@ -35,7 +36,9 @@ type SideDraft = {
   enabled: boolean
   actual: ActualState
   reason: string | null
+  blockOrErr: string | null
   recheckAt: string | null
+  retryAfterSec: number | null
   nodeIds: number[]
   usableNodeIds: number[]
   combinationCount: number
@@ -150,8 +153,10 @@ function makeSide(
   return {
     enabled: target?.desired === 'enabled',
     actual: target?.actual ?? 'stopped',
-    reason: target?.reason ?? null,
+    reason: target?.block_or_err || target?.reason || null,
+    blockOrErr: target?.block_or_err ?? null,
     recheckAt: target?.recheck_at ?? null,
+    retryAfterSec: target?.retry_after_sec ?? null,
     nodeIds: capacity.nodeIds,
     usableNodeIds: capacity.usableNodeIds,
     combinationCount: capacity.combinationCount,
@@ -513,8 +518,8 @@ function onConfirm() {
                       :title="fmtTime(sideOf(p, side).recheckAt)"
                     >
                       {{ targetReasonText(sideOf(p, side).reason) }}
-                      <span v-if="fmtUntil(sideOf(p, side).recheckAt)" class="muted">
-                        · {{ fmtUntil(sideOf(p, side).recheckAt) }}
+                      <span v-if="fmtRetryAfter(sideOf(p, side).retryAfterSec) || fmtUntil(sideOf(p, side).recheckAt)" class="muted">
+                        · {{ fmtRetryAfter(sideOf(p, side).retryAfterSec) || fmtUntil(sideOf(p, side).recheckAt) }}
                       </span>
                     </div>
                   </div>

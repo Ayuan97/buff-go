@@ -392,6 +392,40 @@ func TestFetchAskRateLimitAndLogin(t *testing.T) {
 	}
 }
 
+func TestFetchAskMapsStableHTTPFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{name: "auth", status: http.StatusForbidden, body: "denied", want: collection.ErrFetchAuth},
+		{name: "5xx", status: http.StatusBadGateway, body: "down", want: collection.ErrFetchHTTP5xx},
+		{name: "parse", status: http.StatusOK, body: "{", want: collection.ErrFetchParse},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if test.status != http.StatusOK {
+					w.WriteHeader(test.status)
+				}
+				_, _ = io.WriteString(w, test.body)
+			}))
+			t.Cleanup(server.Close)
+			fetcher := mustFetcher(t, server.URL, stubCatalog{})
+			_, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+				TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+				AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+				AdmitRequest:   admitTestRequest,
+				RequestStarted: func() {},
+			})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want %v", err, test.want)
+			}
+		})
+	}
+}
+
 func TestFetchReportsSessionRecorderFailures(t *testing.T) {
 	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

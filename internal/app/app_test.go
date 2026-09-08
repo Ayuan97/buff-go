@@ -417,6 +417,7 @@ func TestCollectionDaemonObserversRecordSafeFailures(t *testing.T) {
 	}
 	worker := events[2]
 	if worker.Platform != "steam" || worker.Source != "collection.worker.market_summary" || worker.AppID != 730 ||
+		worker.TaskID != 10 || worker.AccountID != 8 || worker.NodeID != 9 || worker.Direction != "sell" ||
 		!strings.HasPrefix(worker.WorkerID, "worker_v1_") ||
 		!strings.HasPrefix(worker.Account, "account_v1_") ||
 		!strings.HasPrefix(worker.Proxy, "node_v1_") ||

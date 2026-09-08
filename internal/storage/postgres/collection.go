@@ -720,7 +720,8 @@ func validTargetTransition(transition TargetTransition) bool {
 			transition.Reason == collection.TargetReasonTransientFailure) && automaticTime()
 	case collection.ActualBlocked:
 		switch transition.Reason {
-		case collection.TargetReasonNoCombination, collection.TargetReasonCooldown, collection.TargetReasonEgressUnavailable:
+		case collection.TargetReasonNoCombination, collection.TargetReasonCooldown, collection.TargetReasonEgressUnavailable,
+			collection.TargetReasonEgressCNBlocked, collection.TargetReasonResourceIncomplete:
 			return automaticTime()
 		case collection.TargetReasonMissingRatePolicy, collection.TargetReasonSessionInvalid,
 			collection.TargetReasonInvalidConfig, collection.TargetReasonInterfaceUnverified:

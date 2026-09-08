@@ -24,6 +24,8 @@ type collectionServiceStub struct {
 	bounds  collection.PriceRange
 	facets  collection.SteamFacets
 	err     error
+	list    []collection.Target
+	workers []collection.WorkerSnapshot
 }
 
 func (s *collectionServiceStub) sample() collection.Target {
@@ -44,6 +46,9 @@ func (s *collectionServiceStub) sample() collection.Target {
 func (s *collectionServiceStub) ListTargets(context.Context) ([]collection.Target, error) {
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.list != nil {
+		return s.list, nil
 	}
 	return []collection.Target{s.sample()}, nil
 }
@@ -125,6 +130,9 @@ func (s *collectionServiceStub) DeleteTarget(_ context.Context, id collection.Ta
 func (s *collectionServiceStub) ListWorkers(context.Context) ([]collection.WorkerSnapshot, error) {
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.workers != nil {
+		return s.workers, nil
 	}
 	cents := int64(21)
 	return []collection.WorkerSnapshot{{
@@ -268,6 +276,82 @@ func TestCollectionRoutes(t *testing.T) {
 	if len(targets.facets.Cats) != 1 || targets.facets.Cats[0] != "steamcat.armor" ||
 		len(targets.facets.Classes) != 1 || targets.facets.Classes[0] != "hoodie" {
 		t.Fatalf("steam facets = %+v", targets.facets)
+	}
+}
+
+func TestControlPlaneExposesStableBlockFields(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	recheck := now.Add(90 * time.Second)
+	blocked, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
+		ID: 4, Revision: 2, Platform: "steam", AppID: 730, Side: market.SideAsk,
+		Desired: collection.DesiredEnabled, Actual: collection.ActualBlocked,
+		SwitchVersion: 2, Reason: collection.TargetReasonSessionInvalid,
+		Recovery: collection.RecoveryManual,
+		ChangedAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := collection.NewSummaryTarget(collection.SummaryTargetInput{
+		ID: 5, Revision: 2, Platform: "steam", AppID: 730, Side: market.SideBid,
+		Desired: collection.DesiredEnabled, Actual: collection.ActualWaiting,
+		SwitchVersion: 2, Reason: collection.TargetReasonNextCycle,
+		Recovery: collection.RecoveryAutomatic, RecheckAt: &recheck,
+		ChangedAt: now.Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &collectionServiceStub{}
+	stub.list = []collection.Target{blocked, waiting}
+	stub.workers = []collection.WorkerSnapshot{{
+		Combination: resource.AccountNodeCombination{ID: 1, Platform: "steam", AccountID: 2, NodeID: 3},
+		AccountAlias: "steam", SessionState: resource.AccountSessionStateValid,
+		ActiveWaits: []collection.WorkerWait{{
+			Scope: collection.WorkerWaitScopeRate, Reason: collection.WorkerWaitReasonRateLimit,
+			BlockOrErr: collection.BlockHTTP429, RetryAt: time.Now().UTC().Add(45 * time.Second),
+			Platform: "steam", AccountID: 2,
+		}},
+	}}
+	handler := NewHandlerForAuthority(nil, "", ControlServices{Collection: stub})
+
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/targets", nil)
+	request.Host = "localhost"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("targets status=%d body=%s", response.Code, response.Body.String())
+	}
+	var targets []map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &targets); err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0]["block_or_err"] != "session_invalid" ||
+		targets[0]["block_reason"] != "session_invalid" {
+		t.Fatalf("targets=%v", targets)
+	}
+	if targets[1]["retry_after_sec"] == nil || targets[1]["retry_after_sec"].(float64) < 1 {
+		t.Fatalf("waiting retry_after_sec=%v", targets[1]["retry_after_sec"])
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/api/workers", nil)
+	request.Host = "localhost"
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("workers status=%d body=%s", response.Code, response.Body.String())
+	}
+	var workers []map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &workers); err != nil {
+		t.Fatal(err)
+	}
+	waits, _ := workers[0]["active_waits"].([]any)
+	wait, _ := waits[0].(map[string]any)
+	if wait["block_or_err"] != "http_429" || wait["block_reason"] != "http_429" {
+		t.Fatalf("wait=%v", wait)
+	}
+	if wait["retry_after_sec"] == nil || wait["retry_after_sec"].(float64) < 1 {
+		t.Fatalf("wait retry_after_sec=%v", wait["retry_after_sec"])
 	}
 }
 

@@ -180,7 +180,7 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *Client, request collecti
 	for _, item := range parsed.Results {
 		attempt, err := searchAttempt(request.AppID, item, collectedAt)
 		if err != nil {
-			return collection.FetchedPage{}, err
+			return collection.FetchedPage{}, fmt.Errorf("%w: %w", collection.ErrFetchParse, err)
 		}
 		attempts = append(attempts, attempt)
 	}
@@ -387,13 +387,22 @@ func (f *Fetcher) mapClientError(
 				Reason:    ratelimit.ReasonHTTP429,
 			}
 		}
+		if responseErr.StatusCode == http.StatusUnauthorized || responseErr.StatusCode == http.StatusForbidden {
+			return collection.ErrFetchAuth
+		}
+		if responseErr.StatusCode >= 500 && responseErr.StatusCode <= 599 {
+			return fmt.Errorf("%w: %d", collection.ErrFetchHTTP5xx, responseErr.StatusCode)
+		}
 		return err
 	}
 	var networkErr *NetworkError
 	if errors.As(err, &networkErr) {
 		return fmt.Errorf("%w: %v", collection.ErrFetchNetwork, networkErr.Err)
 	}
-	return err
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", collection.ErrFetchParse, err)
 }
 
 func (f *Fetcher) recordSession(ctx context.Context, lease resource.Lease, valid bool) error {
