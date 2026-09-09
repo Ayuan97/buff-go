@@ -111,13 +111,15 @@ func cookieHeader(raw []byte) (string, error) {
 }
 
 func newHTTPClient(proxy string) (*http.Client, error) {
-	if proxy != "" {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if proxy == "" {
+		// 直连必须走本机出口。Clone() 会带上 ProxyFromEnvironment，会把直连节点
+		// 偷偷送进 HTTP_PROXY，出口证据和实际出口就对不上了。
+		transport.Proxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+	} else {
 		if err := resource.ValidateProxyCredential([]byte(proxy)); err != nil {
 			return nil, fmt.Errorf("proxy URL: %w", err)
 		}
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if proxy != "" {
 		proxyURL, err := url.Parse(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("proxy URL is invalid")

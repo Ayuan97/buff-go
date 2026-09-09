@@ -157,7 +157,24 @@ func (s *Store) ApplyRateLimitFeedback(
 		return err
 	}
 
-	feedback, err := s.rateLimitSigner.Feedback(admission, scopes, reason, effectiveNow, cooldown)
+	duration := cooldown
+	if existing, ok := admission.PeekFeedback(); ok && duration == 0 {
+		duration = existing.Cooldown()
+	} else if duration == 0 && reason == ratelimit.ReasonHTTP429 {
+		var escalated time.Duration
+		for index, rule := range rules {
+			previous := time.Duration(0)
+			if index < len(states) {
+				previous = http429CooldownFromState(states[index])
+			}
+			next := ratelimit.NextHTTP429Cooldown(previous, rule.FallbackCooldown())
+			if next > escalated {
+				escalated = next
+			}
+		}
+		duration = escalated
+	}
+	feedback, err := s.rateLimitSigner.Feedback(admission, scopes, reason, effectiveNow, duration)
 	if err != nil {
 		return err
 	}
@@ -179,6 +196,104 @@ func (s *Store) ApplyRateLimitFeedback(
 	}
 	if err := tx.Commit(); err != nil {
 		return ErrRateLimitStorage
+	}
+	return nil
+}
+
+// ClearRateLimitStrike 在一次成功的平台 HTTP 之后清掉过期的 HTTP 429 连击窗口。
+// 仍在冷却中的窗口不能清，否则会把正在生效的长锁拆掉。
+func (s *Store) ClearRateLimitStrike(ctx context.Context, admission ratelimit.Admission) error {
+	if err := s.validateRateLimit(); err != nil {
+		return err
+	}
+	if err := s.rateLimitSigner.Verify(admission); err != nil {
+		return err
+	}
+	rules := admission.Rules()
+	if len(rules) == 0 {
+		return nil
+	}
+	request := admission.Request()
+	tx, err := s.beginRateLimitStateTx(ctx, request.Platform())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := requireCollectionOwner(ctx, tx); err != nil {
+		if errors.Is(err, collection.ErrOwnerFence) {
+			return err
+		}
+		return ErrRateLimitStorage
+	}
+
+	policies := make([]ratelimit.Policy, len(rules))
+	states := make([]RateLimitState, len(rules))
+	for index, rule := range rules {
+		policy, err := selectRateLimitPolicyForFeedback(ctx, tx, rule)
+		if err != nil {
+			return err
+		}
+		policies[index] = policy
+	}
+	for index, policy := range policies {
+		state, err := selectRateLimitStateForUpdate(ctx, tx, policy, request, true)
+		if err != nil {
+			return err
+		}
+		states[index] = state
+	}
+	effectiveNow, err := rateLimitLockedEffectiveNow(ctx, tx, states)
+	if err != nil {
+		return err
+	}
+	for index := range states {
+		if err := clearExpiredHTTP429Cooldown(ctx, tx, states[index], policies[index], effectiveNow); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ErrRateLimitStorage
+	}
+	return nil
+}
+
+func http429CooldownFromState(state RateLimitState) time.Duration {
+	if state.CooldownUntil == nil || state.CooldownObservedAt == nil {
+		return 0
+	}
+	return ratelimit.HTTP429CooldownDuration(*state.CooldownUntil, *state.CooldownObservedAt, state.CooldownReason)
+}
+
+func clearExpiredHTTP429Cooldown(
+	ctx context.Context,
+	tx *sql.Tx,
+	state RateLimitState,
+	policy ratelimit.Policy,
+	now time.Time,
+) error {
+	if state.StateID == 0 || state.CooldownReason != ratelimit.ReasonHTTP429 {
+		return nil
+	}
+	if state.CooldownUntil != nil && state.CooldownUntil.After(now) {
+		return nil
+	}
+	_, err := scanRateLimitState(tx.QueryRowContext(ctx, `
+UPDATE rate_limit_states
+SET clock_floor_at = GREATEST(clock_floor_at, $3),
+    cooldown_until = NULL,
+    cooldown_observed_at = NULL,
+    cooldown_reason_code = NULL
+WHERE state_id = $1 AND policy_id = $2
+  AND cooldown_reason_code = 'http_429'
+  AND (cooldown_until IS NULL OR cooldown_until <= $3)
+RETURNING `+rateLimitStateColumns,
+		state.StateID, int64(policy.ID), now,
+	), policy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return mapRateLimitStateWriteError(err)
 	}
 	return nil
 }

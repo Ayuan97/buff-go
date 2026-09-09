@@ -42,6 +42,7 @@ type fakeScheduleStore struct {
 	failClearErr       error
 	failTransitionErr  error
 	failRequeueErr     error
+	failCompleteErr    error
 	requeueHasDeadline bool
 	requeueContextErr  error
 	conflictTargets    map[TargetID]bool
@@ -453,6 +454,9 @@ func (store *fakeScheduleStore) ReleaseAllClaims(ctx context.Context) (int, erro
 func (store *fakeScheduleStore) CompleteTask(ctx context.Context, id TaskID, combinationID resource.CombinationID, claimGeneration int64) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.failCompleteErr != nil {
+		return store.failCompleteErr
+	}
 	task, ok := store.tasks[id]
 	if !ok {
 		return ErrConflict
@@ -764,8 +768,10 @@ type fakeAdmitter struct {
 	signer              *ratelimit.Signer
 	requests            []admitRecord
 	feedbacks           []feedbackRecord
+	clears              []ratelimit.Admission
 	feedbackHasDeadline bool
 	feedbackContextErr  error
+	clearHasDeadline    bool
 	script              func(index int, request ratelimit.Request) (ratelimit.Decision, error)
 }
 
@@ -823,6 +829,14 @@ func (admitter *fakeAdmitter) ApplyRateLimitFeedback(ctx context.Context, admiss
 	return nil
 }
 
+func (admitter *fakeAdmitter) ClearRateLimitStrike(ctx context.Context, admission ratelimit.Admission) error {
+	admitter.mu.Lock()
+	defer admitter.mu.Unlock()
+	_, admitter.clearHasDeadline = ctx.Deadline()
+	admitter.clears = append(admitter.clears, admission)
+	return nil
+}
+
 type fetchRecord struct {
 	kind       TaskKind
 	payload    string
@@ -869,13 +883,24 @@ func (fetcher *fakeFetcher) FetchPage(ctx context.Context, request PageFetch) (F
 		}
 	}
 	if fetcher.result != nil {
-		return *fetcher.result, nil
+		page := *fetcher.result
+		if !page.SkipMarketCommit() {
+			page.Admissions = append(append([]ratelimit.Admission(nil), page.Admissions...), admission)
+			if request.ConfirmRequest != nil {
+				request.ConfirmRequest(admission)
+			}
+		}
+		return page, nil
 	}
 	total := int64(200)
 	if request.Side == market.SideBid {
 		total = 0
 	}
-	return FetchedPage{Payload: []byte(`{}`), TotalCount: total}, nil
+	page := FetchedPage{Payload: []byte(`{}`), TotalCount: total, Admissions: []ratelimit.Admission{admission}}
+	if request.ConfirmRequest != nil {
+		request.ConfirmRequest(admission)
+	}
+	return page, nil
 }
 
 type scheduleHarness struct {
@@ -992,6 +1017,83 @@ func TestScheduleCommitsFetcherObservationTime(t *testing.T) {
 	harness.store.mu.Unlock()
 	if !page.CollectedAt().Equal(observedAt) {
 		t.Fatalf("committed collected_at=%v, want fetch observation time %v", page.CollectedAt(), observedAt)
+	}
+	harness.admitter.mu.Lock()
+	clears := len(harness.admitter.clears)
+	clearHasDeadline := harness.admitter.clearHasDeadline
+	harness.admitter.mu.Unlock()
+	if clears != 1 || !clearHasDeadline {
+		t.Fatalf("post-commit strike clears=%d deadline=%v", clears, clearHasDeadline)
+	}
+}
+
+func TestScheduleEmptyFetchCompletesWithoutCommit(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.result = &FetchedPage{}
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !report.Workers[0].Committed || report.Workers[0].Err != nil {
+		t.Fatalf("workers = %+v", report.Workers)
+	}
+	harness.store.mu.Lock()
+	_, wrote := harness.store.pages[target.ID()]
+	harness.store.mu.Unlock()
+	if wrote {
+		t.Fatal("empty fetch wrote a market page")
+	}
+}
+
+func TestScheduleCommitsSuccessfulFetchAfterPageTimeout(t *testing.T) {
+	now := scheduleNow()
+	observedAt := now.Add(-time.Minute)
+	harness := newScheduleHarness(t, func(config *SchedulerConfig) {
+		config.Clock = func() time.Time { return now }
+		config.PageTimeout = 20 * time.Millisecond
+	})
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	target := harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.hook = func(PageFetch) error {
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}
+	harness.fetcher.result = &FetchedPage{
+		Payload: []byte(`{}`), TotalCount: 1, CollectedAt: observedAt,
+	}
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || !report.Workers[0].Committed {
+		t.Fatalf("workers = %+v", report.Workers)
+	}
+	harness.store.mu.Lock()
+	page := harness.store.pages[target.ID()]
+	harness.store.mu.Unlock()
+	if !page.CollectedAt().Equal(observedAt) {
+		t.Fatalf("committed collected_at=%v", page.CollectedAt())
+	}
+}
+
+func TestScheduleEmptyFetchCompleteFailureRequeues(t *testing.T) {
+	harness := newScheduleHarness(t, nil)
+	harness.addCombination(1, "steam", netip.MustParseAddr("2.2.2.2"))
+	harness.store.addSummaryTarget(t, PlatformSteam, 730, market.SideAsk, DesiredEnabled)
+	harness.fetcher.result = &FetchedPage{}
+	completeErr := errors.New("complete failed")
+	harness.store.failCompleteErr = completeErr
+
+	report, err := harness.scheduler.RunCycle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Workers) != 1 || report.Workers[0].Committed || !errors.Is(report.Workers[0].Err, completeErr) {
+		t.Fatalf("workers = %+v", report.Workers)
 	}
 }
 

@@ -109,6 +109,7 @@ type CombinationResourceBatchStore interface {
 type RateLimitAdmitter interface {
 	AdmitRateLimit(ctx context.Context, request ratelimit.Request) (ratelimit.Decision, error)
 	ApplyRateLimitFeedback(ctx context.Context, admission ratelimit.Admission, scopes []ratelimit.Scope, reason ratelimit.ReasonCode, cooldown time.Duration) error
+	ClearRateLimitStrike(ctx context.Context, admission ratelimit.Admission) error
 }
 
 // PageFetch 是一次页面请求。页参数来自队列 payload，凭据由租约打开。
@@ -127,6 +128,8 @@ type PageFetch struct {
 	AdmitRequest func(context.Context) (ratelimit.Admission, error)
 	// RequestStarted 必须紧贴每次真实平台 HTTP 的发送动作调用。
 	RequestStarted func()
+	// ConfirmRequest 仅测试注入。生产路径在提交行情之后清 429 连击。
+	ConfirmRequest func(ratelimit.Admission)
 }
 
 // FetchedPage 是一次成功页面响应的规整结果。
@@ -136,6 +139,13 @@ type FetchedPage struct {
 	TotalCount int64
 	// CollectedAt is the persistent admission time immediately before HTTP.
 	CollectedAt time.Time
+	// Admissions 是本次页面里每一次成功 HTTP 的准入票，提交后再清连击。
+	Admissions []ratelimit.Admission
+}
+
+// SkipMarketCommit 表示没有发过 HTTP：空目录扫描可以完成任务，但不能伪造采集时间。
+func (page FetchedPage) SkipMarketCommit() bool {
+	return page.CollectedAt.IsZero() && len(page.Payload) == 0 && len(page.Attempts) == 0
 }
 
 // PageFetcher 由平台适配器实现，必须遵守请求 context 的取消与超时。
@@ -1589,15 +1599,27 @@ func (s *Scheduler) executeTask(
 	if err != nil {
 		return s.mapFetchError(ctx, lease, task, target, err, deadlineHit, outcome)
 	}
-	if fetchContextErr != nil || leaseContextErr != nil || ctx.Err() != nil {
-		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
-		outcome.Err = errors.Join(fetchContextErr, leaseContextErr, ctx.Err(), requeueErr)
-		if errors.Is(fetchContextErr, context.DeadlineExceeded) {
-			outcome.retryKind = workerRetryNode
-			outcome.retryReason = WorkerWaitReasonTimeout
-			outcome.RetryAt = s.now().Add(s.config.TransientRetry)
+	if fetched.SkipMarketCommit() {
+		if err := s.store.CompleteTask(ctx, task.ID(), lease.Snapshot.CombinationID, task.ClaimGeneration()); err != nil {
+			requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+			outcome.Err = errors.Join(err, requeueErr)
+			return outcome
 		}
+		outcome.Committed = true
 		return outcome
+	}
+	// HTTP 已经成功就提交。PageTimeout 落在收尾上不能把行情丢掉。
+	if fetched.CollectedAt.IsZero() && len(fetched.Attempts) == 0 && len(fetched.Payload) == 0 {
+		if fetchContextErr != nil || leaseContextErr != nil || ctx.Err() != nil {
+			requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+			outcome.Err = errors.Join(fetchContextErr, leaseContextErr, ctx.Err(), requeueErr)
+			if errors.Is(fetchContextErr, context.DeadlineExceeded) {
+				outcome.retryKind = workerRetryNode
+				outcome.retryReason = WorkerWaitReasonTimeout
+				outcome.RetryAt = s.now().Add(s.config.TransientRetry)
+			}
+			return outcome
+		}
 	}
 
 	cursorBefore, err := taskCursor(task)
@@ -1634,8 +1656,12 @@ func (s *Scheduler) executeTask(
 		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
+	for _, admission := range fetched.Admissions {
+		s.clearRateLimitStrike(ctx, admission)
+	}
 	if err := s.store.CompleteTask(ctx, task.ID(), lease.Snapshot.CombinationID, task.ClaimGeneration()); err != nil {
-		outcome.Err = err
+		requeueErr := s.requeueTask(ctx, task, lease.Snapshot.CombinationID)
+		outcome.Err = errors.Join(err, requeueErr)
 		return outcome
 	}
 	outcome.Committed = true
@@ -1822,6 +1848,15 @@ func (s *Scheduler) applyRateLimitFeedback(
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), schedulerCleanupTimeout)
 	defer cancel()
 	return s.admitter.ApplyRateLimitFeedback(cleanupCtx, admission, scopes, reason, cooldown)
+}
+
+func (s *Scheduler) clearRateLimitStrike(ctx context.Context, admission ratelimit.Admission) {
+	if s.admitter == nil || len(admission.Rules()) == 0 {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), schedulerCleanupTimeout)
+	defer cancel()
+	_ = s.admitter.ClearRateLimitStrike(cleanupCtx, admission)
 }
 
 func targetReadyAt(target Target, now time.Time) bool {

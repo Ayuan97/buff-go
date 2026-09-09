@@ -15,10 +15,7 @@ import (
 	"buff-go/internal/resource"
 )
 
-const (
-	defaultPageSize = 10
-	defaultBidBatch = collection.BidBatchSize
-)
+const defaultBidBatch = collection.BidBatchSize
 
 // CatalogSource lists Steam products in product_id order for bid scans.
 type CatalogSource interface {
@@ -63,7 +60,7 @@ func NewFetcher(opt Options) (*Fetcher, error) {
 	}
 	pageSize := opt.PageSize
 	if pageSize == 0 {
-		pageSize = defaultPageSize
+		pageSize = collection.AskPageSize
 	}
 	if pageSize < 1 {
 		return nil, fmt.Errorf("page size must be positive")
@@ -184,9 +181,11 @@ func (f *Fetcher) fetchAsk(ctx context.Context, client *Client, request collecti
 		}
 		attempts = append(attempts, attempt)
 	}
-	return collection.FetchedPage{
+	fetched := collection.FetchedPage{
 		Attempts: attempts, Payload: body, TotalCount: int64(parsed.TotalCount), CollectedAt: collectedAt,
-	}, nil
+	}
+	rememberAdmission(&fetched, request, admission)
+	return fetched, nil
 }
 
 func (f *Fetcher) fetchBid(ctx context.Context, client *Client, request collection.PageFetch) (collection.FetchedPage, error) {
@@ -199,8 +198,10 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *Client, request collecti
 		return collection.FetchedPage{}, err
 	}
 	if len(products) == 0 {
+		// 目录空了就不要发 HTTP，也不要伪造 CollectedAt。调度器会完成任务且不写行情。
 		return collection.FetchedPage{}, nil
 	}
+	page := collection.FetchedPage{}
 	attempts := make([]collection.AttemptWrite, 0, len(products))
 	var pageCollectedAt time.Time
 	for _, product := range products {
@@ -223,6 +224,7 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *Client, request collecti
 			return collection.FetchedPage{}, err
 		}
 		attempts = append(attempts, attempt)
+		rememberAdmission(&page, request, admission)
 		if pageCollectedAt.IsZero() {
 			pageCollectedAt = collectedAt
 		}
@@ -230,7 +232,9 @@ func (f *Fetcher) fetchBid(ctx context.Context, client *Client, request collecti
 	if err := f.recordSession(ctx, request.Lease, true); err != nil {
 		return collection.FetchedPage{}, fmt.Errorf("record steam session: %w", err)
 	}
-	return collection.FetchedPage{Attempts: attempts, CollectedAt: pageCollectedAt}, nil
+	page.Attempts = attempts
+	page.CollectedAt = pageCollectedAt
+	return page, nil
 }
 
 func searchAttempt(appID int64, item SearchResult, collectedAt time.Time) (collection.AttemptWrite, error) {
@@ -374,18 +378,21 @@ func (f *Fetcher) mapClientError(
 ) error {
 	var responseErr *ResponseError
 	if errors.As(err, &responseErr) {
-		if responseErr.StatusCode >= 300 && responseErr.StatusCode < 400 && looksLikeLogin(responseErr.Location) {
-			if recordErr := f.recordSession(ctx, lease, false); recordErr != nil {
-				return fmt.Errorf("record steam session: %w", recordErr)
-			}
-			return collection.ErrFetchSessionInvalid
-		}
 		if responseErr.StatusCode == http.StatusTooManyRequests {
 			return &collection.RateLimitSignal{
 				Admission: admission,
 				Scopes:    []ratelimit.Scope{ratelimit.ScopeAccountIP},
 				Reason:    ratelimit.ReasonHTTP429,
 			}
+		}
+		if responseErr.LoginPage || (responseErr.StatusCode >= 300 && responseErr.StatusCode < 400 && looksLikeLogin(responseErr.Location)) {
+			if recordErr := f.recordSession(ctx, lease, false); recordErr != nil {
+				return fmt.Errorf("record steam session: %w", recordErr)
+			}
+			return collection.ErrFetchSessionInvalid
+		}
+		if responseErr.StatusCode >= 500 || responseErr.HTML {
+			return fmt.Errorf("%w: steam http %d", collection.ErrFetchNetwork, responseErr.StatusCode)
 		}
 		return err
 	}
@@ -394,6 +401,16 @@ func (f *Fetcher) mapClientError(
 		return fmt.Errorf("%w: %v", collection.ErrFetchNetwork, networkErr.Err)
 	}
 	return err
+}
+
+func rememberAdmission(page *collection.FetchedPage, request collection.PageFetch, admission ratelimit.Admission) {
+	if page == nil || len(admission.Rules()) == 0 {
+		return
+	}
+	page.Admissions = append(page.Admissions, admission)
+	if request.ConfirmRequest != nil {
+		request.ConfirmRequest(admission)
+	}
 }
 
 func (f *Fetcher) recordSession(ctx context.Context, lease resource.Lease, valid bool) error {

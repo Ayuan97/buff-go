@@ -55,7 +55,7 @@ func newCollectionDaemon(store *postgres.Store, coordinator *resource.Coordinato
 	}
 	cycleObserver, recoveryObserver := collectionDaemonObservers(telemetry.NewLog())
 	daemon, err := collection.NewDaemon(scheduler, collection.DaemonConfig{
-		Interval:                     steamRequestInterval,
+		Interval:                     steamDaemonInterval,
 		PriceTickMaintenanceInterval: 24 * time.Hour,
 		ShutdownTimeout:              30 * time.Second,
 		LockVerifyTimeout:            3 * time.Second,

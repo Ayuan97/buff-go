@@ -1,6 +1,7 @@
 package steam
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -25,10 +26,11 @@ func admitTestRequest(context.Context) (ratelimit.Admission, error) {
 
 type stubOpener struct {
 	cookie string
+	proxy  string
 }
 
 func (s stubOpener) Open(context.Context, resource.Lease) (string, string, error) {
-	return s.cookie, "", nil
+	return s.cookie, s.proxy, nil
 }
 
 type stubCatalog struct {
@@ -507,6 +509,153 @@ func TestFetchBidForeignCurrencyMarksSessionInvalid(t *testing.T) {
 	})
 	if !errors.Is(err, collection.ErrFetchSessionInvalid) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFetchPagePassesLeaseProxyToTransport(t *testing.T) {
+	var gotProxy string
+	fetcher, err := NewFetcher(Options{
+		BaseURL: "https://steamcommunity.invalid",
+		Opener:  stubOpener{cookie: "steamLoginSecure=ok", proxy: "http://lease-proxy.example:8080"},
+		Catalog: stubCatalog{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetcher.transport = func(proxy string) (*http.Client, error) {
+		gotProxy = proxy
+		return &http.Client{Transport: &closeTrackingTransport{
+			body: `{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`,
+		}}, nil
+	}
+	if _, err := fetcher.FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gotProxy != "http://lease-proxy.example:8080" {
+		t.Fatalf("proxy=%q", gotProxy)
+	}
+}
+
+func TestFetchAskHTMLIsNetworkNotSessionInvalid(t *testing.T) {
+	for _, body := range []string{
+		`<html><body>please login</body></html>`,
+		`<html><body>market unavailable</body></html>`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+			_, _ = io.WriteString(w, body)
+		}))
+		_, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+			TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+			AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+			AdmitRequest:   admitTestRequest,
+			RequestStarted: func() {},
+		})
+		server.Close()
+		if !errors.Is(err, collection.ErrFetchNetwork) || errors.Is(err, collection.ErrFetchSessionInvalid) {
+			t.Fatalf("body=%q err=%v", body, err)
+		}
+	}
+}
+
+func TestFetchAskRateLimitPrefers429OverLoginLocation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://steamcommunity.com/login/home/")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+	_, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
+	})
+	var signal *collection.RateLimitSignal
+	if !errors.As(err, &signal) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFetchAskServerErrorIsNetwork(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	_, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
+	})
+	if !errors.Is(err, collection.ErrFetchNetwork) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFetchAskTruncatedBodyIsTransient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("a"), maxBodyBytes+1))
+	}))
+	t.Cleanup(server.Close)
+	_, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage,
+		AdmitRequest:   admitTestRequest,
+		RequestStarted: func() {},
+	})
+	if err == nil || errors.Is(err, collection.ErrFetchSessionInvalid) || errors.Is(err, collection.ErrFetchNetwork) {
+		t.Fatalf("truncated body err=%v", err)
+	}
+}
+
+func TestFetchBidEmptyCatalogSkipsHTTP(t *testing.T) {
+	admissions := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("empty catalog must not send HTTP")
+	}))
+	t.Cleanup(server.Close)
+	page, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideBid, Kind: collection.TaskKindBidBatch,
+		AdmitRequest: func(context.Context) (ratelimit.Admission, error) {
+			admissions++
+			return ratelimit.Admission{}, nil
+		},
+		RequestStarted: func() { t.Fatal("empty catalog must not start a request") },
+	})
+	if err != nil || admissions != 0 || !page.SkipMarketCommit() {
+		t.Fatalf("page=%+v admissions=%d err=%v", page, admissions, err)
+	}
+}
+
+func TestFetchAskConfirmRequestAfterSuccess(t *testing.T) {
+	admittedAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	lease, admission := mustAdmission(t, admittedAt)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"success":true,"start":0,"pagesize":10,"total_count":0,"results":[]}`)
+	}))
+	t.Cleanup(server.Close)
+	var confirmed int
+	_, err := mustFetcher(t, server.URL, stubCatalog{}).FetchPage(context.Background(), collection.PageFetch{
+		TaskType: collection.TaskTypeSummary, Platform: collection.PlatformSteam,
+		AppID: 730, Side: market.SideAsk, Kind: collection.TaskKindAskPage, Lease: lease,
+		AdmitRequest:   func(context.Context) (ratelimit.Admission, error) { return admission, nil },
+		RequestStarted: func() {},
+		ConfirmRequest: func(got ratelimit.Admission) {
+			if len(got.Rules()) != 1 {
+				t.Fatalf("confirmed rules=%d", len(got.Rules()))
+			}
+			confirmed++
+		},
+	})
+	if err != nil || confirmed != 1 {
+		t.Fatalf("confirmed=%d err=%v", confirmed, err)
 	}
 }
 

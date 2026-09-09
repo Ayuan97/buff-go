@@ -1,6 +1,7 @@
 package steam
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -55,10 +56,13 @@ func NewClient(opt ClientOptions) (*Client, error) {
 	return &Client{baseURL: baseURL, httpClient: opt.HTTPClient, cookie: strings.TrimSpace(opt.Cookie)}, nil
 }
 
-// ResponseError reports a non-200 Steam response without retaining its body.
+// ResponseError reports a Steam HTTP response that is not a usable JSON body.
 type ResponseError struct {
-	StatusCode int
-	Location   string
+	StatusCode  int
+	Location    string
+	ContentType string
+	HTML        bool
+	LoginPage   bool
 }
 
 func (err *ResponseError) Error() string {
@@ -94,7 +98,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, queryAc
 	if err != nil {
 		return nil, err
 	}
-	setBrowserHeaders(req)
+	c.setBrowserHeaders(req)
 	if c.cookie != "" {
 		req.Header.Set("Cookie", c.cookie)
 	}
@@ -109,12 +113,31 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, queryAc
 		return nil, &NetworkError{Err: err}
 	}
 	defer resp.Body.Close()
+	contentType := resp.Header.Get("Content-Type")
+	location := resp.Header.Get("Location")
 	if resp.StatusCode != http.StatusOK {
-		return nil, &ResponseError{StatusCode: resp.StatusCode, Location: resp.Header.Get("Location")}
+		return nil, &ResponseError{
+			StatusCode:  resp.StatusCode,
+			Location:    location,
+			ContentType: contentType,
+			LoginPage:   looksLikeLogin(location),
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return nil, &NetworkError{Err: err}
+	}
+	if len(body) > maxBodyBytes {
+		return nil, fmt.Errorf("steam response exceeded %d bytes", maxBodyBytes)
+	}
+	if looksLikeHTML(contentType, body) {
+		// JSON 接口返回 HTML 不是登录判定：导航里也有 login 链接。失效会话走 302。
+		return nil, &ResponseError{
+			StatusCode:  resp.StatusCode,
+			Location:    location,
+			ContentType: contentType,
+			HTML:        true,
+		}
 	}
 	return body, nil
 }
@@ -123,15 +146,23 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, queryAc
 const browserUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 
-func setBrowserHeaders(req *http.Request) {
+func (c *Client) setBrowserHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	req.Header.Set("Referer", defaultBaseURL+"/market/")
+	req.Header.Set("Referer", c.baseURL+"/market/")
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="139", "Not(A:Brand";v="24", "Google Chrome";v="139"`)
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+}
+
+func looksLikeHTML(contentType string, body []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(body)
+	return len(trimmed) > 0 && trimmed[0] == '<'
 }

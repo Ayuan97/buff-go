@@ -9,6 +9,7 @@ import (
 )
 
 const steamRequestInterval = 2 * time.Second
+const steamDaemonInterval = 2 * time.Second
 
 var obsoleteSteamRateLimitRuleKeys = []ratelimit.RuleKey{
 	"local_pacing",
@@ -30,10 +31,8 @@ type rateLimitPolicyStore interface {
 //     接口在 1.84 req/s 撞过 429、在 2.25 req/s 连打 4862 次没撞，容量不稳定
 //     （文档记为「287/394 不是稳定容量」），所以取一个明显低于两者的值。
 //   - ask 与 bid 使用不同接口桶；429 只冷却命中的接口、账号与出口 IP 组合。
-//   - 固定冷却 60s 是当前重试折中，不是精确恢复边界；已观测过更短和更长的锁。
-//
-// 代价是真撞上长锁时会每分钟白撞一次。要两头都准得按连续 429 次数退避，
-// 那需要在限频状态上记住连击次数。
+//   - 第一次 429 冷却 60s。再探仍 429 升到 3 分钟，第三次起 10 分钟封顶。
+//     成功 HTTP 清掉连击。
 func steamRateLimitSpecs() []ratelimit.PolicySpec {
 	return []ratelimit.PolicySpec{
 		{

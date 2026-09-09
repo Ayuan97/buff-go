@@ -413,6 +413,7 @@ func testRateLimitStorage(t *testing.T, dsn string) {
 	t.Run("same combination exit change", func(t *testing.T) { testRateLimitSameCombinationExitChange(t, dsn) })
 	t.Run("endpoint shares platform budget", func(t *testing.T) { testRateLimitEndpointPlatformBudget(t, dsn) })
 	t.Run("endpoint account-IP isolation", func(t *testing.T) { testRateLimitEndpointAccountIPIsolation(t, dsn) })
+	t.Run("http 429 consecutive backoff", func(t *testing.T) { testRateLimitHTTP429EscalatesUntilSuccess(t, dsn) })
 	t.Run("platforms isolate shared exit", func(t *testing.T) { testRateLimitPlatformIsolation(t, dsn) })
 	t.Run("post-lock database clock", func(t *testing.T) { testRateLimitPostLockClock(t, dsn) })
 	t.Run("strict rolling boundary", func(t *testing.T) { testRateLimitRollingBoundary(t, dsn) })
@@ -1265,6 +1266,125 @@ func testRateLimitEndpointAccountIPIsolation(t *testing.T, dsn string) {
 	}
 	if !found {
 		t.Fatalf("account-IP ask cooldown blocker missing: %+v", blocked.Blockers())
+	}
+}
+
+func testRateLimitHTTP429EscalatesUntilSuccess(t *testing.T, dsn string) {
+	store, db := newRateLimitTestStore(t, dsn)
+	fixture := newRateLimitRequestFixtureFor(t, store, "strike", netip.MustParseAddr("1.1.1.1"), "steam", "ask")
+	policy := createRateLimitPolicy(t, store, ratelimit.PolicySpec{
+		Platform: "steam", RuleKey: "ask_account_exit_strike", Scope: ratelimit.ScopeAccountIP,
+		EndpointClass: "ask", Kind: ratelimit.KindMinInterval,
+		MinInterval: time.Microsecond, DefaultCooldown: time.Minute,
+	})
+	makeRateLimitPolicyReady(t, db, policy.ID)
+
+	first, err := store.AdmitRateLimit(t.Context(), fixture.request)
+	if err != nil || !first.Allowed() {
+		t.Fatalf("first admit allowed=%v err=%v", first.Allowed(), err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		t.Context(), first.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	states, err := store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || len(states) != 1 || states[0].CooldownUntil == nil {
+		t.Fatalf("first 429 states=%+v err=%v", states, err)
+	}
+	if got := states[0].CooldownUntil.Sub(*states[0].CooldownObservedAt); got != time.Minute {
+		t.Fatalf("first 429 window=%s", got)
+	}
+
+	expireHTTP429Cooldown(t, db, policy.ID)
+	second, err := store.AdmitRateLimit(t.Context(), fixture.request)
+	if err != nil || !second.Allowed() {
+		t.Fatalf("second admit allowed=%v err=%v", second.Allowed(), err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		t.Context(), second.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || len(states) != 1 || states[0].CooldownUntil == nil {
+		t.Fatalf("second 429 states=%+v err=%v", states, err)
+	}
+	if got := states[0].CooldownUntil.Sub(*states[0].CooldownObservedAt); got != ratelimit.HTTP429RetryCooldown {
+		t.Fatalf("second 429 window=%s", got)
+	}
+
+	expireHTTP429Cooldown(t, db, policy.ID)
+	capped, err := store.AdmitRateLimit(t.Context(), fixture.request)
+	if err != nil || !capped.Allowed() {
+		t.Fatalf("third admit allowed=%v err=%v", capped.Allowed(), err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		t.Context(), capped.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || len(states) != 1 || states[0].CooldownUntil == nil {
+		t.Fatalf("third 429 states=%+v err=%v", states, err)
+	}
+	if got := states[0].CooldownUntil.Sub(*states[0].CooldownObservedAt); got != ratelimit.MaxHTTP429Cooldown {
+		t.Fatalf("third 429 window=%s", got)
+	}
+
+	if err := store.ClearRateLimitStrike(t.Context(), capped.Admission()); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || states[0].CooldownUntil == nil {
+		t.Fatalf("active cooldown was cleared states=%+v err=%v", states, err)
+	}
+
+	expireHTTP429Cooldown(t, db, policy.ID)
+	if err := store.ClearRateLimitStrike(t.Context(), capped.Admission()); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || states[0].CooldownUntil != nil || states[0].CooldownReason != "" {
+		t.Fatalf("expired 429 strike was not cleared states=%+v err=%v", states, err)
+	}
+
+	reset, err := store.AdmitRateLimit(t.Context(), fixture.request)
+	if err != nil || !reset.Allowed() {
+		t.Fatalf("reset admit allowed=%v err=%v", reset.Allowed(), err)
+	}
+	if err := store.ApplyRateLimitFeedback(
+		t.Context(), reset.Admission(), []ratelimit.Scope{ratelimit.ScopeAccountIP},
+		ratelimit.ReasonHTTP429, 0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	states, err = store.ListRateLimitStates(t.Context(), policy.ID)
+	if err != nil || len(states) != 1 || states[0].CooldownUntil == nil {
+		t.Fatalf("reset 429 states=%+v err=%v", states, err)
+	}
+	if got := states[0].CooldownUntil.Sub(*states[0].CooldownObservedAt); got != time.Minute {
+		t.Fatalf("reset 429 window=%s", got)
+	}
+}
+
+func expireHTTP429Cooldown(t *testing.T, db *sql.DB, id ratelimit.PolicyID) {
+	t.Helper()
+	// 只把窗口挪到过去，保留时长，否则下一次 429 会按错误的上一档升级。
+	result, err := db.ExecContext(t.Context(), `
+UPDATE rate_limit_states
+SET clock_floor_at = GREATEST(clock_floor_at, NOW()),
+    cooldown_observed_at = (NOW() - INTERVAL '1 second') - (cooldown_until - cooldown_observed_at),
+    cooldown_until = NOW() - INTERVAL '1 second'
+WHERE policy_id = $1`, int64(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("expire cooldown affected=%d err=%v", affected, err)
 	}
 }
 

@@ -792,3 +792,30 @@ func testCombinationLeaseWithCoordinator(
 	})
 	return coordinator, lease
 }
+
+func TestNextHTTP429Cooldown(t *testing.T) {
+	fallback := time.Minute
+	if got := NextHTTP429Cooldown(0, fallback); got != fallback {
+		t.Fatalf("first cooldown=%s", got)
+	}
+	if got := NextHTTP429Cooldown(fallback, fallback); got != HTTP429RetryCooldown {
+		t.Fatalf("second cooldown=%s", got)
+	}
+	if got := NextHTTP429Cooldown(HTTP429RetryCooldown, fallback); got != MaxHTTP429Cooldown {
+		t.Fatalf("third cooldown=%s", got)
+	}
+	if got := NextHTTP429Cooldown(MaxHTTP429Cooldown, fallback); got != MaxHTTP429Cooldown {
+		t.Fatalf("already capped cooldown=%s", got)
+	}
+	if got := NextHTTP429Cooldown(time.Minute, 0); got != 0 {
+		t.Fatalf("missing fallback cooldown=%s", got)
+	}
+	until := time.Date(2026, 8, 21, 12, 1, 0, 0, time.UTC)
+	observed := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	if got := HTTP429CooldownDuration(until, observed, ReasonHTTP429); got != time.Minute {
+		t.Fatalf("stored window=%s", got)
+	}
+	if got := HTTP429CooldownDuration(until, observed, ReasonRiskControl); got != 0 {
+		t.Fatalf("other reason window=%s", got)
+	}
+}

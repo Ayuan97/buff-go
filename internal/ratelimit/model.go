@@ -619,6 +619,21 @@ func (admission Admission) Rules() []AppliedRule {
 }
 func (admission Admission) AdmittedAt() time.Time { return admission.admittedAt }
 
+// PeekFeedback returns the frozen feedback command for an admission that has
+// already issued one. Apply-side retries must reuse that cooldown instead of
+// escalating from the row they just wrote.
+func (admission Admission) PeekFeedback() (Feedback, bool) {
+	if admission.feedback == nil {
+		return Feedback{}, false
+	}
+	admission.feedback.mu.Lock()
+	defer admission.feedback.mu.Unlock()
+	if !admission.feedback.issued {
+		return Feedback{}, false
+	}
+	return admission.feedback.feedback, true
+}
+
 // HasScope reports whether feedback may reference this evidenced scope.
 func (admission Admission) HasScope(scope Scope) bool {
 	for _, rule := range admission.rules {
@@ -819,7 +834,35 @@ type ReasonCode string
 const (
 	ReasonHTTP429     ReasonCode = "http_429"
 	ReasonRiskControl ReasonCode = "risk_control"
+	// HTTP429RetryCooldown 是第二次 429 的窗口，给首次 60s 短锁留余量。
+	HTTP429RetryCooldown = 3 * time.Minute
+	// MaxHTTP429Cooldown 是连续 429 上限。第三次起不再加长。
+	MaxHTTP429Cooldown = 10 * time.Minute
 )
+
+// NextHTTP429Cooldown 按 60s → 3min → 10min 分档，不用 1→2→4 指数。
+// 第一次走策略 fallback（Steam 为 60s）；再探仍 429 升到 3 分钟，避免擦边误判；
+// 第三次起封顶 10 分钟。成功 HTTP 会清掉连击。
+func NextHTTP429Cooldown(previous, fallback time.Duration) time.Duration {
+	if fallback <= 0 {
+		return 0
+	}
+	if previous <= 0 {
+		return fallback
+	}
+	if previous < HTTP429RetryCooldown {
+		return HTTP429RetryCooldown
+	}
+	return MaxHTTP429Cooldown
+}
+
+// HTTP429CooldownDuration 读出上一次已落库的 HTTP 429 窗口。
+func HTTP429CooldownDuration(until, observed time.Time, reason ReasonCode) time.Duration {
+	if reason != ReasonHTTP429 || until.IsZero() || observed.IsZero() || !until.After(observed) {
+		return 0
+	}
+	return until.Sub(observed)
+}
 
 // Validate rejects reasons that have no approved feedback semantics.
 func (reason ReasonCode) Validate() error {
