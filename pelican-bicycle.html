@@ -67,20 +67,17 @@
       background: #3a9fd4;
     }
 
+    .scroll-far,
+    .scroll-mid,
+    .scroll-near,
+    .scroll-dash {
+      transform-box: fill-box;
+      transform-origin: 0 0;
+    }
     .scroll-far { animation: slide 28s linear infinite; }
     .scroll-mid { animation: slide 16s linear infinite; }
     .scroll-near { animation: slide 3.2s linear infinite; }
     .scroll-dash { animation: slide 1.6s linear infinite; }
-
-    .wheel-spin,
-    .cog-spin {
-      transform-box: fill-box;
-      transform-origin: 50% 50%;
-      animation: spin 0.72s linear infinite;
-    }
-    #rear-wheel { transform-origin: 355px 380px; transform-box: view-box; }
-    #front-wheel { transform-origin: 555px 380px; transform-box: view-box; }
-    #rear-cog { transform-origin: 355px 380px; transform-box: view-box; }
 
     .rider-bounce { animation: bounce 1.6s ease-in-out infinite; }
     .head-bob { transform-box: fill-box; transform-origin: 70% 80%; animation: nod 1.6s ease-in-out infinite; }
@@ -91,12 +88,7 @@
 
     @keyframes slide {
       from { transform: translateX(0); }
-      to { transform: translateX(-960px); }
-    }
-
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
+      to { transform: translateX(-50%); }
     }
 
     @keyframes bounce {
@@ -136,8 +128,8 @@
 
     @media (prefers-reduced-motion: reduce) {
       .scroll-far, .scroll-mid, .scroll-near, .scroll-dash,
-      .wheel-spin, .cog-spin, .rider-bounce, .head-bob,
-      .bill-tip, .pouch-wobble, .wing-flap, .far-wing {
+      .rider-bounce, .head-bob, .bill-tip, .pouch-wobble,
+      .wing-flap, .far-wing {
         animation: none !important;
       }
     }
@@ -185,6 +177,7 @@
       <circle cx="820" cy="78" r="32" fill="var(--sun)"/>
 
       <g class="scroll-far">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <g fill="#dff4ff" opacity="0.92">
           <ellipse cx="120" cy="92" rx="54" ry="22"/>
           <ellipse cx="168" cy="86" rx="40" ry="18"/>
@@ -206,17 +199,20 @@
       </g>
 
       <g class="scroll-far" fill="var(--hill-far)">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <path d="M0 250 C80 200 160 210 240 230 C320 250 400 190 500 220 C600 250 680 200 760 225 C840 250 900 210 960 230 V310 H0 Z"/>
         <path d="M960 250 C1040 200 1120 210 1200 230 C1280 250 1360 190 1460 220 C1560 250 1640 200 1720 225 C1800 250 1860 210 1920 230 V310 H960 Z"/>
       </g>
 
       <g class="scroll-mid" fill="var(--hill-mid)">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <path d="M0 290 C90 250 180 270 270 295 C370 322 450 260 560 292 C650 318 740 270 840 300 C900 318 940 300 960 308 V360 H0 Z"/>
         <path d="M960 290 C1050 250 1140 270 1230 295 C1330 322 1410 260 1520 292 C1610 318 1700 270 1800 300 C1860 318 1900 300 1920 308 V360 H960 Z"/>
       </g>
 
       <rect x="0" y="352" width="960" height="188" fill="var(--grass-dark)"/>
       <g class="scroll-near" fill="var(--grass)">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <path d="M0 352 C70 340 140 358 210 350 C300 340 380 360 470 348 C560 336 650 358 740 346 C820 336 900 354 960 348 V380 H0 Z"/>
         <path d="M960 352 C1030 340 1100 358 1170 350 C1260 340 1340 360 1430 348 C1520 336 1610 358 1700 346 C1780 336 1860 354 1920 348 V380 H960 Z"/>
       </g>
@@ -225,6 +221,7 @@
       <rect x="0" y="378" width="960" height="8" fill="var(--road-edge)"/>
       <rect x="0" y="462" width="960" height="8" fill="var(--road-edge)"/>
       <g class="scroll-dash" fill="var(--dash)">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <rect x="20" y="418" width="70" height="8" rx="3"/>
         <rect x="160" y="418" width="70" height="8" rx="3"/>
         <rect x="300" y="418" width="70" height="8" rx="3"/>
@@ -242,6 +239,7 @@
       </g>
 
       <g class="scroll-near" fill="var(--grass)" opacity="0.95">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <path d="M40 470 C48 448 56 448 62 470 Z"/>
         <path d="M52 472 C62 444 74 444 80 472 Z"/>
         <path d="M210 468 C218 446 228 446 234 468 Z"/>
@@ -259,7 +257,7 @@
       <ellipse cx="455" cy="428" rx="168" ry="14" fill="#1a1c1f" opacity="0.28"/>
 
       <g class="rider-bounce" id="vehicle">
-        <g id="rear-wheel" class="wheel-spin">
+        <g id="rear-wheel">
           <circle cx="355" cy="380" r="50" fill="var(--tire)"/>
           <circle cx="355" cy="380" r="38" fill="#2a2d33"/>
           <g stroke="var(--metal)" stroke-width="1.6">
@@ -278,7 +276,7 @@
           <circle cx="355" cy="380" r="3.5" fill="#444"/>
         </g>
 
-        <g id="front-wheel" class="wheel-spin">
+        <g id="front-wheel">
           <circle cx="555" cy="380" r="50" fill="var(--tire)"/>
           <circle cx="555" cy="380" r="38" fill="#2a2d33"/>
           <g stroke="var(--metal)" stroke-width="1.6">
@@ -315,7 +313,7 @@
         <ellipse cx="396" cy="276" rx="22" ry="8" fill="#2b2e32" transform="rotate(-18 396 276)"/>
         <ellipse cx="396" cy="274" rx="18" ry="5" fill="#4a4e54" transform="rotate(-18 396 274)"/>
 
-        <g id="rear-cog" class="cog-spin">
+        <g id="rear-cog">
           <circle cx="355" cy="380" r="12" fill="none" stroke="#8a9098" stroke-width="4"/>
           <circle cx="355" cy="380" r="7" fill="none" stroke="#b8bcc2" stroke-width="2"/>
         </g>
@@ -387,6 +385,7 @@
 
       <rect x="0" y="470" width="960" height="70" fill="#2a5a32"/>
       <g class="scroll-near">
+        <rect width="1920" height="1" fill="#000" opacity="0" pointer-events="none"/>
         <path d="M80 540 C90 500 110 498 118 540 Z" fill="#24542c"/>
         <path d="M250 540 C262 492 288 490 298 540 Z" fill="#2f6a38"/>
         <path d="M500 540 C512 496 536 494 546 540 Z" fill="#24542c"/>
@@ -412,7 +411,11 @@
       var SHIN = 50;
       var PERIOD = 1600;
 
+      var WHEEL_PERIOD = 720;
       var crank = document.getElementById("crank");
+      var rearWheel = document.getElementById("rear-wheel");
+      var frontWheel = document.getElementById("front-wheel");
+      var rearCog = document.getElementById("rear-cog");
       var chain = document.getElementById("chain");
       var nearThigh = document.getElementById("near-thigh");
       var nearShin = document.getElementById("near-shin");
@@ -471,6 +474,10 @@
         var angle = (now / PERIOD) * Math.PI * 2;
         var deg = (angle * 180) / Math.PI;
         crank.setAttribute("transform", "rotate(" + deg + " " + BB.x + " " + BB.y + ")");
+        var wheelDeg = ((now / WHEEL_PERIOD) * 360) % 360;
+        rearWheel.setAttribute("transform", "rotate(" + wheelDeg + " 355 380)");
+        frontWheel.setAttribute("transform", "rotate(" + wheelDeg + " 555 380)");
+        rearCog.setAttribute("transform", "rotate(" + wheelDeg + " 355 380)");
 
         var pN = pedalAt(angle);
         var pF = pedalAt(angle + Math.PI);
