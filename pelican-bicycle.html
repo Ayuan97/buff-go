@@ -72,8 +72,15 @@
     .scroll-near { animation: slide 3.2s linear infinite; }
     .scroll-dash { animation: slide 1.6s linear infinite; }
 
-    .wheel-spin { transform-origin: center; animation: spin 0.72s linear infinite; }
-    .cog-spin { transform-origin: center; animation: spin 0.72s linear infinite; }
+    .wheel-spin,
+    .cog-spin {
+      transform-box: fill-box;
+      transform-origin: 50% 50%;
+      animation: spin 0.72s linear infinite;
+    }
+    #rear-wheel { transform-origin: 355px 380px; transform-box: view-box; }
+    #front-wheel { transform-origin: 555px 380px; transform-box: view-box; }
+    #rear-cog { transform-origin: 355px 380px; transform-box: view-box; }
 
     .rider-bounce { animation: bounce 1.6s ease-in-out infinite; }
     .head-bob { transform-box: fill-box; transform-origin: 70% 80%; animation: nod 1.6s ease-in-out infinite; }
